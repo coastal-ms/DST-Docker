@@ -12,4 +12,4 @@ The Docker edition should require no custom Windows executable. Installer progre
 
 Full feature parity is still in progress. Keep current DST navigation and workflows; adapt the hosting backend and improve map presentation where needed. Browser access to a player's own client configuration requires an explicit browser file workflow. Memory balancing must be optional, with its off setting following current DST behavior. VM-data import and Discord portal login are deferred.
 
-The initial source snapshot comes from Docker development checkpoint `bce85944`. Runtime credentials, databases, game saves, downloaded official packages, and private test artifacts are outside this repository.
+The initial source snapshot came from Docker development checkpoint `bce85944`; this update includes the qualified source through `97efae44`, including the Linux user-INI startup fix and browser settings flow. Runtime credentials, databases, game saves, downloaded official packages, and private test artifacts are outside this repository.

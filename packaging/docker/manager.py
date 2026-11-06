@@ -1115,13 +1115,14 @@ def dispatch(request, engine=None):
             if 'publishGateway' in request and (action!='services.start' or type(request['publishGateway']) is not bool):raise ValueError('Only a typed start can select gateway publication.')
             if action=='logs.export' and request.get('scope') not in {'battlegroup','operator'}:raise ValueError('Choose battlegroup or operator logs.')
             if 'requestId' in request:
-                if action!='services.restart' or not isinstance(request['requestId'],str) or not re.fullmatch(r'[a-f0-9]{32}',request['requestId']):
-                    raise ValueError('Invalid scheduled restart request identity.')
+                if action not in {'services.restart','updates.apply'} or not isinstance(request['requestId'],str) or not re.fullmatch(r'[a-f0-9]{32}',request['requestId']):
+                    raise ValueError('Invalid scheduled maintenance request identity.')
                 if any(entry.get('phase') in {'preparing','running'} or entry.get('verification',{}).get('phase') in {'preparing','running'} for entry in state.get('backups',{}).values()):
                     raise OperationBusyError('A backup or restore rehearsal is still running.')
             state['operation']={'id':uuid.uuid4().hex,'action':action,'phase':'running','startedAt':time.time()}
             if 'requestId' in request:
                 state['operation']['requestId']=request['requestId']
+                if action=='updates.apply':state['operation']['expectedBuild']=request['expectedBuild']
             if action=='maps.restart':state['operation']['partition']=request.get('partition')
             save(state)
             # Persist before dispatch. Browser disconnects do not cancel an

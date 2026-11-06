@@ -6,6 +6,7 @@ function Test-DuneDockerRouteQualified {
     if($Path -eq '/api/docker/memory-balancing' -and $Method -in @('GET','PUT')){return $true}
     if($Method -eq 'GET' -and $Path -cmatch '^/api/docker/log-exports/[a-f0-9]{32}$'){return $true}
     if($Method -eq 'POST'){
+        if($Path -eq '/api/docker/client-files/transform'){return $true}
         if($Path -eq '/api/restart-schedule/check-update'){return $true}
         if($Path -eq '/api/map-spinup/CB_Story_DestroyedZanovar/party-sharing'){return $true}
         if($Path -cmatch '^/api/map-spinup/[A-Za-z0-9_]+$'){return $true}

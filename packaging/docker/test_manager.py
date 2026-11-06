@@ -139,6 +139,16 @@ class ManagerTests(unittest.TestCase):
             with self.assertRaises(manager.OperationBusyError):manager.dispatch({'action':'services.restart','requestId':'b'*32},FakeEngine())
             save.assert_not_called();self.assertNotIn('operation',state)
 
+    def test_scheduled_update_build_and_request_are_persisted_before_background_dispatch(self):
+        state={'id':'a'*32}
+        request={'action':'updates.apply','requestId':'b'*32,'expectedBuild':'121','allowOnline':True}
+        with patch.object(manager,'project_state',return_value=state),patch.object(manager,'save') as save,\
+             patch.object(manager,'public_state',side_effect=lambda value,engine:value),patch('manager.threading.Thread') as thread:
+            reply=manager.dispatch(request,FakeEngine())
+            self.assertEqual(reply['operation']['requestId'],'b'*32)
+            self.assertEqual(reply['operation']['expectedBuild'],'121')
+            save.assert_called_once_with(state);thread.return_value.start.assert_called_once()
+
     def test_party_sharing_persists_only_its_ini_setting_without_restarting_services(self):
         state={'id':'a'*32,'services':{'director':{'id':'own-director'}},'scaler':{'id':'own-scaler'}}
         engine=FakeEngine();engine.upload_component_files=Mock();engine.lifecycle=Mock()

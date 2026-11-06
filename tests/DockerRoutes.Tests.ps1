@@ -11,6 +11,7 @@ Describe 'Docker adapter routing boundary' {
         @{Method='DELETE';Path='/api/gameplay/item-packages'},
         @{Method='POST';Path='/api/gameplay/players/journey/reset'},
         @{Method='POST';Path='/api/restart-schedule/check-update'},
+        @{Method='POST';Path='/api/docker/client-files/transform'},
         @{Method='POST';Path='/api/gameplay/players/set-item-water'},
         @{Method='POST';Path='/api/gameplay/players/reset-all-specs'},
         @{Method='POST';Path='/api/gameplay/players/set-weapon-ammo'},
@@ -42,6 +43,8 @@ Describe 'Docker adapter routing boundary' {
         @{Method='POST';Path='/api/map-spinup/../other'},
         @{Method='POST';Path='/api/map-spinup/SH_HarkoVillage/party-sharing'},
         @{Method='POST';Path='/api/system/reveal-config'}
+        @{Method='GET';Path='/api/docker/client-files/transform'},
+        @{Method='POST';Path='/api/docker/client-files/transform/other'}
     ) {
         param($Method,$Path)
         Test-DuneDockerRouteQualified -Method $Method -Path $Path | Should -BeFalse

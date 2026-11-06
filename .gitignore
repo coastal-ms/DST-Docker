@@ -64,3 +64,6 @@ tools/atlas/__pycache__/
 
 # Docker observer Python bytecode
 /packaging/docker/__pycache__/
+
+# Local player INI backups produced when running helpers from source.
+/app/DST/INI Backups/

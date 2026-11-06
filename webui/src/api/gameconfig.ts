@@ -1,5 +1,6 @@
 // GameConfig API — typed wrappers around /api/gameconfig/*
 import { api, withOnlinePlayerGuard } from './client'
+import { applyBrowserClientSettings, downloadBrowserClientFile, getBrowserClientInfo, setBrowserClientEngineEnabled } from './browserClientFiles'
 import type {
   GameConfigSchemaResponse,
   GameConfigExperimentalCategoriesResponse,
@@ -163,6 +164,7 @@ export function saveGameConfigRaw(updates: GameConfigRawUpdate[]) {
 }
 
 export function saveLabLocal(updates: GameConfigRawUpdate[], validateOnly = false) {
+  if (import.meta.env.VITE_DST_EDITION === 'docker') return applyBrowserClientSettings(updates, validateOnly)
   return api<GameConfigClientApplyResult>('/api/gameconfig/client/lab', {
     method: 'PUT', body: JSON.stringify({ approved: true, updates, validateOnly }),
   })
@@ -186,10 +188,12 @@ export function deleteGameConfigBackups(paths: string[]) {
 // --- Local client config (admin's own machine) -----------------------------
 
 export function getGameConfigClient() {
+  if (import.meta.env.VITE_DST_EDITION === 'docker') return getBrowserClientInfo()
   return api<GameConfigClientInfo>('/api/gameconfig/client')
 }
 
 export function setGameConfigClientDir(dir: string) {
+  if (import.meta.env.VITE_DST_EDITION === 'docker') return getBrowserClientInfo()
   return api<GameConfigClientInfo>('/api/gameconfig/client/dir', {
     method: 'PUT',
     body: JSON.stringify({ dir }),
@@ -197,6 +201,7 @@ export function setGameConfigClientDir(dir: string) {
 }
 
 export function setGameConfigClientEngineEnabled(enabled: boolean, dir?: string) {
+  if (import.meta.env.VITE_DST_EDITION === 'docker') return setBrowserClientEngineEnabled(enabled)
   return api<GameConfigClientEngineGateResult>('/api/gameconfig/client/engine', {
     method: 'PUT',
     body: JSON.stringify({ enabled, ...(dir ? { dir } : {}) }),
@@ -204,6 +209,7 @@ export function setGameConfigClientEngineEnabled(enabled: boolean, dir?: string)
 }
 
 export function applyGameConfigClient(items: GameConfigClientApplyItem[], dir?: string) {
+  if (import.meta.env.VITE_DST_EDITION === 'docker') return applyBrowserClientSettings(items.map(item => ({ file: item.file, section: item.section, key: item.key, value: item.value })), false, false)
   return api<GameConfigClientApplyResult>('/api/gameconfig/client/apply', {
     method: 'PUT',
     body: JSON.stringify({
@@ -214,6 +220,7 @@ export function applyGameConfigClient(items: GameConfigClientApplyItem[], dir?: 
 }
 
 export function openGameConfigClientFile(file: 'game' | 'engine' = 'game', dir?: string) {
+  if (import.meta.env.VITE_DST_EDITION === 'docker') return downloadBrowserClientFile(file)
   return api<{ ok: boolean; path: string }>('/api/gameconfig/client/open', {
     method: 'POST',
     body: JSON.stringify({ file, ...(dir ? { dir } : {}) }),

@@ -43,6 +43,10 @@ function Read-DuneDockerRestartJournal {
          ($value.phase -eq 'running' -and $value.operationId -notmatch '^[a-f0-9]{32}$'))){
         throw 'The persisted Docker restart identity needs review. Automatic restart was blocked.'
     }
+    if(($value.operationAction -and $value.operationAction -notin @('services.restart','updates.apply')) -or
+        ($value.operationAction -eq 'updates.apply' -and $value.expectedBuild -notmatch '^\d{1,18}$')){
+        throw 'The persisted Docker update identity needs review. Automatic maintenance was blocked.'
+    }
     return $value
 }
 
@@ -80,7 +84,9 @@ function Complete-DuneDockerScheduledRestart {
         # A crash between dispatch and recording its returned identity is
         # ambiguous. Reconcile only the single new restart from that interval.
         $operation=$Metadata.operation
-        if($operation.action -eq 'services.restart' -and $operation.requestId -eq $Run.requestId){
+        $expectedAction=if($Run.operationAction){$Run.operationAction}else{'services.restart'}
+        if($operation.action -eq $expectedAction -and $operation.requestId -eq $Run.requestId -and
+            ($expectedAction -ne 'updates.apply' -or $operation.expectedBuild -ceq $Run.expectedBuild)){
             $Run.operationId=$operation.id;$Run.phase='running'
             Save-DuneDockerRestartJournal $Run
         }else{
@@ -101,7 +107,7 @@ function Complete-DuneDockerScheduledRestart {
         $core=@($Metadata.services|Where-Object {$_.component -in @('director','text-router','gateway') -and $_.state -eq 'running'})
         $queues=@($Metadata.connectionServices|Where-Object {$_.health -eq 'healthy'})
         if($expected.Count -gt 0 -and $unready.Count -eq 0 -and $core.Count -eq 3 -and $queues.Count -eq 2 -and $Metadata.database.health -eq 'healthy'){
-            $Run.phase='completed';$State.lastResult='Scheduled Docker restart completed; selected maps are game-ready.'
+            $Run.phase='completed';$State.lastResult=$(if($Run.operationAction -eq 'updates.apply'){'Scheduled Docker update completed; selected maps are game-ready.'}else{'Scheduled Docker restart completed; selected maps are game-ready.'})
         }elseif($Now.ToUnixTimeSeconds()-[double]$Run.startedAt -gt 900){
             $Run.phase='failed';$State.lastResult='Scheduled restart has not reached game readiness after 15 minutes. Check Server Overview.'
         }else{return}
@@ -154,7 +160,8 @@ function Invoke-DuneDockerRestartScheduleTick {
         # updates and lifecycle operations. Leave a busy day unconsumed so the
         # next tick can retry within the same maintenance window.
         $activeBackups=@($metadata.backups|Where-Object {$_.phase -in @('preparing','running') -or $_.verification.phase -in @('preparing','running')})
-        $busy=$metadata.operation.phase -eq 'running' -or $activeBackups.Count -gt 0 -or $metadata.restore.phase -in @('stopping','preparing','restoring','recovering','recovery-required')
+        $busy=$metadata.operation.phase -eq 'running' -or $activeBackups.Count -gt 0 -or $metadata.restore.phase -in @('stopping','preparing','restoring','recovering','recovery-required') -or
+            ([bool]$metadata.update -and $metadata.update.phase -notin @('completed','rolled-back','failed-preflight'))
         if($busy -and $Now -ge $window.atUtc){
             if($run.phase -ne 'deferred' -or $run.date -ne $window.date -or [string]$run.scheduleRevision -ne $revision){
                 $run=@{date=$window.date;phase='deferred';scheduleRevision=$revision}
@@ -187,12 +194,27 @@ function Invoke-DuneDockerRestartScheduleTick {
             }
         }
         if($Now -lt $window.atUtc -or $Now -gt $window.endUtc){return}
-        if($state.applyFuncomUpdates){throw 'Native scheduled Funcom updates are not qualified yet; the scheduled restart was blocked.'}
+        $action='services.restart';$build=$null
+        if($state.applyFuncomUpdates){
+            # Already inside the schedule lock; persist the checked metadata
+            # here rather than recursively acquiring it through -Persist.
+            $version=Get-DuneDockerFuncomUpdateStatus
+            if(-not $version.ok){throw ('Scheduled update check failed before stopping the world: '+$version.message)}
+            if([long]$version.latestBuild -lt [long]$version.installedBuild){throw 'Scheduled downgrade was blocked before stopping the world.'}
+            $state.updateAvailable=[bool]$version.available;$state.installedBuild=[string]$version.installedBuild
+            $state.latestBuild=[string]$version.latestBuild;$state.updateCheckedAt=$version.checkedAt;Save-DuneRestartSchedule $state
+            if($version.available){$action='updates.apply';$build=[string]$version.latestBuild}
+        }
         $synced=Sync-DuneStartupConsoleVariableOverrides -Ip docker
         if($synced.Success -ne $true){throw 'Scheduled startup settings could not be verified; no restart was issued.'}
-        $run=@{date=$window.date;phase='dispatching';startedAt=$Now.ToUnixTimeSeconds();requestId=[guid]::NewGuid().ToString('N');timeZone=$window.timeZone;scheduleRevision=$revision}
+        $run=@{date=$window.date;phase='dispatching';startedAt=$Now.ToUnixTimeSeconds();requestId=[guid]::NewGuid().ToString('N');timeZone=$window.timeZone;scheduleRevision=$revision;operationAction=$action}
+        if($build){$run.expectedBuild=$build}
         Save-DuneDockerRestartJournal $run
-        $reply=Invoke-DuneDockerManager -Request @{action='services.restart';requestId=$run.requestId}
+        $request=@{action=$action;requestId=$run.requestId}
+        # The saved daily maintenance schedule already authorizes disruption
+        # while occupied, just as the existing scheduled restart does.
+        if($build){$request.expectedBuild=$build;$request.allowOnline=$true}
+        $reply=Invoke-DuneDockerManager -Request $request
         if(-not $reply.ok -and $reply.code -eq 'operation-busy'){
             $run.phase='deferred';$state.lastResult='Scheduled restart deferred until the current server operation finishes.'
             Save-DuneDockerRestartJournal $run;Save-DuneRestartSchedule $state

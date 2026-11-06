@@ -1,3 +1,11 @@
+Register-DuneRoute -Method POST -Path '/api/docker/client-files/transform' -LocalOnly -Handler {
+    param($req,$res,$routeParams,$body)
+    if($env:DST_HOSTING_BACKEND -ne 'docker'){Write-DuneError -Response $res -Status 404 -Message 'Docker hosting is not enabled.';return}
+    if($body -isnot [hashtable]){Write-DuneError -Response $res -Status 400 -Message 'Supply the selected client files.';return}
+    try{Write-DuneJson -Response $res -Body (Convert-DuneBrowserClientSettings -Request $body)}
+    catch{Write-DuneError -Response $res -Status 400 -Message $_.Exception.Message}
+}
+
 Register-DuneRoute -Method GET -Path '/api/docker/memory-balancing' -LocalOnly -Handler {
     param($req,$res,$routeParams,$body)
     if($env:DST_HOSTING_BACKEND -ne 'docker'){Write-DuneError -Response $res -Status 404 -Message 'Docker hosting is not enabled.';return}

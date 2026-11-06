@@ -51,6 +51,7 @@ import { BaseBackupGuardPanel } from './gameconfig/BaseBackupGuardPanel'
 import { isLocalViewer } from '../util/viewer'
 import { useSettingsDraft } from './gameconfig/settingsApplyContext'
 import { LabSaveReview } from './gameconfig/LabSaveReview'
+import { chooseBrowserClientFolder } from '../api/browserClientFiles'
 
 export const EXPERIMENTAL_BLOCKED_DEFAULT_TARGETS = new Set([
   'game||/script/dunesandbox.timeofdaysettings||m_starttime',
@@ -445,6 +446,7 @@ function groupExperimental(cats: GameConfigCategory[]): GameConfigCategory[] {
 }
 
 export function GameConfig({ mode = 'standard', embedded = false, section = 'advanced' }: { mode?: 'standard' | 'experimental'; embedded?: boolean; section?: 'advanced' | 'client' | 'tools' } = {}) {
+  const dockerEdition = import.meta.env.VITE_DST_EDITION === 'docker'
   const contextual = useCommandDeck()
   const Guidance = contextual ? 'details' : 'div'
   const experimentalPage = mode === 'experimental'
@@ -529,6 +531,12 @@ export function GameConfig({ mode = 'standard', embedded = false, section = 'adv
     setClientErr(null)
     setClientBusy(true)
     try {
+      if (dockerEdition) {
+        const info = await chooseBrowserClientFolder()
+        setClientInfo(info); setClientDirInput(info.dir)
+        setClientMsg('Client folder selected in this browser. Reviewed writes are backed up in its DST INI Backups folder.')
+        return
+      }
       const r = await api<{ ok: boolean; cancelled: boolean; path: string }>('/api/browse-path', {
         method: 'POST',
         body: JSON.stringify({
@@ -599,7 +607,7 @@ export function GameConfig({ mode = 'standard', embedded = false, section = 'adv
     setClientBusy(true)
     try {
       const r = await openGameConfigClientFile(file, clientInfo?.dir)
-      setClientMsg(`Opened ${r.path} in Notepad.`)
+      setClientMsg(dockerEdition ? `Downloaded ${r.path}.` : `Opened ${r.path} in Notepad.`)
       window.setTimeout(() => setClientMsg(null), 5000)
     } catch (e) {
       setClientErr(e instanceof Error ? e.message : String(e))
@@ -863,7 +871,7 @@ export function GameConfig({ mode = 'standard', embedded = false, section = 'adv
   const clientDifferences = allClientDifferences.filter(item => !skippedDifferences.includes(differenceIdentity(item))
     && (compareOpen || dirtyKeys.includes(item.key)))
   const propagationItems = schemaWithLoadedExperimental.flatMap(category => category.fields)
-    .filter(field => field.clientApply && dirtyKeys.includes(field.key) && localViewer
+    .filter(field => field.clientApply && dirtyKeys.includes(field.key) && localViewer && (!dockerEdition || clientInfo?.dirExists === true)
       && !allClientDifferences.some(item => item.file === field.file && item.key === field.key && skippedDifferences.includes(differenceIdentity(item))))
     .map(field => ({ file: field.file, section: field.section, key: field.key, value: values[field.key] ?? '' }))
   const skipDifferences = (items: typeof allClientDifferences) => {
@@ -1513,18 +1521,18 @@ export function GameConfig({ mode = 'standard', embedded = false, section = 'adv
                   onClick={() => void onOpenInEditor('game')}
                   disabled={clientBusy}
                   className="btn-secondary"
-                  title="Open local client Game.ini in Notepad"
+                  title={dockerEdition ? 'Download the selected Game.ini' : 'Open local client Game.ini in Notepad'}
                 >
-                  <Icon name="ExternalLink" size={14} /> Open local Game.ini
+                  <Icon name="ExternalLink" size={14} /> {dockerEdition ? 'Download Game.ini' : 'Open local Game.ini'}
                 </button>
                 <button
                   type="button"
                   onClick={() => void onOpenInEditor('engine')}
                   disabled={clientBusy}
                   className="btn-secondary"
-                  title="Open local client Engine.ini in Notepad"
+                  title={dockerEdition ? 'Download the selected Engine.ini' : 'Open local client Engine.ini in Notepad'}
                 >
-                  <Icon name="ExternalLink" size={14} /> Open local Engine.ini
+                  <Icon name="ExternalLink" size={14} /> {dockerEdition ? 'Download Engine.ini' : 'Open local Engine.ini'}
                 </button>
                 <button
                   type="button"
@@ -1546,6 +1554,7 @@ export function GameConfig({ mode = 'standard', embedded = false, section = 'adv
             }
           >
             <p className="text-xs text-text-muted mb-3">These settings affect this PC on every server. Close Dune before applying changes.</p>
+            {dockerEdition && <p className="mb-3 text-xs text-text-muted">Choose your Dune client config folder with Browse in a local Chrome or Edge browser. This grants access only to the selected folder for this browser session. Until a folder is selected, Review &amp; Apply changes server files only. Browser access cannot detect whether Dune is running; close the game before saving player files.</p>}
             <label className="mb-3 flex items-start gap-3 rounded-lg border border-warning/30 bg-warning/5 p-3 cursor-pointer select-none">
               <input
                 type="checkbox"
@@ -1616,6 +1625,7 @@ export function GameConfig({ mode = 'standard', embedded = false, section = 'adv
               <input
                 type="text"
                 value={clientDirInput}
+                readOnly={dockerEdition}
                 onChange={e => setClientDirInput(e.target.value)}
                 spellCheck={false}
                 placeholder={clientInfo?.default ?? '%LOCALAPPDATA%\\DuneSandbox\\Saved\\Config\\Windows'}

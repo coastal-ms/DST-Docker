@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { getGameConfigClient, saveLabLocal } from '../../api/gameconfig'
 import type { GameConfigClientInfo, GameConfigRawUpdate } from '../../api/types'
 import { isLocalViewer } from '../../util/viewer'
+import { browserClientFolderSelected, chooseBrowserClientFolder } from '../../api/browserClientFiles'
 
 export function LabSaveReview({ updates, serverPaths, serverAvailable = true, serverOnly = false, onServerSave, onDone, onCancel }: {
   serverOnly?: boolean
@@ -13,9 +14,10 @@ export function LabSaveReview({ updates, serverPaths, serverAvailable = true, se
   onCancel: () => void
 }) {
   const localViewer = isLocalViewer()
+  const docker = import.meta.env.VITE_DST_EDITION === 'docker'
   const [client, setClient] = useState<GameConfigClientInfo | null>(null)
   const [localError, setLocalError] = useState('')
-  const [local, setLocal] = useState(localViewer && !serverOnly)
+  const [local, setLocal] = useState(localViewer && !serverOnly && (!docker || browserClientFolderSelected()))
   const [server, setServer] = useState(serverAvailable)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -58,8 +60,12 @@ export function LabSaveReview({ updates, serverPaths, serverAvailable = true, se
     <section role="dialog" aria-modal="true" aria-labelledby="lab-save-title" className="card p-5 w-full max-w-2xl max-h-[85vh] overflow-y-auto space-y-4">
       <h2 id="lab-save-title" className="text-lg font-semibold">Review Lab save destinations</h2>
       <p className="text-sm text-text-muted">Choose where to save. Local files affect Solo and this PC’s player. Server files take effect after Apply server settings.</p>
-      <label className="flex gap-2"><input type="checkbox" checked={local} disabled={serverOnly || !localViewer || busy || localSaved} onChange={e => setLocal(e.target.checked)} />
+      <label className="flex gap-2"><input type="checkbox" checked={local} disabled={serverOnly || !localViewer || busy || localSaved || (docker && !client?.dirExists)} onChange={e => setLocal(e.target.checked)} />
         Save to this PC’s local Solo/player files {localSaved && '(saved)'}</label>
+      {docker && localViewer && !serverOnly && !client?.dirExists && <button type="button" className="btn-secondary" disabled={busy} onClick={() => {
+        setBusy(true); setError('')
+        void chooseBrowserClientFolder().then(info => { setClient(info); setLocal(true) }).catch(e => setError(e instanceof Error ? e.message : String(e))).finally(() => setBusy(false))
+      }}>Choose client config folder</button>}
       {localViewer ? <div className="text-xs text-text-muted break-all">
         {client ? [...new Set(updates.map(u => u.file))].map(file => <div key={file}>{file === 'engine' ? client.engine.path : (client.game ?? client).path}</div>) : localError || 'Reading local file locations…'}
         <p>Approval applies only to the listed edits. Existing files are backed up; unrelated values stay intact. Close Dune: Awakening before saving local files.</p>

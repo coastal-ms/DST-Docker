@@ -26,9 +26,11 @@ it('keeps the existing schedule card and saves the explicit Docker time zone', a
   expect(screen.getByText(/inside the Docker stack while your browser is closed/)).toBeInTheDocument()
   fireEvent.change(zone, { target: { value: 'Europe/London' } })
   fireEvent.click(screen.getByRole('checkbox', { name: 'Enable daily restart' }))
+  const updates = screen.getByRole('checkbox', { name: /Apply available Funcom server updates/ })
+  expect(updates).toBeEnabled(); expect(updates).not.toBeChecked()
+  fireEvent.click(updates)
   fireEvent.click(screen.getByRole('button', { name: /Save/ }))
-  await waitFor(() => expect(request.save).toHaveBeenCalledWith(expect.objectContaining({ enabled: true, timeZone: 'Europe/London', time: '04:00' })))
-  expect(screen.getByRole('checkbox', { name: /Apply available Funcom server updates/ })).toBeDisabled()
+  await waitFor(() => expect(request.save).toHaveBeenCalledWith(expect.objectContaining({ enabled: true, timeZone: 'Europe/London', time: '04:00', applyFuncomUpdates: true })))
   expect(request.check).not.toHaveBeenCalled()
 })
 

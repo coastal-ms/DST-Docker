@@ -46,4 +46,8 @@ cd /home/dune/server
 # same packaged binary after dropping privileges so shutdown signals reach it.
 binary=/home/dune/server/DuneSandbox/Binaries/Linux/DuneSandboxServer-Linux-Shipping
 chmod +x "$binary"
+# setpriv changes credentials without applying a login user's environment.
+# Unreal resolves its per-user INI layer through HOME; retaining /root here
+# silently skips the authoritative UserGame.ini/UserEngine.ini directory.
+export HOME=/home/dune USER=dune LOGNAME=dune XDG_CONFIG_HOME=/home/dune/.config
 exec setpriv --reuid=dune --regid=nogroup --init-groups "$binary" DuneSandbox "$@"

@@ -258,15 +258,13 @@ export function ScheduledRestarts() {
               <input
                 type="checkbox"
                 checked={applyFuncomUpdates}
-                disabled={sched?.hostingBackend === 'docker' && !applyFuncomUpdates}
-                title={sched?.hostingBackend === 'docker' ? 'Automatic updates are not available in this Docker preview yet.' : undefined}
                 onChange={e => setApplyFuncomUpdates(e.target.checked)}
                 className="h-4 w-4 shrink-0 accent-accent mt-0.5"
               />
               <div>
                 <span className="text-sm font-medium block leading-none">Apply available Funcom server updates</span>
                 <span className="text-[11px] text-text-dim mt-1 block">
-                  {sched?.hostingBackend === 'docker' ? 'Automatic server updates are not available in this Docker preview yet.' : <>Off by default. Every scheduled restart checks for a Funcom self-hosted server update.
+                  {sched?.hostingBackend === 'docker' ? <>Off by default. When enabled, the Docker service checks at scheduled maintenance and applies an available official update with a verified backup and recovery workflow. Updates disconnect players and may take several minutes. Review saved settings after a new Funcom build.</> : <>Off by default. Every scheduled restart checks for a Funcom self-hosted server update.
                   When enabled, DST applies an available update instead of running a normal restart.
                   Unattended updates can take 5–20 minutes and disconnect players. A Funcom update may rename
                   or remove an INI setting or CVar, so a saved DST setting can stop working until it is reviewed

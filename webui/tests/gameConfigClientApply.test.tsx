@@ -136,6 +136,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup()
   vi.clearAllMocks()
+  vi.unstubAllEnvs()
 })
 
 async function openComparison(user: ReturnType<typeof userEvent.setup>) {
@@ -145,6 +146,21 @@ async function openComparison(user: ReturnType<typeof userEvent.setup>) {
 }
 
 describe('Game Config advanced client compatibility action', () => {
+  it('saves a Docker server draft without calling the unavailable host-PC adapter when no browser folder was selected', async () => {
+    vi.stubEnv('VITE_DST_EDITION', 'docker')
+    const user = userEvent.setup(), drafts = new Map<string, SettingsDraft>()
+    const controller = { register: (id: string, draft: SettingsDraft | null) => { if (draft) drafts.set(id, draft); else drafts.delete(id) }, review: vi.fn(), locked: false }
+    vi.mocked(getGameConfigClient).mockResolvedValue({ ...clientInfo(false), dirExists: false })
+    vi.mocked(saveGameConfig).mockResolvedValue({ ok: true, applied: 1, source: 'installed', game: config.game, engine: config.engine })
+    render(<SettingsApplyContext.Provider value={controller}><GameConfig embedded /></SettingsApplyContext.Provider>)
+    const input = await screen.findByDisplayValue('70')
+    await user.clear(input); await user.type(input, '125')
+    const draft = drafts.get('advanced')!
+    expect(draft.changes[0].target).toMatch(/^Server · UserGame.ini/)
+    await draft.validate!(); await act(async () => { await draft.apply() })
+    expect(saveGameConfig).toHaveBeenCalledExactlyOnceWith({ PlayerInventoryStartingSize: '125' })
+    expect(saveLabLocal).not.toHaveBeenCalled()
+  })
   it('ignores numeric formatting but preserves missing, empty, zero and text distinctions', () => {
     const fields = [
       { file: 'game' as const, section: 'Manual', key: 'Volume', label: 'Volume', type: 'float' as const },

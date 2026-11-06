@@ -7,6 +7,7 @@ BeforeAll {
     function global:Sync-DuneStartupConsoleVariableOverrides {param($Ip)}
     function global:Send-V6GenericBroadcast {param($Title,$Body,$DurationSec)}
     function global:Get-DuneDockerStatus {param([switch]$LifecycleOnly)}
+    function global:Get-DuneDockerFuncomUpdateStatus {}
 }
 
 Describe 'Native daily maintenance execution' {
@@ -19,19 +20,49 @@ Describe 'Native daily maintenance execution' {
                 @{component='game-1';state='running';gameReady=$true;desiredState='running'})}
         $state=Get-DuneRestartScheduleDefault;$state.enabled=$true;$state.timeZone='America/Los_Angeles';Save-DuneRestartSchedule $state
         Mock Sync-DuneStartupConsoleVariableOverrides {@{Success=$true}}
+        Mock Get-DuneDockerFuncomUpdateStatus {@{ok=$true;available=$true;installedBuild='120';latestBuild='121';checkedAt='2026-11-10T12:00:00Z'}}
         Mock Send-V6GenericBroadcast {@{ok=$true}}
         Mock Send-DuneDiscordWebhook {@{ok=$true}}
         Mock Send-DuneDiscordEmbed {@{ok=$true}}
         Mock Invoke-DuneDockerManager {
             param($Request)
-            if($Request.action -eq 'services.restart'){
-                $script:metadata.operation=@{id=('b'*32);action='services.restart';phase='running';requestId=$Request.requestId}
+            if($Request.action -in @('services.restart','updates.apply')){
+                $script:metadata.operation=@{id=('b'*32);action=$Request.action;phase='running';requestId=$Request.requestId;expectedBuild=$Request.expectedBuild}
                 $script:metadata.services[-1].gameReady=$false
             }
             return @{ok=$true;data=$script:metadata}
         }
     }
     AfterEach {$env:DST_HOSTING_BACKEND=$script:oldBackend;$env:LOCALAPPDATA=$script:oldLocal}
+
+    It 'dispatches one correlated native update for an opted-in schedule and waits for readiness' {
+        $state=Get-DuneRestartSchedule;$state.applyFuncomUpdates=$true;Save-DuneRestartSchedule $state
+        Invoke-DuneDockerRestartScheduleTick -Now ([DateTimeOffset]'2026-11-10T12:00:00Z')
+        Invoke-DuneDockerRestartScheduleTick -Now ([DateTimeOffset]'2026-11-10T12:00:30Z')
+        Should -Invoke Invoke-DuneDockerManager -Times 1 -ParameterFilter {$Request.action -eq 'updates.apply' -and $Request.expectedBuild -ceq '121' -and $Request.allowOnline -eq $true -and $Request.requestId -match '^[a-f0-9]{32}$'}
+        Should -Invoke Invoke-DuneDockerManager -Times 0 -ParameterFilter {$Request.action -eq 'services.restart'}
+        $run=Read-DuneDockerRestartJournal;$run.operationAction|Should -Be 'updates.apply';$run.expectedBuild|Should -BeExactly '121'
+        $script:metadata.operation.phase='completed';$script:metadata.services[-1].gameReady=$true
+        Invoke-DuneDockerRestartScheduleTick -Now ([DateTimeOffset]'2026-11-10T12:02:00Z')
+        (Read-DuneDockerRestartJournal).phase|Should -Be 'completed'
+        (Get-DuneRestartSchedule).lastResult|Should -Match 'update completed.*game-ready'
+    }
+
+    It 'uses the normal restart when an opted-in update check finds the installed build current' {
+        $state=Get-DuneRestartSchedule;$state.applyFuncomUpdates=$true;Save-DuneRestartSchedule $state
+        Mock Get-DuneDockerFuncomUpdateStatus {@{ok=$true;available=$false;installedBuild='121';latestBuild='121';checkedAt='2026-11-10T12:00:00Z'}}
+        Invoke-DuneDockerRestartScheduleTick -Now ([DateTimeOffset]'2026-11-10T12:00:00Z')
+        Should -Invoke Invoke-DuneDockerManager -Times 1 -ParameterFilter {$Request.action -eq 'services.restart'}
+        Should -Invoke Invoke-DuneDockerManager -Times 0 -ParameterFilter {$Request.action -eq 'updates.apply'}
+    }
+
+    It 'leaves the world untouched when the opted-in update build cannot be checked' {
+        $state=Get-DuneRestartSchedule;$state.applyFuncomUpdates=$true;Save-DuneRestartSchedule $state
+        Mock Get-DuneDockerFuncomUpdateStatus {@{ok=$false;message='Metadata unavailable'}}
+        {Invoke-DuneDockerRestartScheduleTick -Now ([DateTimeOffset]'2026-11-10T12:00:00Z')}|Should -Throw '*before stopping*'
+        Should -Invoke Sync-DuneStartupConsoleVariableOverrides -Times 0
+        Should -Invoke Invoke-DuneDockerManager -Times 0 -ParameterFilter {$Request.action -in @('services.restart','updates.apply')}
+    }
 
     It 'broadcasts once before the configured time and dispatches one correlated restart' {
         Invoke-DuneDockerRestartScheduleTick -Now ([DateTimeOffset]'2026-11-10T11:51:00Z')
@@ -187,11 +218,17 @@ Describe 'Native daily maintenance execution' {
         Should -Invoke Invoke-DuneDockerManager -Times 0 -ParameterFilter {$Request.action -eq 'services.restart'}
     }
 
-    It 'rejects an invalid time zone and unqualified automatic updates without saving' {
+    It 'rejects an invalid time zone without saving' {
         $before=Get-Content (Get-DuneRestartStatePath) -Raw
         (Set-DuneRestartSchedule -Enabled $true -Time '04:00' -TimeZone 'not/a/timezone').status|Should -Be 400
-        (Set-DuneRestartSchedule -Enabled $true -Time '04:00' -ApplyFuncomUpdates $true).status|Should -Be 501
         (Get-Content (Get-DuneRestartStatePath) -Raw)|Should -BeExactly $before
+    }
+
+    It 'saves explicit automatic update opt-in only when the schedule worker is alive' {
+        Write-DuneDockerSchedulerJson -Path (Get-DuneDockerSchedulerHealthPath) -Value @{running=$true;lastTickUtc=[DateTimeOffset]::UtcNow.ToString('o');error=''}
+        $result=Set-DuneRestartSchedule -Enabled $true -Time '04:00' -TimeZone 'America/Los_Angeles' -ApplyFuncomUpdates $true
+        $result.ok|Should -BeTrue
+        (Get-DuneRestartSchedule).applyFuncomUpdates|Should -BeTrue
     }
 
     It 'does not enable a schedule when its actual worker is unavailable' {
