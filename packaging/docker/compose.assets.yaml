@@ -1,0 +1,18 @@
+name: dst-docker-assets
+services:
+  assets:
+    image: dst-docker-assets:local
+    build:
+      context: ../..
+      dockerfile: packaging/docker/assets.Dockerfile
+    init: true
+    restart: "no"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    volumes:
+      - assets:/srv/dst
+volumes:
+  assets:
+    labels:
+      io.dst.managed: "true"
+      io.dst.component: official-assets

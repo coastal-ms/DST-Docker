@@ -1,0 +1,86 @@
+name: dst-docker-preview
+services:
+  file-browser-image:
+    profiles: [internal-images]
+    image: filebrowser/filebrowser@sha256:a469ea076d4a1b4b1d86a41d130f2f536cd9da996a2b1fb39c0d7635f9d89b9a
+  scaler-image:
+    profiles: [internal-images]
+    image: dst-docker-scaler:local
+    build:
+      context: .
+      dockerfile: packaging/docker/scaler.Dockerfile
+  map-observer-image:
+    profiles: [internal-images]
+    image: dst-docker-map-observer:local
+    build:
+      context: .
+      dockerfile: packaging/docker/map-observer.Dockerfile
+  dst:
+    image: dst-docker:local
+    build:
+      context: .
+      dockerfile: packaging/docker/Dockerfile
+    # The existing authenticated listener stays on loopback. Linux and WSL2
+    # share it with the host without treating a reverse proxy as a local user.
+    network_mode: host
+    init: true
+    restart: "no"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=128m,uid=10001,gid=10001
+      - /home/dst:rw,noexec,nosuid,size=64m,uid=10001,gid=10001
+    volumes:
+      - dst-config:/data/config
+      - dst-state:/data/state
+      - dst-cache:/data/cache
+      - dst-observations:/data/docker:ro
+      - dst-control:/control:ro
+      - dst-map-control:/map-control:ro
+  manager:
+    image: dst-docker-manager:local
+    build:
+      context: .
+      dockerfile: packaging/docker/manager.Dockerfile
+    network_mode: none
+    init: true
+    restart: "no"
+    read_only: true
+    cap_drop: [ALL]
+    group_add: ["10001"]
+    security_opt: [no-new-privileges:true]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - dst-control:/control
+      - dst-map-control:/map-control
+      - dst-projects:/projects
+      - dst-config:/app-config
+      - official-assets:/assets:ro
+  observer:
+    image: dst-docker-observer:local
+    build:
+      context: .
+      dockerfile: packaging/docker/observer.Dockerfile
+    network_mode: none
+    init: true
+    restart: "no"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      DST_OBSERVE_PROJECT: ${DST_OBSERVE_PROJECT:-}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - dst-observations:/observations
+volumes:
+  dst-config:
+  dst-state:
+  dst-cache:
+  dst-observations:
+  dst-control:
+  dst-map-control:
+  dst-projects:
+  official-assets:
+    external: true
+    name: dst-docker-assets_assets

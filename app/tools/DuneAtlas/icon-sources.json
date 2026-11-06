@@ -1,0 +1,26 @@
+{
+  "source": "https://github.com/lucide-icons/lucide",
+  "license": "ISC; retained LICENSE-LUCIDE.txt includes upstream notices",
+  "icons": [
+    "plane",
+    "truck",
+    "car-front",
+    "bike",
+    "container",
+    "house",
+    "worm",
+    "gem",
+    "radar",
+    "mountain",
+    "flag",
+    "ship",
+    "wind"
+  ],
+  "changes": "Stroke colour changed for local DST map palette. No Holidy assets or code used.",
+  "originalIcons": [
+    "spice-marker.svg",
+    "flour-sand.svg"
+  ],
+  "fallbacks": "Bundled game and vehicle art is available on clean installations. Existing local images are preferred; vectors remain a fallback.",
+  "artSources": "ART-SOURCES.json"
+}

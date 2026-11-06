@@ -1,0 +1,141 @@
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import React from 'react'
+import { SUPPORTER_CREDITS } from '../src/data/sponsors'
+import { MenuBar } from '../src/layout/MenuBar'
+import { SponsorsCredits } from '../src/pages/SponsorsCredits'
+import { LEGACY_ROUTE_MANIFEST } from '../src/platform/routes'
+import { getVisibleNavItems } from '../src/nav'
+import { BrowserRouter } from '../src/router'
+import { PORTAL_HANDOFF_REQUEST_EVENT } from '../src/util/portalHandoff'
+
+const shellHost = vi.hoisted(() => vi.fn(() => true))
+
+vi.mock('../src/auth/portalAccess', () => ({
+  usePortalAccess: () => ({ canAccessOwnerSurfaces: false }),
+}))
+
+vi.mock('../src/util/viewer', () => ({
+  isLocalViewer: () => false,
+  isWindowsViewer: () => true,
+}))
+
+vi.mock('../src/util/shellBridge', () => ({
+  isShellHost: shellHost,
+}))
+
+const EXPECTED_CREDIT_NAMES = [
+  'Decker (@decker177)',
+  'Ogmosis (@ogmosis)',
+  'boosterfuel (@boosterfuel)',
+  'Techtonic (@techtonic001)',
+  'Ken (@krazy2168)',
+  'Pat (@pat.)',
+  'Brandon M',
+  'Daddy STATZY (@spiderstatz)',
+  'Vosper (@vosper61)',
+  'Murm (@murm9000)',
+  'Derkuli (@ichbinderkuli)',
+  'gd.py (@gd.py)',
+  'Chumdizzle (@chumdizzle)',
+  'Fargenbasteg (@fargenbasteg)',
+  'elwicki (@elwicki)',
+  'Maggie Malone (@magiemalone)',
+  'William',
+  'Wick',
+  'Ed O.',
+  'Carl D. Holland',
+  'Wenzel32 (@Wenzel32)',
+  'Saraba (@saraba)',
+] as const
+
+afterEach(() => {
+  cleanup()
+  window.history.replaceState(null, '', '/')
+})
+
+describe('DST Credits', () => {
+  it('uses the typed source as the complete, unique public credit list', () => {
+    expect(SUPPORTER_CREDITS.map(credit => credit.displayName)).toEqual(EXPECTED_CREDIT_NAMES)
+    expect(new Set(SUPPORTER_CREDITS.map(credit => credit.displayName)).size).toBe(22)
+    expect(new Set(SUPPORTER_CREDITS.map(credit => credit.thanks)).size).toBe(22)
+    expect(SUPPORTER_CREDITS.every(credit => credit.thanks.startsWith('Thank') || credit.thanks.startsWith('You') || credit.thanks.startsWith('Your'))).toBe(true)
+  })
+
+  it('renders every public credit once without monetary solicitation', () => {
+    render(<SponsorsCredits />)
+
+    expect(screen.getByRole('heading', { name: 'DST Credits' })).toBeInTheDocument()
+    const dukeNotesHeading = screen.getByRole('heading', { name: 'Notes from Duke', level: 3 })
+    const credits = screen.getByRole('list', { name: 'Supporters' })
+    expect(screen.queryByText(/buy me a coffee|donat|monetary/i)).not.toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: /coffee|donat/i })).not.toBeInTheDocument()
+    expect(
+      screen.getByText(
+        "These personal thank-you notes are written by Duke, DST's AI admin—not by Coastal. 🙂",
+      ),
+    ).toBeInTheDocument()
+    expect(within(credits).getAllByRole('listitem')).toHaveLength(22)
+    expect(within(credits).getAllByText('— Duke', { exact: true })).toHaveLength(SUPPORTER_CREDITS.length)
+    for (const name of EXPECTED_CREDIT_NAMES) {
+      expect(within(credits).getAllByText(name, { exact: true })).toHaveLength(1)
+    }
+    expect(within(credits).queryByText('Hawk_I5')).not.toBeInTheDocument()
+    for (const credit of SUPPORTER_CREDITS) {
+      expect(within(credits).getByText(credit.thanks)).toBeInTheDocument()
+    }
+    const creditsHeading = screen.getByRole('heading', { name: 'Supporters' })
+    expect(creditsHeading.compareDocumentPosition(dukeNotesHeading) & Node.DOCUMENT_POSITION_FOLLOWING)
+      .toBeTruthy()
+    expect(dukeNotesHeading.compareDocumentPosition(credits) & Node.DOCUMENT_POSITION_FOLLOWING)
+      .toBeTruthy()
+  })
+
+  it('puts durable remote setup first and hides local portal handoff inside Help', () => {
+    const onPortalHandoff = vi.fn()
+    window.addEventListener(PORTAL_HANDOFF_REQUEST_EVENT, onPortalHandoff, { once: true })
+    render(
+      <BrowserRouter>
+        <MenuBar sidebarCollapsed={false} onToggleSidebar={vi.fn()} />
+      </BrowserRouter>,
+    )
+
+    expect(screen.queryByRole('button', { name: 'Open local portal in browser' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Help' }))
+    const remoteSetup = screen.getByRole('link', { name: /Remote Portal Setup/ })
+    expect(remoteSetup).toHaveAttribute(
+      'href',
+      'https://duneservertool.com/remote',
+    )
+    expect(remoteSetup).toHaveClass('text-text')
+    const localHandoff = screen.getByRole('button', { name: /Open local portal in browser/ })
+    expect(localHandoff).toHaveClass('text-text')
+    fireEvent.click(localHandoff)
+    expect(onPortalHandoff).toHaveBeenCalledTimes(1)
+  })
+
+  it('is public and preserves one direct top-menu route without crowding intermediate widths', () => {
+    expect(LEGACY_ROUTE_MANIFEST.find(route => route.path === '/sponsors')).toMatchObject({
+      label: 'DST Credits',
+      access: 'all',
+    })
+    const remotePaths = getVisibleNavItems({
+      local: false,
+      windows: false,
+      canAccessOwnerSurfaces: false,
+      includeSidebarHidden: false,
+    }).map(item => item.to)
+    expect(remotePaths).toContain('/sponsors')
+
+    render(
+      <BrowserRouter>
+        <MenuBar sidebarCollapsed={false} onToggleSidebar={vi.fn()} />
+      </BrowserRouter>,
+    )
+    const supportersLink = screen.getByRole('link', { name: 'Supporters' })
+    expect(supportersLink).toHaveAttribute('href', '/sponsors')
+    expect(supportersLink).toHaveClass('hidden', 'xl:inline-flex')
+    fireEvent.click(supportersLink)
+    expect(window.location.pathname).toBe('/sponsors')
+  })
+})

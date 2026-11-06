@@ -1,0 +1,528 @@
+﻿# Commands — catalogue of actions the Dune Server tool can dispatch.
+# Mirrors $script:Commands from app/DuneServer.ps1 (v6.0.x WPF), preserved
+# verbatim so v6.1's web UI keeps the exact same command set + key bindings.
+#
+# Each entry:
+#   Section      - 'VM' | 'Battlegroup' | 'Tools' | 'Separator'
+#   Key          - shortcut (CLI carryover)
+#   Name         - canonical id; matches the bat command (dune-server.bat <Name>)
+#   Mode         - 'InApp' (capture stdout) | 'Console' (visible elevated)
+#   Requires     - 'none' | 'exists' | 'running'
+#   DisabledWhen - optional state predicate
+#   Desc         - human description (shown in tooltip / card)
+#   IsSeparator  - true for the 4 draggable visual dividers
+
+$script:DuneCommands = @(
+    @{ Section='VM'; Key='a';  Name='initial-setup';   Mode='Console'; Requires='none';    DisabledWhen='core-pods-running'; Desc='Run the initial VM setup wizard' }
+    @{ Section='VM'; Key='c';  Name='start-vm';        Label='Start VM Only';      Mode='InApp';   Requires='exists';  DisabledWhen='vm-running';  Desc='Power on the VM only (no battlegroup) - use this to run an update without launching the game servers' }
+    @{ Section='VM'; Key='b';  Name='stop-vm';         Label='Stop VM Only';       Mode='InApp';   Requires='running'; Desc='Request a graceful Hyper-V guest shutdown without running Stop All; reconciled VM lifecycle stops a running battlegroup first, and DST will not hard-power-off the VM' }
+    @{ Section='VM'; Key='d';  Name='startup';         Label='Start All';          Mode='Console'; Requires='exists';  DisabledWhen='bg-running';  Desc='Power on VM, start battlegroup, wait for maps Ready' }
+    @{ Section='VM'; Key='e';  Name='shutdown';        Label='Stop All';           Mode='Console'; Requires='running'; Desc='Stop the battlegroup (if running) and power off the VM' }
+    @{ Section='VM'; Key='f';  Name='reboot';          Label='Reboot All';         Mode='Console'; Requires='running'; Desc='Stop battlegroup, reboot VM, start battlegroup' }
+    @{ Section='VM'; Key='g';  Name='rotate-ssh-key';  Label='Generate SSH key'; Mode='Console'; Requires='running'; Desc='Generate a new SSH key and authorize it on the VM' }
+    @{ Section='VM'; Key='h';  Name='change-password'; Mode='Console'; Requires='running'; Desc="Change the password of the 'dune' user on the VM" }
+    @{ Section='VM'; Key='i';  Name='change-vm-ip';    Mode='Console'; Requires='running'; Desc="Change the VM's IP address or how it gets one (DHCP/static)" }
+
+    @{ Section='Battlegroup'; Key='2';  Name='start';                    Label='Start BG Only';   Mode='Console'; Requires='running'; DisabledWhen='bg-running';  Desc='Start the selected battlegroup' }
+    @{ Section='Battlegroup'; Key='3';  Name='restart';                  Label='Restart BG Only'; Mode='Console'; Requires='running'; DisabledWhen='bg-stopped';  Desc='Restart the selected battlegroup' }
+    # Keep the legacy command ID for callers. Restarts retain the current server
+    # INIs; explicit apply also restores management after an opt-in.
+    @{ Section='Battlegroup'; Key='22'; Name='apply-inis';               Label='Apply Server Settings & Restart'; Mode='InApp'; Requires='running'; DisabledWhen='bg-stopped'; Desc='Deploy saved server settings and startup commands, then restart every map together. Player-PC files are separate.' }
+    @{ Section='Battlegroup'; Key='4';  Name='stop';                     Label='Stop BG Only';    Mode='Console'; Requires='running'; DisabledWhen='bg-stopped';  Desc='Stop the selected battlegroup' }
+    @{ Section='Battlegroup'; Key='5';  Name='update';                   Mode='Console'; Requires='running'; Desc='Check for new versions and apply them' }
+    @{ Section='Battlegroup'; Key='23'; Name='update-with-tanks'; Label='Update with Tank support'; Mode='Console'; Requires='running'; Desc='Update the server and restore Tank support before restarting' }
+    @{ Section='Battlegroup'; Key='6';  Name='edit';                     Mode='Console'; Requires='running'; External=$true; Desc='Edit battlegroup via utilities interface' }
+    @{ Section='Battlegroup'; Key='7';  Name='edit-advanced';            Label='Edit Director';   Mode='Console'; Requires='running'; External=$true; Desc='(Advanced) Edit battlegroup YAML directly' }
+    @{ Section='Battlegroup'; Key='21'; Name='change-battlegroup-ip';    Label='Change Player IP'; Mode='Console'; Requires='running'; Desc='Change the IP that players connect to' }
+    @{ Section='Battlegroup'; Key='8';  Name='enable-experimental-swap'; Mode='Console'; Requires='running'; Desc='(Experimental) Enable experimental swap memory' }
+    @{ Section='Battlegroup'; Key='9';  Name='backup';                   Mode='Console'; Requires='running'; Desc="Back up the battlegroup's database" }
+    @{ Section='Battlegroup'; Key='10'; Name='import';                   Mode='Console'; Requires='running'; Desc='Import a database backup (Funcom handles the BG lifecycle)' }
+    @{ Section='Battlegroup'; Key='11'; Name='logs-export';              Mode='Console'; Requires='running'; DisabledWhen='bg-stopped';  Desc='Retrieve logs from all battlegroup pods' }
+    @{ Section='Battlegroup'; Key='12'; Name='operator-logs-export';     Mode='Console'; Requires='running'; DisabledWhen='bg-stopped';  Desc='Retrieve logs from all operator pods' }
+    @{ Section='Battlegroup'; Key='13'; Name='open-file-browser';        Mode='InApp';   Requires='running'; DisabledWhen='bg-stopped';  Desc='Open battlegroup file browser in your browser' }
+    @{ Section='Battlegroup'; Key='14'; Name='open-director';            Mode='InApp';   Requires='running'; DisabledWhen='bg-stopped';  Desc='Open battlegroup director page in your browser' }
+    @{ Section='Battlegroup'; Key='15'; Name='shell-vm';                 Mode='Console'; Requires='running'; Desc='Open a shell to the VM' }
+    @{ Section='Battlegroup'; Key='16'; Name='shell-pod';                Mode='Console'; Requires='running'; DisabledWhen='bg-stopped';  Desc='Open a shell to a pod' }
+    @{ Section='Battlegroup'; Key='20'; Name='fix-on-demand-maps';      Mode='InApp';   Requires='running'; DisabledWhen='bg-stopped';  Desc='Clear pinned partitions so DeepDesert / Arrakeen / Harko launch on demand' }
+
+    @{ Section='Tools'; Key='17'; Name='ssh';         Mode='Console'; Requires='running'; Desc='Open an SSH terminal to the VM' }
+    @{ Section='Tools'; Key='18'; Name='setup-guide'; Mode='InApp';   Requires='none';    Desc='Open Funcom self-hosted setup guide' }
+)
+
+# ---- Availability ------------------------------------------------------------
+
+function Get-DuneCommandAvailability {
+    param(
+        [Parameter(Mandatory)][hashtable]$Command,
+        [Parameter(Mandatory)][hashtable]$State
+    )
+    if ($State.hostingBackend -eq 'docker') {
+        if ($State.operation.phase -eq 'running') { return @{available=$false;reason='A server operation is running'} }
+        if ($State.maintenance -and $Command.Name -notin @('logs-export','operator-logs-export') -and -not ($Command.Name -eq 'update' -and $State.updateRecovery)) { return @{available=$false;reason='Server maintenance recovery is active'} }
+        if ($Command.Name -notin @('start','stop','restart','startup','shutdown','reboot','apply-inis','update','logs-export','operator-logs-export')) { return @{available=$false;reason='Docker adapter is not available yet'} }
+        if (-not $State.prepared) { return @{available=$false;reason='Complete Docker Setup first'} }
+        if ($Command.Name -in @('start','startup') -and $State.desiredState -eq 'running') { return @{available=$false;reason='Battlegroup already running'} }
+        if ($Command.Name -in @('stop','shutdown','restart','reboot','apply-inis') -and $State.desiredState -ne 'running') { return @{available=$false;reason='Battlegroup is stopped'} }
+        return @{available=$true;reason=''}
+    }
+    # State: @{ vmExists; vmRunning; bgState ('running'|'stopped'|'unknown'|...) }
+    $available = switch ($Command.Requires) {
+        'none'    { $true }
+        'exists'  { [bool]$State.vmExists }
+        'running' { [bool]$State.vmRunning }
+        default   { $true }
+    }
+    $reason = ''
+    $maintenanceSafe = @(
+        'logs-export', 'operator-logs-export', 'setup-guide'
+    )
+    if ([bool]$State.worldRestartActive -and $Command.Name -notin $maintenanceSafe) {
+        return @{ available = $false; reason = 'World Restart maintenance is active' }
+    }
+    if (-not $available) {
+        $reason = switch ($Command.Requires) {
+            'exists'  { "VM '$script:DuneVmName' not found" }
+            'running' { "VM is not running" }
+            default   { 'unavailable' }
+        }
+    }
+
+    # Optional DisabledWhen overrides above
+    if ($available -and $Command.DisabledWhen) {
+        switch ($Command.DisabledWhen) {
+            'vm-running' {
+                if ($State.vmRunning) { $available = $false; $reason = 'VM already running' }
+            }
+            'bg-running' {
+                if ($State.bgState -eq 'running') { $available = $false; $reason = 'Battlegroup already running' }
+            }
+            'bg-stopped' {
+                if ($State.bgState -eq 'stopped') { $available = $false; $reason = 'Battlegroup is stopped' }
+            }
+            'core-pods-running' {
+                if ($State.bgState -eq 'running') { $available = $false; $reason = 'Core pods running' }
+            }
+        }
+    }
+    return @{ available = $available; reason = $reason }
+}
+
+function Get-DuneCurrentState {
+    if ($env:DST_HOSTING_BACKEND -eq 'docker') {
+        $reply=Invoke-DuneDockerManager -Request @{action='status'}
+        if (-not $reply.ok) { throw $reply.error }
+        $native=$reply.data
+        return @{hostingBackend='docker';vmExists=$false;vmRunning=$false;bgState=$native.desiredState;
+            desiredState=$native.desiredState;operation=$native.operation;prepared=(@($native.services).Count -gt 0);
+            updateRecovery=([bool]$native.update -and $native.update.phase -notin @('completed','rolled-back','failed-preflight'));
+            maintenance=(($native.restore.phase -in @('stopping','preparing','restoring','recovering','recovery-required')) -or ([bool]$native.update -and $native.update.phase -notin @('completed','rolled-back','failed-preflight')))}
+    }
+    $vm = Get-DuneVmStatus
+    $bgState = 'unknown'
+    if ($vm.running) {
+        try {
+            $bg = Get-DuneBattlegroupSnapshot
+            if ($bg.available -and $bg.state) { $bgState = $bg.state }
+            elseif (-not $bg.available)       { $bgState = 'unknown' }
+        } catch {}
+    }
+    return @{
+        vmExists  = [bool]$vm.exists
+        vmRunning = [bool]$vm.running
+        bgState   = $bgState
+        worldRestartActive = [bool](
+            (Get-Command Test-DuneWorldRestartMaintenanceActive -ErrorAction SilentlyContinue) -and
+            (Test-DuneWorldRestartMaintenanceActive)
+        )
+        vm        = $vm
+    }
+}
+
+# ---- Order persistence -------------------------------------------------------
+
+function Get-DuneCommandOrderFile {
+    # Prefer APPDATA canonical location (matches Get-DuneConfigPath / v6.0
+    # convention). Falls back to repo-root .dune\ for dev runs from source.
+    $appdataDir = Join-Path $env:APPDATA 'DuneServer'
+    $appdataFile = Join-Path $appdataDir 'button-order.json'
+    if (Test-Path -LiteralPath $appdataFile) { return $appdataFile }
+
+    # Dev fallback — repo root or installed app dir
+    $root = if ($script:AppDir) { Split-Path -Parent $script:AppDir } else { (Get-Location).Path }
+    $devDir = Join-Path $root '.dune'
+    $devFile = Join-Path $devDir 'button-order.json'
+    if (Test-Path -LiteralPath $devFile) { return $devFile }
+
+    # Neither exists — default to APPDATA so future Save-DuneCommandOrder writes
+    # land in the canonical location.
+    if (-not (Test-Path -LiteralPath $appdataDir)) {
+        New-Item -ItemType Directory -Path $appdataDir -Force | Out-Null
+    }
+    return $appdataFile
+}
+
+# ---- Layout (v6.1.10+) -------------------------------------------------------
+#
+# The Commands page now models three sections as ordered arrays of command
+# names, plus a parallel array of user-renamable section labels. This replaces
+# the old "order + catalogue-default + overrides" model, which had a subtle
+# bug where dragging a command across sections could snap back on the next
+# server refresh because the override layer and order layer disagreed.
+#
+# On-disk shape (button-order.json):
+#   {
+#     "version": 3,
+#     "sectionNames": ["VM", "Battlegroup", "Tools"],
+#     "sections":     [["startup", "...", ...], [...], [...]]
+#   }
+#
+# A missing or corrupt file falls back to Get-DuneDefaultCommandLayout — which
+# distributes the catalogue across three sections with startup commands first,
+# shutdown commands next, and the remainder alphabetically.
+
+function Get-DuneDefaultCommandLayout {
+    $priority = @{
+        'start'    = 0; 'start-vm'   = 0; 'startup' = 0; 'stop-vm' = 0
+        'reboot'   = 1; 'shutdown'   = 1; 'stop'    = 1
+    }
+    $sorted = @(
+        $script:DuneCommands |
+            Where-Object { -not $_.Hidden } |
+            ForEach-Object {
+                $p = if ($priority.ContainsKey($_.Name)) { $priority[$_.Name] } else { 2 }
+                [pscustomobject]@{ Name = $_.Name; Priority = $p }
+            } |
+            Sort-Object Priority, Name |
+            Select-Object -ExpandProperty Name
+    )
+
+    # Sequential top-left → bottom-right fill across 3 sections.
+    $total = $sorted.Count
+    $per   = [Math]::Max(1, [Math]::Ceiling($total / 3.0))
+    $sections = @(@(), @(), @())
+    for ($i = 0; $i -lt $total; $i++) {
+        $idx = [Math]::Min(2, [Math]::Floor($i / $per))
+        $sections[$idx] += $sorted[$i]
+    }
+    return @{
+        sectionNames = @('VM','Battlegroup','Tools')
+        sections     = $sections
+    }
+}
+
+function Get-DuneCommandLayout {
+    $f = Get-DuneCommandOrderFile
+    $default = Get-DuneDefaultCommandLayout
+    if (-not (Test-Path $f)) { return $default }
+
+    try {
+        $parsed = Get-Content -LiteralPath $f -Raw | ConvertFrom-Json
+        if ($null -eq $parsed) { return $default }
+
+        # v6.1.10+ shape: { version: 3, sectionNames: [...], sections: [[],[],[]] }
+        if ($parsed.PSObject.Properties['sections'] -and $parsed.sections -is [array] -and $parsed.sections.Count -ge 1) {
+            # Names — pad / trim to exactly 3, fall back to defaults if missing.
+            $defaultNames = @('VM','Battlegroup','Tools')
+            $rawNames = if ($parsed.PSObject.Properties['sectionNames']) { @($parsed.sectionNames | ForEach-Object { "$_" }) } else { @() }
+            $names = @()
+            for ($i = 0; $i -lt 3; $i++) {
+                $n = if ($i -lt $rawNames.Count) { $rawNames[$i] } else { $defaultNames[$i] }
+                $n = "$n".Trim()
+                if ($n.Length -eq 0) { $n = $defaultNames[$i] }
+                if ($n.Length -gt 40) { $n = $n.Substring(0, 40) }
+                $names += $n
+            }
+
+            # Sections — pad / trim to exactly 3 arrays. Drop unknown commands
+            # and de-dupe across all three (a command may only live in one
+            # section at a time).
+            $catalogSet = @{}
+            foreach ($c in $script:DuneCommands) { if ($c.Hidden) { continue }; $catalogSet[$c.Name] = $true }
+            $sections = @(@(), @(), @())
+            $seen     = @{}
+            for ($i = 0; $i -lt 3; $i++) {
+                $arr = if ($i -lt $parsed.sections.Count) { @($parsed.sections[$i]) } else { @() }
+                $kept = @()
+                foreach ($n in $arr) {
+                    $s = "$n"
+                    if ($catalogSet.ContainsKey($s) -and -not $seen.ContainsKey($s)) {
+                        $kept += $s
+                        $seen[$s] = $true
+                    }
+                }
+                $sections[$i] = $kept
+            }
+
+            # Catalogue entries not yet placed anywhere (e.g. new commands
+            # introduced after the layout was saved) land in section 0 so
+            # they're always visible.
+            foreach ($c in $script:DuneCommands) {
+                if ($c.Hidden) { continue }
+                if (-not $seen.ContainsKey($c.Name)) {
+                    $sections[0] += $c.Name
+                    $seen[$c.Name] = $true
+                }
+            }
+
+            return @{ sectionNames = $names; sections = $sections }
+        }
+
+        # Legacy shapes (v6.1 bare array, v6.1.9 {order, sections{}}) — ignore
+        # the old data and start fresh. Users who haven't touched layout get
+        # the new default; users who had a custom order lose it once, but the
+        # new model is qualitatively different so a clean slate is correct.
+        return $default
+    } catch {
+        return $default
+    }
+}
+
+function Save-DuneCommandLayout {
+    param(
+        [Parameter(Mandatory)][string[]]$SectionNames,
+        [Parameter(Mandatory)][array]$Sections
+    )
+
+    if ($SectionNames.Count -ne 3) { throw "Expected exactly 3 section names, got $($SectionNames.Count)" }
+    if ($Sections.Count     -ne 3) { throw "Expected exactly 3 sections, got $($Sections.Count)" }
+
+    # Sanitize section names — trim, fall back to defaults, cap length.
+    $defaultNames = @('VM','Battlegroup','Tools')
+    $cleanNames = @()
+    for ($i = 0; $i -lt 3; $i++) {
+        $n = "$($SectionNames[$i])".Trim()
+        if ($n.Length -eq 0)  { $n = $defaultNames[$i] }
+        if ($n.Length -gt 40) { $n = $n.Substring(0, 40) }
+        $cleanNames += $n
+    }
+
+    # Sanitize sections — only catalogue commands, globally unique.
+    $catalogSet = @{}
+    foreach ($c in $script:DuneCommands) { if ($c.Hidden) { continue }; $catalogSet[$c.Name] = $true }
+    $cleanSections = @(@(), @(), @())
+    $seen = @{}
+    for ($i = 0; $i -lt 3; $i++) {
+        $arr = @($Sections[$i])
+        foreach ($n in $arr) {
+            $s = "$n"
+            if ($catalogSet.ContainsKey($s) -and -not $seen.ContainsKey($s)) {
+                $cleanSections[$i] += $s
+                $seen[$s] = $true
+            }
+        }
+    }
+    # Any catalogue command not represented in the incoming payload still has
+    # to live somewhere — park it in section 0 so it's discoverable.
+    foreach ($c in $script:DuneCommands) {
+        if ($c.Hidden) { continue }
+        if (-not $seen.ContainsKey($c.Name)) {
+            $cleanSections[0] += $c.Name
+            $seen[$c.Name] = $true
+        }
+    }
+
+    $f = Get-DuneCommandOrderFile
+    $dir = Split-Path -Parent $f
+    if ($dir -and -not (Test-Path -LiteralPath $dir)) {
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    }
+
+    $obj = [ordered]@{
+        version      = 3
+        sectionNames = $cleanNames
+        sections     = @(
+            ,([object[]]$cleanSections[0])
+            ,([object[]]$cleanSections[1])
+            ,([object[]]$cleanSections[2])
+        )
+    }
+    $payload = $obj | ConvertTo-Json -Depth 4 -Compress:$false
+    Set-Content -LiteralPath $f -Value $payload -Encoding UTF8
+}
+
+function Reset-DuneCommandLayout {
+    $f = Get-DuneCommandOrderFile
+    if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force }
+}
+
+function Get-DuneCommandByName {
+    param([string]$Name)
+    foreach ($c in $script:DuneCommands) {
+        if ($c.Name -eq $Name) { return $c }
+    }
+    return $null
+}
+
+# ---------------------------------------------------------------------------
+# Visible-window launch that survives Session 0 (service mode).
+#
+# When DST runs as the "Keep serving while DST is closed" service, the backend
+# lives in Windows' non-interactive Session 0. A plain Start-Process there opens
+# its window on the invisible Session 0 desktop, so the operator never sees the
+# update / battlegroup / edit console (a regression introduced with service
+# mode in the 12.11 line). The interactive autostart path is unaffected.
+#
+# Test-DuneCanShowWindowDirectly is true only when this process is in an
+# interactive session (SessionId != 0); there we keep the original
+# Start-Process -Verb RunAs behaviour. Otherwise we relay the launch into the
+# signed-in user's interactive session via a one-shot Interactive/Highest
+# scheduled task (the same principal type the autostart task uses), so the
+# window appears on the user's desktop. The task is removed once it has fired;
+# the spawned window keeps running independently.
+# ---------------------------------------------------------------------------
+function Test-DuneCanShowWindowDirectly {
+    try {
+        return ([System.Diagnostics.Process]::GetCurrentProcess().SessionId -ne 0)
+    } catch {
+        return $true
+    }
+}
+
+function Get-DuneFuncomLanConsoleLaunch {
+    param([Parameter(Mandatory)][string]$Ip, [Parameter(Mandatory)][string]$KeyPath)
+    $address = $null
+    if (-not [System.Net.IPAddress]::TryParse($Ip, [ref]$address)) { throw 'The remote VM address is unavailable.' }
+    if (-not (Test-Path -LiteralPath $KeyPath -PathType Leaf)) { throw 'The configured SSH key was not found.' }
+    $data = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((@{ip=$Ip;key=$KeyPath} | ConvertTo-Json -Compress)))
+    $console = @'
+$target = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__TARGET__')) | ConvertFrom-Json
+$actions = @{'1'='status';'2'='start';'3'='stop';'4'='restart';'5'='update';'6'='edit';'7'='edit-advanced';'8'='logs-export'}
+while ($true) {
+    Write-Host "`nFuncom server console - $($target.ip)"
+    Write-Host '1 Status   2 Start   3 Stop   4 Restart'
+    Write-Host '5 Update   6 Edit    7 Advanced edit   8 Export logs   0 Close'
+    $choice = Read-Host 'Choose an action'
+    if ($choice -eq '0') { break }
+    if (-not $actions.ContainsKey($choice)) { continue }
+    $remote = '/home/dune/.dune/bin/battlegroup ' + $actions[$choice]
+    & ssh -t -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ConnectTimeout=10 -i $target.key ('dune@' + $target.ip) $remote
+    if ($LASTEXITCODE) { Write-Host "Funcom command exited with code $LASTEXITCODE. Check the output above." -ForegroundColor Yellow }
+}
+'@
+    $console = $console.Replace('__TARGET__', $data)
+    $pwsh = if ($script:PwshExe) { $script:PwshExe } else { (Get-Command pwsh -ErrorAction Stop).Source }
+    return @{
+        FilePath = $pwsh
+        ArgumentList = @('-NoLogo','-NoProfile','-EncodedCommand',[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($console)))
+    }
+}
+
+function Start-DuneVisibleElevated {
+    param(
+        [Parameter(Mandatory)][string]$FilePath,
+        [string[]]$ArgumentList = @(),
+        [string]$WorkingDirectory
+    )
+
+    # Interactive backend (normal launch / autostart): show the window directly.
+    if (Test-DuneCanShowWindowDirectly) {
+        $sp = @{
+            FilePath    = $FilePath
+            WindowStyle = 'Normal'
+            Verb        = 'RunAs'
+            PassThru    = $true
+            ErrorAction = 'Stop'
+        }
+        if ($ArgumentList.Count -gt 0) { $sp.ArgumentList = $ArgumentList }
+        if ($WorkingDirectory)         { $sp.WorkingDirectory = $WorkingDirectory }
+        $proc = Start-Process @sp
+        return @{ ok = $true; pid = $(if ($proc) { $proc.Id } else { $null }); via = 'direct' }
+    }
+
+    # Session 0 (service mode): relay into the interactive session so the window
+    # is visible. Requires the ScheduledTasks module and a signed-in user.
+    if (-not (Get-Command Register-ScheduledTask -ErrorAction SilentlyContinue) -or
+        -not (Get-Command New-ScheduledTaskAction -ErrorAction SilentlyContinue)) {
+        throw "Running in Session 0 (service mode) and the ScheduledTasks module is unavailable, so the console window cannot be shown in your session. Turn off 'Keep serving while DST is closed' (Help menu) and relaunch DST, or run the command from an elevated PowerShell."
+    }
+
+    $user = if (Get-Command Get-DuneAutostartUserName -ErrorAction SilentlyContinue) {
+        Get-DuneAutostartUserName
+    } else {
+        if ($env:USERDOMAIN -and $env:USERNAME) { "$env:USERDOMAIN\$env:USERNAME" } else { $env:USERNAME }
+    }
+    $folder = if (Get-Command Get-DuneAutostartTaskFolder -ErrorAction SilentlyContinue) {
+        Get-DuneAutostartTaskFolder
+    } else {
+        '\Dune Server\'
+    }
+    $taskName = "DuneVisibleLaunch-$([guid]::NewGuid().ToString('N').Substring(0,8))"
+
+    # Quote only args that contain whitespace and are not already quoted; the
+    # caller may pre-quote paths (e.g. the -File argument).
+    $argString = (@($ArgumentList) | ForEach-Object {
+        $s = [string]$_
+        if ($s -match '\s' -and -not ($s.StartsWith('"') -and $s.EndsWith('"'))) { '"' + $s + '"' } else { $s }
+    }) -join ' '
+
+    $actionParams = @{ Execute = $FilePath }
+    if ($argString)        { $actionParams.Argument = $argString }
+    if ($WorkingDirectory) { $actionParams.WorkingDirectory = $WorkingDirectory }
+
+    $action    = New-ScheduledTaskAction @actionParams
+    $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Highest
+    $settings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances Parallel
+
+    # Purge any spent relay tasks from earlier launches BEFORE creating this one,
+    # rather than self-deleting right after Start (which races a cold Task
+    # Scheduler that may not have spawned the action process yet). Each relay
+    # task has no trigger, so a leftover is inert until the next purge.
+    try {
+        Get-ScheduledTask -TaskPath $folder -ErrorAction SilentlyContinue |
+            Where-Object { $_.TaskName -like 'DuneVisibleLaunch-*' } |
+            ForEach-Object {
+                try { Unregister-ScheduledTask -TaskPath $folder -TaskName $_.TaskName -Confirm:$false -ErrorAction SilentlyContinue | Out-Null } catch {}
+            }
+    } catch {}
+
+    Register-ScheduledTask -TaskPath $folder -TaskName $taskName -Action $action -Principal $principal -Settings $settings -Force | Out-Null
+    Start-ScheduledTask -TaskPath $folder -TaskName $taskName -ErrorAction Stop
+    return @{ ok = $true; pid = $null; via = 'scheduled-task' }
+}
+
+# Launch a command in a new visible console window (elevated).
+# Uses pwsh -File <dune-server.ps1> -Cmd <name>, the same entry point the WPF
+# UI used for external commands. Phase 4 will route InApp commands through the
+# embedded terminal instead; for now everything opens a console window.
+function Invoke-DuneCommandExternal {
+    param(
+        [string]$Name,
+        [string]$SshRotationResultPath
+    )
+    if (-not $script:PwshExe -or -not $script:MainScript) {
+        throw "Command execution not configured (pwsh.exe or dune-server.ps1 missing)."
+    }
+    $cmd = Get-DuneCommandByName -Name $Name
+    if (-not $cmd) { throw "Unknown command: $Name" }
+
+    $argList = @(
+        '-NoProfile'
+        '-ExecutionPolicy','Bypass'
+        '-File',"`"$script:MainScript`""
+        '-Cmd',$cmd.Name
+    )
+    # This launcher always creates a visible console, regardless of UI mode.
+    # Captured/in-app handlers return before reaching it.
+    $argList += '-PauseOnExit'
+    if ($SshRotationResultPath) {
+        if ($Name -ne 'rotate-ssh-key') { throw 'A key rotation result is only supported for SSH key rotation.' }
+        $argList += @('-SshRotationResultPath', ('"' + $SshRotationResultPath + '"'))
+    }
+    # Launch so the window is VISIBLE to the signed-in user even when this
+    # backend runs in Session 0 ("Keep serving while DST is closed" service
+    # mode). A plain Start-Process there opens the console on the invisible
+    # Session 0 desktop; Start-DuneVisibleElevated relays it into the
+    # interactive session when needed. dune-server.ps1 requires admin.
+    $launch = Start-DuneVisibleElevated `
+        -FilePath $script:PwshExe `
+        -ArgumentList $argList `
+        -WorkingDirectory (Split-Path -Parent $script:MainScript)
+    return @{
+        ok      = $true
+        name    = $cmd.Name
+        mode    = $cmd.Mode
+        pid     = $launch.pid
+        via     = $launch.via
+        started = (Get-Date).ToString('o')
+    }
+}

@@ -1,0 +1,1593 @@
+﻿# Gameplay — Players (native port of the reference implementation's player tooling).
+#
+# Reads the live game Postgres through the same Invoke-DuneSqlQuery bridge the
+# Market features use, so the reference implementation's SQL ports verbatim. Every getter returns
+# @{ ok; ... } and the routes wrap them with the live/demo + `source` convention.
+#
+# Write actions (give solari, award spec XP, rename, give/delete/repair item)
+# call the SAME server-side stored procedures and statements the reference implementation uses,
+# run with -ReadOnly:$false. They are surfaced behind explicit confirm UI.
+#
+# Helpers reused from Gameplay.ps1: ConvertTo-DuneRowMaps, ConvertTo-DuneInt,
+# Test-DuneTruthy, Get-DuneGameplayItemName.
+
+# ----------------------------------------------------------------------------
+# Shorten a UE class path to something readable: strip path, leading BP_,
+# trailing _C. e.g. "/Game/.../BP_Sandbike_CHOAM_C.BP_Sandbike_CHOAM_C" -> "Sandbike CHOAM".
+# ----------------------------------------------------------------------------
+function Get-DuneShortClass {
+    param([string]$Class)
+    if (-not $Class) { return '' }
+    $c = [string]$Class
+    $dot = $c.LastIndexOf('.')
+    if ($dot -ge 0) { $c = $c.Substring($dot + 1) }
+    $slash = $c.LastIndexOf('/')
+    if ($slash -ge 0) { $c = $c.Substring($slash + 1) }
+    if ($c.StartsWith('BP_')) { $c = $c.Substring(3) }
+    if ($c.EndsWith('_C')) { $c = $c.Substring(0, $c.Length - 2) }
+    return ($c -replace '_', ' ').Trim()
+}
+
+# ----------------------------------------------------------------------------
+# SQL — Players (ported from the reference implementation db.go). All read-only.
+# ----------------------------------------------------------------------------
+$script:DunePlayersListSql = @'
+SELECT ps.player_pawn_id                                AS id,
+       COALESCE(ps.account_id, 0)                       AS account_id,
+       COALESCE(ps.player_controller_id, 0)             AS controller_id,
+       COALESCE(ps.character_name, '')                  AS name,
+       COALESCE(a.class, '')                            AS class,
+       COALESCE(a.map, '')                              AS map,
+       COALESCE(pf.faction_id, 0)                       AS faction_id,
+       COALESCE(f.name, '')                             AS faction_name,
+       COALESCE(ps.online_status::text, 'Offline')      AS online_status
+FROM dune.player_state ps
+LEFT JOIN dune.actors a           ON a.id = ps.player_pawn_id
+LEFT JOIN dune.player_faction pf  ON pf.actor_id = ps.player_controller_id
+LEFT JOIN dune.factions f         ON f.id = pf.faction_id
+ORDER BY ps.account_id
+'@
+
+# Inventory for one pawn actor id ($1).
+$script:DunePlayerInventorySql = @'
+SELECT i.id, i.template_id, i.stack_size, COALESCE(i.quality_level, 0) AS quality_level,
+       COALESCE(i.stats #>> '{{FContractItemStats,1,ContractName,Name}}', '') AS contract_name,
+       inv.id AS inventory_id, inv.inventory_type,
+       (inv.inventory_type = 33 AND EXISTS (
+           SELECT 1
+           FROM dune.actor_inventories ai
+           WHERE ai.inventory_id = inv.id
+             AND ai.component_name_hash = -689927216
+       )) AS is_reserve,
+       COALESCE((i.stats->'FItemStackAndDurabilityStats'->1->>'CurrentDurability'), 'N/A') AS durability,
+       COALESCE((i.stats->'FItemStackAndDurabilityStats'->1->>'MaxDurability'), 'N/A')     AS max_durability,
+       COALESCE((i.stats->'FFillableItemStats'->1->>'CurrentAmount'), 'N/A')               AS water_amount,
+       COALESCE((i.stats->'FFillableItemStats'->1->>'FillableType'), '')                   AS water_type,
+       i.stats->'FFillableItemStats'->1->>'MaxAmount' AS water_capacity,
+       CASE
+           WHEN jsonb_typeof(i.stats->'FWeaponItemStats') = 'array'
+            AND jsonb_typeof(i.stats->'FWeaponItemStats'->1) = 'object'
+               THEN COALESCE(i.stats->'FWeaponItemStats'->1->>'CurrentAmmo', '0')
+           ELSE 'N/A'
+       END                                                                                AS current_ammo,
+       NOT (i.stats ? 'FWeaponItemStats') AS weapon_stats_missing,
+       NOT (i.stats ? 'FFillableItemStats') AS water_stats_missing
+FROM dune.items i
+JOIN dune.inventories inv ON i.inventory_id = inv.id
+WHERE inv.actor_id = {0}::bigint
+  AND inv.inventory_type IS DISTINCT FROM 30
+ORDER BY i.template_id
+'@
+
+# Currency balances for one controller id ($1).
+$script:DunePlayerCurrencySql = @'
+SELECT currency_id, balance
+FROM dune.player_virtual_currency_balances
+WHERE player_controller_id = {0}::bigint
+ORDER BY currency_id
+'@
+
+# Specialization tracks for one controller id ($1).
+# NOTE: dune.specialization_tracks.player_id stores the player CONTROLLER id,
+# not the pawn/actor id (matches purchased_specialization_keystones).
+$script:DunePlayerSpecsSql = @'
+SELECT track_type::text AS track_type, xp_amount, level
+FROM dune.specialization_tracks
+WHERE player_id = {0}::bigint
+ORDER BY track_type
+'@
+
+function Get-DunePlayersLive {
+    param([string]$Ip)
+    $res = Invoke-DuneSqlQuery -Ip $Ip -Sql $script:DunePlayersListSql -ReadOnly $true -MaxRows 5000 -TimeoutSec 30
+    if (-not $res.ok) { return @{ ok = $false; error = $res.error } }
+    $players = @()
+    foreach ($r in (ConvertTo-DuneRowMaps -Result $res)) {
+        $players += [ordered]@{
+            id            = (ConvertTo-DuneInt $r['id'])
+            account_id    = (ConvertTo-DuneInt $r['account_id'])
+            controller_id = (ConvertTo-DuneInt $r['controller_id'])
+            name          = [string]$r['name']
+            class         = (Get-DuneShortClass ([string]$r['class']))
+            map           = [string]$r['map']
+            faction_id    = (ConvertTo-DuneInt $r['faction_id'])
+            faction_name  = [string]$r['faction_name']
+            online_status = [string]$r['online_status']
+        }
+    }
+    return @{ ok = $true; players = $players }
+}
+
+function Get-DunePlayerInventoryKindSql {
+    param([ValidateSet('item','emote','contract')][string]$Kind = 'item')
+    Initialize-DuneGameplayItemData
+    $exceptions = @($script:DuneGameplayItemRules.Keys | Where-Object {
+        $_ -match 'Emote|^(D_)?Contract' -and $script:DuneGameplayItemRules[$_].category
+    } | ForEach-Object { "'$(ConvertTo-DuneSqlString ([string]$_).ToLowerInvariant())'" })
+    $knownItem = if ($exceptions.Count) { "lower(i.template_id) IN ($($exceptions -join ','))" } else { 'false' }
+    switch ($Kind) {
+        'emote' { return "(i.template_id ~* 'Emote' AND NOT ($knownItem))" }
+        'contract' { return "(i.template_id ~* '^(D_)?Contract' AND i.template_id !~* 'Emote' AND NOT ($knownItem))" }
+        default { return "(i.template_id !~* 'Emote|^(D_)?Contract' OR ($knownItem))" }
+    }
+}
+
+function Get-DunePlayerDetailLive {
+    param([string]$Ip, [long]$PawnId, [long]$ControllerId, [int]$InventoryOffset = -1, [ValidateSet('item','emote','contract')][string]$InventoryKind = 'item')
+    $invSql  = [string]::Format($script:DunePlayerInventorySql, $PawnId)
+    if ($InventoryOffset -ge 0) {
+        $kindSql = Get-DunePlayerInventoryKindSql -Kind $InventoryKind
+        $invSql = $invSql.Replace('ORDER BY i.template_id', "AND $kindSql`nORDER BY i.template_id, i.id") + "`nLIMIT 29 OFFSET $InventoryOffset"
+    }
+    $specSql = [string]::Format($script:DunePlayerSpecsSql, $ControllerId)
+    $curSql  = [string]::Format($script:DunePlayerCurrencySql, $ControllerId)
+
+    $invRes  = Invoke-DuneSqlQuery -Ip $Ip -Sql $invSql  -ReadOnly $true -MaxRows 5000 -TimeoutSec 30
+    if (-not $invRes.ok) { return @{ ok = $false; error = $invRes.error } }
+    $specRes = Invoke-DuneSqlQuery -Ip $Ip -Sql $specSql -ReadOnly $true -MaxRows 500 -TimeoutSec 30
+    if (-not $specRes.ok) { return @{ ok = $false; error = $specRes.error } }
+    $curRes  = Invoke-DuneSqlQuery -Ip $Ip -Sql $curSql  -ReadOnly $true -MaxRows 500 -TimeoutSec 30
+    if (-not $curRes.ok) { return @{ ok = $false; error = $curRes.error } }
+
+    $inventory = @()
+    foreach ($r in (ConvertTo-DuneRowMaps -Result $invRes)) {
+        $tmpl = [string]$r['template_id']
+        $defaults = Get-DuneItemStatDefaults -TemplateId $tmpl
+        $ammo = [string]$r['current_ammo']
+        $water = [string]$r['water_amount']
+        $waterType = [string]$r['water_type']
+        if ((Test-DuneTruthy $r['weapon_stats_missing']) -and $defaults.FWeaponItemStats) { $ammo='0' }
+        if ((Test-DuneTruthy $r['water_stats_missing']) -and $defaults.FFillableItemStats) { $water='0';$waterType='Water' }
+        if ($waterType -eq 'None' -and $defaults.FFillableItemStats) { $waterType='Water' }
+        $inventory += [ordered]@{
+            id             = (ConvertTo-DuneInt $r['id'])
+            template_id    = $tmpl
+            name           = $(if ($r['contract_name']) { ([string]$r['contract_name']).Replace('_',' ') -creplace '(?<=[a-z])(?=[A-Z])', ' ' } else { Get-DuneGameplayItemName -TemplateId $tmpl })
+            kind           = (Get-DuneItemKind -TemplateId $tmpl)
+            stack_size     = (ConvertTo-DuneInt $r['stack_size'])
+            quality        = (ConvertTo-DuneInt $r['quality_level'])
+            inventory_id   = (ConvertTo-DuneInt $r['inventory_id'])
+            inventory_type = (ConvertTo-DuneInt $r['inventory_type'])
+            is_reserve     = (Test-DuneTruthy $r['is_reserve'])
+            durability     = [string]$r['durability']
+            max_durability = [string]$r['max_durability']
+            water_amount   = $water
+            water_type     = $waterType
+            water_capacity = $(if($r['water_capacity'] -match '^\d+(\.\d+)?$'){[double]$r['water_capacity']}elseif($defaults.FFillableItemStats){[double]$defaults.FFillableItemStats[1].MaxAmount}else{0})
+            current_ammo   = $ammo
+        }
+    }
+    $specs = @()
+    foreach ($r in (ConvertTo-DuneRowMaps -Result $specRes)) {
+        $specs += [ordered]@{
+            track_type = [string]$r['track_type']
+            xp         = (ConvertTo-DuneInt $r['xp_amount'])
+            level      = [double]([string]$r['level'])
+        }
+    }
+    $currency = @()
+    foreach ($r in (ConvertTo-DuneRowMaps -Result $curRes)) {
+        $currency += [ordered]@{
+            currency_id = (ConvertTo-DuneInt $r['currency_id'])
+            balance     = (ConvertTo-DuneInt $r['balance'])
+        }
+    }
+    return @{ ok = $true; inventory = $inventory; specs = $specs; currency = $currency }
+}
+
+# ----------------------------------------------------------------------------
+# WRITE actions. SQL escaping: numeric args are cast to bigint, strings are
+# single-quote-doubled. All run with -ReadOnly:$false.
+# ----------------------------------------------------------------------------
+function ConvertTo-DuneSqlString {
+    param($Value)
+    return ([string]$Value) -replace "'", "''"
+}
+
+# Give Solari (give-currency): dune.adjust_player_virtual_currency_balance.
+function Invoke-DunePlayerGiveSolari {
+    param([string]$Ip, [long]$ControllerId, [long]$Amount)
+    $currency = Get-V6SolarisSqlExpression -Ip $Ip
+    $sql = "SELECT dune.adjust_player_virtual_currency_balance($ControllerId::bigint, $currency, $Amount::bigint) AS new_balance;"
+    $res = Invoke-DuneSqlQuery -Ip $Ip -Sql $sql -ReadOnly $false -MaxRows 1 -TimeoutSec 30
+    if (-not $res.ok) { return @{ ok = $false; error = $res.error } }
+    $maps = ConvertTo-DuneRowMaps -Result $res
+    $bal = if ($maps.Count -ge 1) { ConvertTo-DuneInt $maps[0]['new_balance'] } else { $null }
+    return @{ ok = $true; message = "Added $Amount Solari — new balance $bal."; new_balance = $bal }
+}
+
+# Rename character (rename): dune.set_character_name(account_id, name).
+function Invoke-DunePlayerRename {
+    param([string]$Ip, [long]$AccountId, [string]$Name)
+    $safe = ConvertTo-DuneSqlString $Name
+    $sql = "SELECT dune.set_character_name($AccountId::bigint, '$safe');"
+    $res = Invoke-DuneSqlQuery -Ip $Ip -Sql $sql -ReadOnly $false -MaxRows 1 -TimeoutSec 30
+    if (-not $res.ok) { return @{ ok = $false; error = $res.error } }
+    return @{ ok = $true; message = "Renamed character to '$Name'." }
+}
+
+# Convert an absolute specialization level into the level/XP pair persisted by
+# Funcom. The game keeps level authoritative and recomputes exact XP on login.
+function Get-DuneSpecLevelWriteValues {
+    param([int]$Level)
+    $cap    = $script:DuneSpecXpMax
+    $lvlMax = $script:DuneSpecLevelMax
+
+    $newLevel = [int][Math]::Max(0, [Math]::Min([long]$Level, [long]$lvlMax))
+    $estXp = [int][Math]::Round((3.107 * $newLevel * $newLevel) + (131.1 * $newLevel))
+    $newXp = [int][Math]::Max(0, [Math]::Min([long]$estXp, [long]$cap))
+    if ($newLevel -ge $lvlMax) { $newXp = $cap }
+
+    return @{ level = $newLevel; xp = $newXp }
+}
+
+# Set specialization LEVEL (set-spec-level): write an ABSOLUTE level for one track,
+# clamped 0..100. Keyed by controller id (specialization_tracks.player_id =
+# controller id).
+#
+# Why level, not XP: each track stores both `level` and `xp_amount`. The game
+# treats `level` as authoritative - on login it KEEPS the level and RECOMPUTES
+# `xp_amount` from it on its own non-linear curve. Writing an XP value and deriving
+# the level linearly (the old set-spec-xp behaviour) therefore mismatched the
+# game's curve: typing 20000 xp wrote a level the game read as ~45, and on login
+# the game rewrote xp_amount to 11947 (the curve value for that level). So the
+# admin types the LEVEL they want, which is also the value shown in-game (LVL 53).
+#
+# Routes through dune.set_specialization_xp_and_level, a plain upsert of BOTH
+# columns (confirmed: no triggers, login only READS this table). We write the
+# target level plus an xp_amount placeholder so the panel/bar look right before
+# login; the game overwrites xp_amount from the level on the next login regardless.
+# The placeholder is a quadratic best-fit of observed game curve points
+# (0->0, 45.27->11947, 53.09->15718, 100->44182) so the pre-login readout is close
+# to what the game will settle on. specialization_tracks is login-authoritative, so
+# the new level appears in-game only after a full client re-login (a BG/zone reboot
+# is not enough).
+function Invoke-DunePlayerSetSpecLevel {
+    param([string]$Ip, [long]$ControllerId, [string]$TrackType, [int]$Level)
+    $safeTrack = ConvertTo-DuneSqlString $TrackType
+    $lvlMax = $script:DuneSpecLevelMax   # 100.0
+
+    $values = Get-DuneSpecLevelWriteValues -Level $Level
+    $newLevel = [int]$values.level
+    $newXp = [int]$values.xp
+
+    $newLevelSql = Format-DuneFloatForSql ([double]$newLevel)
+    $sql = "SELECT dune.set_specialization_xp_and_level($ControllerId::bigint, '$safeTrack'::dune.specializationtracktype, $newXp::integer, $newLevelSql::real);"
+    $res = Invoke-DuneSqlQuery -Ip $Ip -Sql $sql -ReadOnly $false -MaxRows 1 -TimeoutSec 30
+    if (-not $res.ok) { return @{ ok = $false; error = $res.error } }
+
+    return @{ ok = $true; message = "Set '$TrackType' to level $newLevel / $([int]$lvlMax). Offline edit - appears in-game after a full re-login." }
+}
+
+function Get-DuneSpecSkillPointBonus {
+    param([string]$RewardName)
+    if ($RewardName -match '_SkillPoint_Super$') { return 5 }
+    if ($RewardName -match '_SkillPoint_Major$') { return 3 }
+    if ($RewardName -match '_SkillPoint$') { return 1 }
+    return 0
+}
+
+$script:DunePatternUpgradingKeystoneId = 82
+
+# Purchase claims do not materialize AddPlayerTag reward effects. Resolve the
+# character through player_state: specialization claims use the controller ID.
+function Get-DuneSpecEffectTagSql {
+    param([long]$ControllerId, $Catalog, [switch]$Reset)
+    $rows = @($Catalog.GetEnumerator() | ForEach-Object {
+        $rewardId = [int]$_.Key
+        foreach ($tag in @($_.Value.player_tags)) {
+            if ($tag) { "($rewardId, '$(ConvertTo-DuneSqlString ([string]$tag))')" }
+        }
+    })
+    if ($rows.Count -eq 0) { return '' }
+    if ($Reset) {
+        return @"
+DELETE FROM dune.player_tags tags
+USING dune.player_state ps, (VALUES $($rows -join ',')) AS effect(reward_id, tag)
+WHERE tags.character_id = ps.id
+  AND ps.player_controller_id = $ControllerId::bigint
+  AND tags.tag = effect.tag;
+"@
+    }
+    return @"
+INSERT INTO dune.player_tags(character_id, tag)
+SELECT ps.id, effect.tag
+FROM dune.player_state ps
+JOIN dune.purchased_specialization_keystones claim
+  ON claim.player_id = ps.player_controller_id
+JOIN (VALUES $($rows -join ',')) AS effect(reward_id, tag)
+  ON effect.reward_id = claim.keystone_id
+WHERE ps.player_controller_id = $ControllerId::bigint
+ON CONFLICT DO NOTHING;
+"@
+}
+
+function Get-DuneSpecRecipeSql {
+    param([long]$ControllerId, $Catalog)
+    $rows = @($Catalog.GetEnumerator() | ForEach-Object {
+        $rewardId = [int]$_.Key
+        foreach ($recipe in @($_.Value.recipes)) {
+            if ($recipe) {
+                $entry = @{ BaseRecipeId = @{ Name = [string]$recipe.id }; m_QualityLevel = [int]$recipe.quality;
+                    m_bIsNew = $false; m_NumberOfRecipeUses = [int]$recipe.uses;
+                    m_bIsLimitedUseRecipe = ([int]$recipe.uses -gt 0); m_Source = 'SchematicPickup' }
+                $json = ConvertTo-DuneSqlString ($entry | ConvertTo-Json -Depth 5 -Compress)
+                "($rewardId, '$json'::jsonb)"
+            }
+        }
+    })
+    if ($rows.Count -eq 0) { return '' }
+    return @"
+WITH required AS (
+    SELECT ps.player_pawn_id AS pawn, effect.recipe
+    FROM dune.player_state ps
+    JOIN dune.purchased_specialization_keystones claim ON claim.player_id = ps.player_controller_id
+    JOIN (VALUES $($rows -join ',')) AS effect(reward_id, recipe) ON effect.reward_id = claim.keystone_id
+    WHERE ps.player_controller_id = $ControllerId::bigint
+), missing AS (
+    SELECT required.pawn, jsonb_agg(required.recipe) AS recipes
+    FROM required JOIN dune.actors a ON a.id = required.pawn
+    WHERE NOT EXISTS (
+        SELECT 1 FROM jsonb_array_elements(COALESCE(
+            a.properties #> '{CraftingRecipesLibraryActorComponent,m_KnownItemRecipes}', '[]'::jsonb)) known
+        WHERE known #>> '{BaseRecipeId,Name}' = required.recipe #>> '{BaseRecipeId,Name}'
+          AND COALESCE((known->>'m_QualityLevel')::int, 0) = (required.recipe->>'m_QualityLevel')::int
+    )
+    GROUP BY required.pawn
+)
+UPDATE dune.actors a
+SET properties = jsonb_set(a.properties, '{CraftingRecipesLibraryActorComponent}',
+    jsonb_set(COALESCE(a.properties->'CraftingRecipesLibraryActorComponent', '{}'::jsonb),
+        '{m_KnownItemRecipes}', COALESCE(a.properties #> '{CraftingRecipesLibraryActorComponent,m_KnownItemRecipes}', '[]'::jsonb) || missing.recipes, true), true)
+FROM missing WHERE a.id = missing.pawn;
+"@
+}
+
+function Get-DuneSpecBonusSql {
+    param([long]$ControllerId, $catalog)
+    $skillPointBonusCases = @(
+        $catalog.GetEnumerator() |
+            Sort-Object { [int]$_.Key } |
+            ForEach-Object {
+                $bonus = Get-DuneSpecSkillPointBonus -RewardName ([string]$_.Value.name)
+                if ($bonus -gt 0) { "WHEN $([int]$_.Key) THEN $bonus" }
+            }
+    )
+
+    if ($skillPointBonusCases.Count -eq 0) { return '' }
+    $bonusCaseSql = $skillPointBonusCases -join ' '
+    return @"
+WITH specialization_bonus AS (
+    SELECT COALESCE(SUM(CASE psk.keystone_id $bonusCaseSql ELSE 0 END), 0)::int AS amount
+    FROM dune.purchased_specialization_keystones psk
+    WHERE psk.player_id = $ControllerId::bigint
+),
+character_bonus AS (
+    SELECT COALESCE(COUNT(*) FILTER (
+        WHERE purchased.id::int = ANY(ARRAY[7,14,21]::int[])
+    ), 0)::int AS amount
+    FROM dune.player_state ps
+    JOIN dune.actors a ON a.id = ps.player_pawn_id
+    LEFT JOIN LATERAL jsonb_array_elements_text(
+        COALESCE(a.properties->'KeystonePlayerComponent'->'m_PurchasedKeystoneIDs', '[]'::jsonb)
+    ) AS purchased(id) ON true
+    WHERE ps.player_controller_id = $ControllerId::bigint
+),
+expected_bonus AS (
+    SELECT specialization_bonus.amount + character_bonus.amount AS amount
+    FROM specialization_bonus, character_bonus
+),
+target_state AS (
+    SELECT fe.entity_id,
+           COALESCE((fe.components #>> '{FLevelComponent,1,KeystoneBonusSkillPoints}')::int, 0) AS current_bonus,
+           COALESCE((fe.components #>> '{FLevelComponent,1,TotalSkillPoints}')::int, 0) AS current_total,
+           COALESCE((fe.components #>> '{FLevelComponent,1,UnspentSkillPoints}')::int, 0) AS current_unspent,
+           COALESCE((
+               SELECT SUM(COALESCE((entry.value->>'SkillPointsSpent')::int, 0))
+               FROM jsonb_each(COALESCE(
+                   fe.components->'FLevelComponent'->1->'ModuleData',
+                   '{}'::jsonb
+               )) entry
+           ), 0)::int AS module_spent
+    FROM dune.player_state ps
+    JOIN dune.actor_fgl_entities afe
+      ON afe.actor_id = ps.player_pawn_id AND afe.slot_name = 'DuneCharacter'
+    JOIN dune.fgl_entities fe ON fe.entity_id = afe.entity_id
+    WHERE ps.player_controller_id = $ControllerId::bigint
+    LIMIT 1
+)
+UPDATE dune.fgl_entities fe
+SET components = jsonb_set(
+    jsonb_set(
+        jsonb_set(
+            fe.components,
+            ARRAY['FLevelComponent','1','KeystoneBonusSkillPoints'],
+            to_jsonb(expected.amount), true),
+        ARRAY['FLevelComponent','1','TotalSkillPoints'],
+        to_jsonb(target.current_total + expected.amount - target.current_bonus), true),
+    ARRAY['FLevelComponent','1','UnspentSkillPoints'],
+    to_jsonb(
+        CASE
+            WHEN target.module_spent + target.current_unspent > target.current_total
+                THEN target.current_unspent
+            ELSE target.current_unspent + expected.amount - target.current_bonus
+        END
+    ), true)
+FROM target_state target, expected_bonus expected
+WHERE fe.entity_id = target.entity_id
+  AND expected.amount > target.current_bonus;
+"@
+}
+
+# Set one specialization level and purchase every reward in that track whose
+# unlock level is at or below the target. Existing rewards are preserved, so
+# applying a lower level never removes rewards already earned or granted.
+function Invoke-DunePlayerApplySpecLevel {
+    param([string]$Ip, [long]$ControllerId, [string]$TrackType, [int]$Level)
+    $offline = Test-DunePlayerOfflineByController -Ip $Ip -ControllerId $ControllerId -RequireExistingPlayerState
+    if (-not $offline.ok) { return @{ ok = $false; error = $offline.reason } }
+
+    $safeTrack = ConvertTo-DuneSqlString $TrackType
+    $values = Get-DuneSpecLevelWriteValues -Level $Level
+    $newLevel = [int]$values.level
+    $newXp = [int]$values.xp
+    $newLevelSql = Format-DuneFloatForSql ([double]$newLevel)
+
+    $catalog = Get-DuneKeystoneCatalog
+    $ids = @(
+        $catalog.GetEnumerator() |
+            Where-Object {
+                ([string]$_.Value.track).Equals($TrackType, [System.StringComparison]::OrdinalIgnoreCase) -and
+                ([int]$_.Value.level -le $newLevel)
+            } |
+            ForEach-Object { [int]$_.Key } |
+            Sort-Object
+    )
+
+    $sql = [System.Text.StringBuilder]::new()
+    [void]$sql.AppendLine('BEGIN;')
+    [void]$sql.AppendLine("SELECT dune.set_specialization_xp_and_level($ControllerId::bigint, '$safeTrack'::dune.specializationtracktype, $newXp::integer, $newLevelSql::real);")
+    if ($ids.Count -gt 0) {
+        $idList = $ids -join ','
+        [void]$sql.AppendLine(@"
+INSERT INTO dune.purchased_specialization_keystones (player_id, keystone_id)
+SELECT $ControllerId::bigint, id
+FROM unnest(ARRAY[$idList]::smallint[]) AS id
+ON CONFLICT DO NOTHING;
+"@)
+    }
+    [void]$sql.AppendLine((Get-DuneSpecBonusSql -ControllerId $ControllerId -catalog $catalog))
+    [void]$sql.AppendLine((Get-DuneSpecEffectTagSql -ControllerId $ControllerId -Catalog $catalog))
+    [void]$sql.AppendLine((Get-DuneSpecRecipeSql -ControllerId $ControllerId -Catalog $catalog))
+    [void]$sql.AppendLine('COMMIT;')
+
+    $res = Invoke-DuneSqlQuery -Ip $Ip -Sql $sql.ToString() -ReadOnly $false -MaxRows 1 -TimeoutSec 30
+    if (-not $res.ok) { return @{ ok = $false; error = $res.error } }
+    $message = "Set '$TrackType' to level $newLevel and applied $($ids.Count) available specialization reward(s). Existing rewards were preserved. Full re-login required."
+    return @{
+        ok = $true
+        message = $message
+        rewards_applied = $ids.Count
+        skill_points_reconciled = $true
+        pattern_upgrading_manual_purchase = $false
+        level = $newLevel
+    }
+}
+
+# Remove only Pattern Upgrading's claimed flag so the game's live purchase path
+# can create the Grade 2-5 schematic recipes on the player's next login.
+function Invoke-DunePlayerPreparePatternUpgrading {
+    param([string]$Ip, [long]$ControllerId)
+    $offline = Test-DunePlayerOfflineByController -Ip $Ip -ControllerId $ControllerId -RequireExistingPlayerState
+    if (-not $offline.ok) { return @{ ok = $false; error = $offline.reason } }
+
+    $sql = @"
+DELETE FROM dune.purchased_specialization_keystones
+WHERE player_id = $ControllerId::bigint
+  AND keystone_id = $script:DunePatternUpgradingKeystoneId::smallint
+RETURNING keystone_id;
+"@
+    $res = Invoke-DuneSqlQuery -Ip $Ip -Sql $sql -ReadOnly $false -MaxRows 1 -TimeoutSec 30
+    if (-not $res.ok) { return @{ ok = $false; error = $res.error } }
+
+    return @{
+        ok = $true
+        message = 'Pattern Upgrading is ready to repurchase. Have the player fully log in, open Crafting specializations, and purchase Pattern Upgrading in-game to create the Grade 2-5 schematic recipes.'
+        keystone_id = $script:DunePatternUpgradingKeystoneId
+    }
+}
+
+# Delete item (delete-item): dune.delete_item(id).
+function Invoke-DunePlayerDeleteItem {
+    param([string]$Ip, [long]$ItemId, [Nullable[long]]$ExpectedStackSize)
+    $expectedClause = if ($null -ne $ExpectedStackSize) { " AND stack_size = $ExpectedStackSize::bigint" } else { '' }
+    $sql = @"
+WITH matched AS (
+    SELECT i.id,
+           (inv.inventory_type = 33 AND EXISTS (
+               SELECT 1 FROM dune.actor_inventories ai
+               WHERE ai.inventory_id = inv.id
+                 AND ai.component_name_hash = -689927216
+           )) AS is_reserve
+    FROM dune.items i
+    JOIN dune.inventories inv ON inv.id = i.inventory_id
+    WHERE i.id = $ItemId::bigint$($expectedClause.Replace('stack_size', 'i.stack_size'))
+    FOR UPDATE
+),
+deleted AS MATERIALIZED (
+    SELECT dune.delete_item(id) AS result
+    FROM matched
+    WHERE NOT is_reserve
+)
+SELECT CASE WHEN is_reserve THEN 'reserve_blocked' ELSE 'deleted' END AS status,
+       (SELECT count(*) FROM deleted)::text AS changed
+FROM matched;
+"@
+    $res = Invoke-DuneSqlQuery -Ip $Ip -Sql $sql -ReadOnly $false -MaxRows 1 -TimeoutSec 30
+    if (-not $res.ok) { return @{ ok = $false; error = $res.error } }
+    $rows = ConvertTo-DuneRowMaps -Result $res
+    if ($rows.Count -eq 0) {
+        return @{ ok = $false; error = 'Item quantity changed or the item no longer exists. Refresh and try again.' }
+    }
+    if ([string]$rows[0]['status'] -ceq 'reserve_blocked') {
+        return @{ ok = $false; error = 'Reserve items cannot be deleted directly. Deleting any Reserve row can hide and strand the remaining Reserve contents while base recycling stays blocked. Use guarded Recover Reserve instead.' }
+    }
+    return @{ ok = $true; message = "Deleted item $ItemId." }
+}
+
+# Catalog max-durability lookup for a template_id. Wraps Get-DuneGameplayItemRule
+# (gameplay-item-data.json) so a missing template returns 0.0 and the repair
+# logic falls back to the item's own three durability fields.
+function Get-DuneItemCatalogMaxDurability {
+    param([string]$TemplateId)
+    if (-not $TemplateId) { return 0.0 }
+    try {
+        $rule = Get-DuneGameplayItemRule -TemplateId $TemplateId
+        if ($null -ne $rule -and $null -ne $rule.max_durability) {
+            return [double]$rule.max_durability
+        }
+    } catch {}
+    return 0.0
+}
+
+# Format a double for inline SQL with invariant decimal separator (a comma from
+# locale-dependent formatting would break PostgreSQL number parsing).
+function Format-DuneFloatForSql {
+    param([double]$Value)
+    return $Value.ToString([System.Globalization.CultureInfo]::InvariantCulture)
+}
+
+function ConvertTo-DuneBool {
+    param($Value)
+    if ($Value -is [bool]) { return $Value }
+    $s = ([string]$Value).Trim()
+    return ($s -in @('1', 't', 'true', 'y', 'yes'))
+}
+
+function Resolve-DuneRepairDurabilityTarget {
+    param(
+        [double]$CatalogMax,
+        [double]$ItemMax,
+        [double]$ItemCurrent,
+        [double]$ItemDecayedMax,
+        [bool]$HasCurrent = $false,
+        [bool]$CatalogKnown = $false
+    )
+    if ($CatalogKnown -and $CatalogMax -le 0 -and $ItemMax -le 0) { return 0.0 }
+    $cap = [Math]::Max([Math]::Max($CatalogMax, $ItemMax), $ItemDecayedMax)
+    if ($cap -le 0) { return 0.0 }
+    return [Math]::Max($cap, $ItemCurrent)
+}
+
+# Repair item (repair-item): set MaxDurability/CurrentDurability/DecayedMaxDurability
+# to GREATEST(catalog.max_durability, item.MaxDurability, item.CurrentDurability,
+# item.DecayedMaxDurability). The catalog (gameplay-item-data.json) carries the
+# factory-spec cap; the item's own fields can be higher because of per-player
+# stat/perk bonuses (decay only lowers Current + DecayedMax, never Max). Taking
+# the GREATEST of all four guarantees repair never lowers an already-buffed cap
+# and never leaves a buggy item below its catalog spec. Catalog miss => fall back
+# to a saved Max/DecayedMax cap; current durability alone is not a maximum.
+function Invoke-DunePlayerRepairItem {
+    param([string]$Ip, [long]$ItemId)
+    if ($ItemId -le 0) { return @{ ok = $false; error = 'item_id is required.' } }
+
+    $infoSql = @"
+SELECT template_id,
+       COALESCE((stats->'FItemStackAndDurabilityStats'->1->>'MaxDurability')::float8, 0)        AS m,
+       COALESCE((stats->'FItemStackAndDurabilityStats'->1->>'CurrentDurability')::float8, 0)    AS c,
+       COALESCE((stats->'FItemStackAndDurabilityStats'->1->>'DecayedMaxDurability')::float8, 0) AS d,
+       (stats->'FItemStackAndDurabilityStats'->1 ? 'CurrentDurability') AS has_c
+FROM dune.items
+WHERE id = $ItemId::bigint
+  AND stats ? 'FItemStackAndDurabilityStats';
+"@
+    $info = Invoke-DuneSqlQuery -Ip $Ip -Sql $infoSql -ReadOnly $true -MaxRows 1 -TimeoutSec 30
+    if (-not $info.ok) { return @{ ok = $false; error = "repair item: $($info.error)" } }
+    $rows = ConvertTo-DuneRowMaps -Result $info
+    if ($rows.Count -eq 0) {
+        return @{ ok = $true; message = "Item $ItemId has no durability block — nothing to repair." }
+    }
+    $tmpl    = [string]$rows[0]['template_id']
+    $itemMax = [double]([string]$rows[0]['m'])
+    $itemCur = [double]([string]$rows[0]['c'])
+    $itemDec = [double]([string]$rows[0]['d'])
+    $catMax  = Get-DuneItemCatalogMaxDurability -TemplateId $tmpl
+    $hasCur  = ConvertTo-DuneBool $rows[0]['has_c']
+    $target  = Resolve-DuneRepairDurabilityTarget -CatalogMax $catMax -CatalogKnown ([bool](Get-DuneGameplayItemRule -TemplateId $tmpl).durability_known) -ItemMax $itemMax -ItemCurrent $itemCur -ItemDecayedMax $itemDec -HasCurrent $hasCur
+    if ($target -le 0) {
+        return @{ ok = $true; message = "Item $ItemId has no usable durability value — left untouched." }
+    }
+    $tval = Format-DuneFloatForSql -Value $target
+
+    $sql = @"
+UPDATE dune.items i
+SET stats = jsonb_set(jsonb_set(jsonb_set(i.stats,
+        '{FItemStackAndDurabilityStats,1,MaxDurability}',        to_jsonb($tval::float8), true),
+        '{FItemStackAndDurabilityStats,1,CurrentDurability}',    to_jsonb($tval::float8), true),
+        '{FItemStackAndDurabilityStats,1,DecayedMaxDurability}', to_jsonb($tval::float8), true)
+WHERE i.id = $ItemId::bigint
+  AND i.stats ? 'FItemStackAndDurabilityStats';
+"@
+    $res = Invoke-DuneSqlQuery -Ip $Ip -Sql $sql -ReadOnly $false -MaxRows 1 -TimeoutSec 30
+    if (-not $res.ok) { return @{ ok = $false; error = $res.error } }
+    return @{ ok = $true; message = "Repaired item $ItemId to $tval durability." }
+}
+
+# Set the three FItemStackAndDurabilityStats fields directly. Per-item editor for
+# the UI: lets the operator override Max / Current / DecayedMax manually when the
+# catalog max-guess is wrong or the durability values are otherwise broken. No
+# offline gate (same as the wrench Repair button); rejects negatives, NaN, and
+# infinities. Items without a durability block are left untouched.
+function Invoke-DunePlayerSetItemDurability {
+    param(
+        [string]$Ip, [long]$ItemId,
+        [double]$Max, [double]$Current, [double]$Decayed
+    )
+    if ($ItemId -le 0) { return @{ ok = $false; error = 'item_id is required.' } }
+    foreach ($pair in @(
+            @{ n='Max';     v=$Max },
+            @{ n='Current'; v=$Current },
+            @{ n='Decayed'; v=$Decayed })) {
+        if ([double]::IsNaN($pair.v) -or [double]::IsInfinity($pair.v)) {
+            return @{ ok = $false; error = "$($pair.n) must be a finite number." }
+        }
+        if ($pair.v -lt 0) {
+            return @{ ok = $false; error = "$($pair.n) must be >= 0." }
+        }
+    }
+    $mv = Format-DuneFloatForSql -Value $Max
+    $cv = Format-DuneFloatForSql -Value $Current
+    $dv = Format-DuneFloatForSql -Value $Decayed
+
+    $sql = @"
+UPDATE dune.items i
+SET stats = jsonb_set(jsonb_set(jsonb_set(i.stats,
+        '{FItemStackAndDurabilityStats,1,MaxDurability}',        to_jsonb($mv::float8), true),
+        '{FItemStackAndDurabilityStats,1,CurrentDurability}',    to_jsonb($cv::float8), true),
+        '{FItemStackAndDurabilityStats,1,DecayedMaxDurability}', to_jsonb($dv::float8), true)
+WHERE i.id = $ItemId::bigint
+  AND i.stats ? 'FItemStackAndDurabilityStats'
+RETURNING i.id::text AS item_id;
+"@
+    $res = Invoke-DuneSqlQuery -Ip $Ip -Sql $sql -ReadOnly $false -MaxRows 1 -TimeoutSec 30
+    if (-not $res.ok) { return @{ ok = $false; error = $res.error } }
+    $affected = @(ConvertTo-DuneRowMaps -Result $res).Count
+    if ($affected -eq 0) {
+        return @{ ok = $true; message = "Item $ItemId has no durability block — nothing changed." }
+    }
+    return @{ ok = $true; message = "Set item $ItemId durability to Max=$mv / Current=$cv / DecayedMax=$dv." }
+}
+
+# Per-item water editor. Writes FFillableItemStats[1].CurrentAmount verbatim for
+# any item carrying that block (water canteens/literjons + stillsuit hydration).
+# Known water containers missing their component are initialized from the
+# bundled game table on explicit save. Existing unrelated stats are retained.
+# Rejects negatives, NaN and infinities; other fluid types are not converted.
+# IMPORTANT: the map pod caches inventory in RAM and flushes it back to Postgres
+# on its periodic save tick, so a value written here will NOT appear in-game (and
+# may be overwritten) until that map's pod / the battlegroup is restarted. The UI
+# surfaces this caveat.
+function Invoke-DunePlayerSetItemWater {
+    param([string]$Ip, [long]$ItemId, [double]$Amount)
+    if ($ItemId -le 0) { return @{ ok = $false; error = 'item_id is required.' } }
+    if ([double]::IsNaN($Amount) -or [double]::IsInfinity($Amount)) {
+        return @{ ok = $false; error = 'amount must be a finite number.' }
+    }
+    if ($Amount -lt 0) { return @{ ok = $false; error = 'amount must be >= 0.' } }
+    $wv = Format-DuneFloatForSql -Value $Amount
+    $waterDefaults = Get-DuneItemStatDefaultsSql -Block FFillableItemStats
+
+    $sql = @"
+UPDATE dune.items i
+SET stats = jsonb_set(
+        jsonb_set(jsonb_set(i.stats, '{FFillableItemStats}',
+            COALESCE(i.stats->'FFillableItemStats', $waterDefaults -> lower(i.template_id)), true),
+            '{FFillableItemStats,1,FillableType}', '"Water"'::jsonb, true),
+        '{FFillableItemStats,1,CurrentAmount}', to_jsonb($wv::float8), true)
+WHERE i.id = $ItemId::bigint
+  AND ((i.stats->'FFillableItemStats'->1->>'FillableType' = 'Water')
+       OR ($waterDefaults ? lower(i.template_id)
+           AND (NOT (i.stats ? 'FFillableItemStats')
+                OR i.stats->'FFillableItemStats'->1->>'FillableType' = 'None')))
+RETURNING i.id::text AS item_id;
+"@
+    $res = Invoke-DuneSqlQuery -Ip $Ip -Sql $sql -ReadOnly $false -MaxRows 1 -TimeoutSec 30 -Bulk
+    if (-not $res.ok) { return @{ ok = $false; error = $res.error } }
+    $affected = @(ConvertTo-DuneRowMaps -Result $res).Count
+    if ($affected -eq 0) {
+        return @{ ok = $false; error = "Item $ItemId is not a supported water container or no longer exists. Refresh the inventory." }
+    }
+    return @{ ok = $true; message = "Set item $ItemId water to $wv. Restart the map pod / battlegroup for it to take effect in-game." }
+}
+
+# Per-item stack-quantity editor for player inventory. stack_size is a plain
+# bigint column on dune.items (NOT inside the stats jsonb), so this is a direct
+# UPDATE. Rejects values below 1 (use the delete action to remove an item).
+# IMPORTANT: when the player is online the map pod caches inventory in RAM and
+# flushes it back on its save tick, so the new quantity won't appear in-game (and
+# may be overwritten) until the player relogs / the pod is restarted. The UI
+# surfaces this caveat.
+function Invoke-DunePlayerSetItemStack {
+    param([string]$Ip, [long]$ItemId, [long]$StackSize, [Nullable[long]]$ExpectedStackSize)
+    if ($ItemId -le 0) { return @{ ok = $false; error = 'item_id is required.' } }
+    if ($StackSize -lt 1) { return @{ ok = $false; error = 'stack_size must be at least 1.' } }
+    $expectedClause = if ($null -ne $ExpectedStackSize) { " AND i.stack_size = $ExpectedStackSize::bigint" } else { '' }
+    $sql = @"
+WITH matched AS (
+    SELECT i.id, i.stack_size,
+           (inv.inventory_type = 33 AND EXISTS (
+               SELECT 1 FROM dune.actor_inventories ai
+               WHERE ai.inventory_id = inv.id
+                 AND ai.component_name_hash = -689927216
+           )) AS is_reserve
+    FROM dune.items i
+    JOIN dune.inventories inv ON inv.id = i.inventory_id
+    WHERE i.id = $ItemId::bigint$expectedClause
+    FOR UPDATE
+),
+updated AS (
+    UPDATE dune.items i
+       SET stack_size = $StackSize::bigint
+      FROM matched m
+     WHERE i.id = m.id
+       AND (NOT m.is_reserve OR $StackSize::bigint >= m.stack_size)
+    RETURNING i.id
+)
+SELECT CASE
+           WHEN is_reserve AND $StackSize::bigint < stack_size THEN 'reserve_blocked'
+           WHEN EXISTS (SELECT 1 FROM updated) THEN 'updated'
+           ELSE 'stale'
+       END AS status
+FROM matched;
+"@
+    $res = Invoke-DuneSqlQuery -Ip $Ip -Sql $sql -ReadOnly $false -MaxRows 1 -TimeoutSec 30
+    if (-not $res.ok) { return @{ ok = $false; error = $res.error } }
+    $rows = ConvertTo-DuneRowMaps -Result $res
+    if ($rows.Count -eq 0 -or [string]$rows[0]['status'] -eq 'stale') {
+        return @{ ok = $false; error = 'Item quantity changed or the item no longer exists. Refresh and try again.' }
+    }
+    if ([string]$rows[0]['status'] -eq 'reserve_blocked') {
+        return @{ ok = $false; error = 'Reserve quantities cannot be reduced directly because remaining rows can become hidden and keep base recycling blocked. Use guarded Recover Reserve instead.' }
+    }
+    return @{ ok = $true; message = "Set item $ItemId stack to $StackSize." }
+}
+
+function Invoke-DunePlayerSetWeaponAmmo {
+    param([string]$Ip, [long]$PawnId, [long]$ItemId, [long]$Ammo, [long]$ExpectedAmmo)
+    if ($PawnId -le 0) { return @{ ok = $false; error = 'pawn_id is required.' } }
+    if ($ItemId -le 0) { return @{ ok = $false; error = 'item_id is required.' } }
+    if ($Ammo -lt 0 -or $Ammo -gt 2000000000) { return @{ ok = $false; error = 'ammo must be between 0 and 2000000000.' } }
+    if ($ExpectedAmmo -lt 0 -or $ExpectedAmmo -gt 2000000000) { return @{ ok = $false; error = 'expected_ammo must be between 0 and 2000000000.' } }
+
+    $off = Test-DunePlayerOffline -Ip $Ip -PawnId $PawnId -RequireVerifiedStatus
+    if (-not $off.ok) { return @{ ok = $false; error = "Player must be offline before changing loaded weapon ammo. $($off.reason)" } }
+    $weaponDefaults = Get-DuneItemStatDefaultsSql -Block FWeaponItemStats
+
+    $sql = @"
+WITH target AS (
+    SELECT i.id,
+           COALESCE(i.stats->'FWeaponItemStats'->1->>'CurrentAmmo', '0') AS before_ammo,
+           COALESCE(i.stats->'FWeaponItemStats', $weaponDefaults -> lower(i.template_id)) AS weapon_stats
+    FROM dune.items i
+    JOIN dune.inventories inv ON inv.id = i.inventory_id
+    WHERE inv.actor_id = $PawnId::bigint
+      AND i.id = $ItemId::bigint
+      AND ((jsonb_typeof(i.stats->'FWeaponItemStats') = 'array'
+            AND jsonb_array_length(i.stats->'FWeaponItemStats') > 1
+            AND jsonb_typeof(i.stats->'FWeaponItemStats'->1) = 'object')
+           OR (NOT (i.stats ? 'FWeaponItemStats') AND $weaponDefaults ? lower(i.template_id)))
+      AND COALESCE(i.stats->'FWeaponItemStats'->1->>'CurrentAmmo', '0') ~ '^[0-9]+$'
+    FOR UPDATE
+),
+updated AS (
+    UPDATE dune.items i
+    SET stats = CASE WHEN i.stats ? 'FWeaponItemStats'
+        THEN jsonb_set(i.stats, '{FWeaponItemStats,1,CurrentAmmo}', to_jsonb($Ammo::bigint), true)
+        ELSE jsonb_set(i.stats, '{FWeaponItemStats}', jsonb_set(t.weapon_stats, '{1,CurrentAmmo}', to_jsonb($Ammo::bigint), true), true) END
+    FROM target t
+    WHERE i.id = t.id
+      AND t.before_ammo::bigint = $ExpectedAmmo::bigint
+    RETURNING i.id::text AS item_id, t.before_ammo, i.stats->'FWeaponItemStats'->1->>'CurrentAmmo' AS after_ammo
+)
+SELECT item_id, before_ammo, after_ammo FROM updated;
+"@
+    $res = Invoke-DuneSqlQuery -Ip $Ip -Sql $sql -ReadOnly $false -MaxRows 1 -TimeoutSec 30 -Bulk
+    if (-not $res.ok) { return @{ ok = $false; error = $res.error } }
+    $rows = ConvertTo-DuneRowMaps -Result $res
+    if (@($rows).Count -eq 0) {
+        return @{ ok = $false; error = 'Weapon ammo changed, the item is not a ranged weapon, or it no longer belongs to this offline player. Refresh and try again.' }
+    }
+    $row = $rows[0]
+    return @{
+        ok = $true
+        message = "Set weapon ammo on item $ItemId from $($row['before_ammo']) to $($row['after_ammo'])."
+        item_id = (ConvertTo-DuneInt $row['item_id'])
+        before_ammo = (ConvertTo-DuneInt $row['before_ammo'])
+        after_ammo = (ConvertTo-DuneInt $row['after_ammo'])
+    }
+}
+
+# Give item (give-item): stack onto a matching backpack stack or insert a new one.
+# Single data-modifying CTE so it runs atomically in one psql call. New rows must
+# stamp acquisition_time with the current epoch — the game treats acquisition_time=0
+# (1970) items as fully decayed and drops them on load, so an offline give would
+# vanish on the player's next login.
+function Get-DuneStackedItemGrantSql {
+    param([string]$InventoryQuery,[string]$Template,[long]$Qty,[long]$Quality,[string]$StatsJson,[long]$StackMax,[bool]$AllowExisting=$true)
+    if ($Qty -lt 1 -or $StackMax -lt 1) { throw 'Grant quantity and stack limit must be positive.' }
+    $safeTmpl=ConvertTo-DuneSqlString $Template
+    $safeStats=ConvertTo-DuneSqlString $StatsJson
+    $merge=if($AllowExisting -and $StackMax -gt 1){'TRUE'}else{'FALSE'}
+    return @"
+WITH inv AS MATERIALIZED (
+    $InventoryQuery
+),
+existing AS MATERIALIZED (
+    SELECT i.id, i.stack_size, $StackMax::bigint-i.stack_size AS room,
+           COALESCE(SUM($StackMax::bigint-i.stack_size) OVER (ORDER BY i.position_index,i.id ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING),0) AS prior_room
+    FROM dune.items i,inv
+    WHERE i.inventory_id=inv.id AND i.template_id='$safeTmpl'
+      AND COALESCE(i.quality_level,0)=$Quality::bigint AND $merge
+      AND i.stack_size BETWEEN 0 AND $StackMax::bigint-1
+      AND NOT (COALESCE(i.stats,'{}'::jsonb) ? 'FAugmentedItemStats')
+),
+allocation AS MATERIALIZED (
+    SELECT id,LEAST(room,GREATEST(0,$Qty::bigint-prior_room))::bigint AS added FROM existing
+),
+remaining AS MATERIALIZED (
+    SELECT GREATEST(0,$Qty::bigint-COALESCE(SUM(added),0))::bigint AS qty FROM allocation
+),
+capacity AS MATERIALIZED (
+    SELECT inv.id,inv.maxc,COUNT(i.id)::bigint AS cnt,
+           COALESCE(MAX(i.position_index),-1)::bigint AS last_pos,
+           (remaining.qty+$StackMax::bigint-1)/$StackMax::bigint AS new_stacks
+    FROM inv CROSS JOIN remaining LEFT JOIN dune.items i ON i.inventory_id=inv.id
+    GROUP BY inv.id,inv.maxc,remaining.qty
+),
+allowed AS MATERIALIZED (
+    SELECT * FROM capacity WHERE maxc<=0 OR cnt+new_stacks<=maxc
+),
+upd AS (
+    UPDATE dune.items i SET stack_size=i.stack_size+a.added
+    FROM allocation a,allowed WHERE i.id=a.id AND a.added>0
+    RETURNING i.id, i.stats
+),
+ins AS (
+    INSERT INTO dune.items (inventory_id,stack_size,position_index,template_id,quality_level,acquisition_time,stats)
+    SELECT allowed.id,LEAST($StackMax::bigint,remaining.qty-(n-1)*$StackMax::bigint),
+           allowed.last_pos+n,'$safeTmpl',$Quality::bigint,EXTRACT(EPOCH FROM now())::bigint,'$safeStats'::jsonb
+    FROM allowed CROSS JOIN remaining CROSS JOIN LATERAL generate_series(1::bigint,allowed.new_stacks) AS n
+    RETURNING id, stats
+),
+chosen AS (SELECT id AS item_id,stats FROM upd UNION ALL SELECT id AS item_id,stats FROM ins)
+SELECT (SELECT item_id FROM chosen ORDER BY item_id LIMIT 1) AS item_id,
+       COALESCE((SELECT bool_and(stats='$safeStats'::jsonb)::text FROM chosen),'false') AS stats_match,
+       capacity.cnt,capacity.maxc FROM capacity;
+"@
+}
+
+function Invoke-DunePlayerGiveItem {
+    param(
+        [string]$Ip,
+        [long]$PawnId,
+        [string]$Template,
+        [long]$Qty,
+        [long]$Quality,
+        $Augments = @()
+    )
+    $tv = Test-DuneValidGiveTemplate -TemplateId $Template
+    if (-not $tv.ok) { return @{ ok = $false; error = $tv.error } }
+    if (@($Augments).Count -gt 0 -and $Qty -ne 1) {
+        return @{ ok = $false; error = 'Pre-augmented grants require a quantity of 1.' }
+    }
+    # Gate on inventory space (volume + slots), same guard as the live path, so a
+    # give only proceeds when it fits — online or offline.
+    $cap = Test-DuneInventoryCapacity -Ip $Ip -PawnId $PawnId -Template $Template -Quantity ([int]$Qty) -Quality $Quality -AllowExistingStack (@($Augments).Count -eq 0)
+    if (-not $cap.ok) { return $cap }
+    try {
+        $statsJson = Get-DuneGiveItemStatsJson -TemplateId $Template -Augments $Augments
+    } catch {
+        return @{ ok = $false; error = $_.Exception.Message }
+    }
+    $stackMax=if(@($Augments).Count -gt 0){1L}else{[long](Resolve-DuneStackMax -Ip $Ip -Template $Template -Quality $Quality)}
+    $sql=Get-DuneStackedItemGrantSql -InventoryQuery "SELECT id,COALESCE(max_item_count,0) AS maxc FROM dune.inventories WHERE actor_id=$PawnId::bigint AND inventory_type=0 ORDER BY id LIMIT 1 FOR UPDATE" -Template $Template -Qty $Qty -Quality $Quality -StatsJson $statsJson -StackMax $stackMax -AllowExisting (@($Augments).Count -eq 0)
+    $res = Invoke-DuneSqlQuery -Ip $Ip -Sql $sql -ReadOnly $false -MaxRows 1 -TimeoutSec 30
+    if (-not $res.ok) { return @{ ok = $false; error = $res.error } }
+    $maps = ConvertTo-DuneRowMaps -Result $res
+    $itemId = if ($maps.Count -ge 1) { [string]$maps[0]['item_id'] } else { '' }
+    if (-not $itemId) {
+        return @{ ok = $false; error = 'No backpack inventory found for that player.' }
+    }
+    if (@($Augments).Count -gt 0 -and [string]$maps[0]['stats_match'] -ine 'true') {
+        return @{ ok = $false; error = 'The granted item failed exact augment readback.' }
+    }
+    $augmentGrades = @($Augments | ForEach-Object {
+        if ($_ -is [Collections.IDictionary]) { [int]$_['quality'] } else { [int]$_.quality }
+    })
+    $augmentNote = if ($augmentGrades.Count -gt 0) {
+        " with $($augmentGrades.Count) augment(s) at grade(s) $($augmentGrades -join ', ')"
+    } else { '' }
+    return @{ ok = $true; message = "Gave $Qty x $Template (quality $Quality)$augmentNote to player (item $itemId)."; item_id = (ConvertTo-DuneInt $itemId) }
+}
+
+# ----------------------------------------------------------------------------
+# Demo data — used when the live DB is unreachable or ?demo=1 is requested.
+# ----------------------------------------------------------------------------
+function Get-DunePlayersDemo {
+    return @(
+        [ordered]@{ id=20001; account_id=9001; controller_id=30001; name='Duncan Idaho'; class='PlayerCharacter'; map='Hagga Basin'; faction_id=1; faction_name='Atreides'; online_status='Online' }
+        [ordered]@{ id=20002; account_id=9002; controller_id=30002; name='Gurney Halleck'; class='PlayerCharacter'; map='Hagga Basin'; faction_id=1; faction_name='Atreides'; online_status='Offline' }
+        [ordered]@{ id=20003; account_id=9003; controller_id=30003; name='Stilgar'; class='PlayerCharacter'; map='Deep Desert'; faction_id=0; faction_name=''; online_status='Online' }
+        [ordered]@{ id=20004; account_id=9004; controller_id=30004; name='Feyd-Rautha'; class='PlayerCharacter'; map='Hagga Basin'; faction_id=2; faction_name='Harkonnen'; online_status='Offline' }
+    )
+}
+
+function Get-DunePlayerDetailDemo {
+    param([long]$PawnId)
+    return @{
+        ok = $true
+        inventory = @(
+            [ordered]@{ id=70001; template_id='Stillsuit_T4'; name='Stillsuit (Mk IV)'; kind='item'; stack_size=1; quality=3; durability='842.0'; max_durability='1000.0'; water_amount='420.0'; water_type='' }
+            [ordered]@{ id=70002; template_id='Spice_Melange'; name='Spice Melange'; kind='item'; stack_size=1200; quality=0; durability='N/A'; max_durability='N/A'; water_amount='N/A'; water_type='' }
+            [ordered]@{ id=70003; template_id='Maula_Pistol'; name='Maula Pistol'; kind='item'; stack_size=1; quality=4; durability='310.0'; max_durability='400.0'; water_amount='N/A'; water_type='' }
+            [ordered]@{ id=70004; template_id='Emote_AtreSalute_01'; name='Atreides Salute'; kind='emote'; stack_size=1; quality=0; durability='N/A'; max_durability='N/A'; water_amount='N/A'; water_type='' }
+            [ordered]@{ id=70005; template_id='Emote_Wave_01'; name='Wave'; kind='emote'; stack_size=1; quality=0; durability='N/A'; max_durability='N/A'; water_amount='N/A'; water_type='' }
+            [ordered]@{ id=70006; template_id='D_ContractSmugglerDocuments'; name='Smuggler Documents'; kind='contract'; stack_size=1; quality=0; durability='N/A'; max_durability='N/A'; water_amount='N/A'; water_type='' }
+            [ordered]@{ id=70007; template_id='HighCapacityLiterjon_05'; name='High-Capacity Literjon'; kind='item'; stack_size=1; quality=2; durability='N/A'; max_durability='N/A'; water_amount='2500.0'; water_type='Water' }
+        )
+        specs = @(
+            [ordered]@{ track_type='Trooper'; xp=44182; level=100.0 }
+            [ordered]@{ track_type='Mentat'; xp=18250; level=42.0 }
+        )
+        currency = @(
+            [ordered]@{ currency_id=1; balance=125000 }
+            [ordered]@{ currency_id=2; balance=860 }
+        )
+    }
+}
+
+# ============================================================================
+# v11.5.6 — extended player surface (port of the reference implementation's player tooling).
+#
+# Adds:
+#   - Get-DunePlayerSummaryLive     : server-wide aggregate dashboard
+#   - Get-DunePlayerStatsLive       : per-player snapshot (currencies, level,
+#                                      faction, playtime, last_seen)
+#   - Get-DunePlayerSpecsFullLive   : full spec tracks + keystone counts
+#   - Get-DunePlayerTagsLive        : player_tags labels
+#   - Get-DunePlayerEventsLive      : recent dune.event_log rows
+#   - Invoke-DunePlayerGrantMaxSpec : set xp=44182 level=100 for one track
+#   - Invoke-DunePlayerResetSpec    : DELETE one track (or 'all' resets fns)
+#   - Invoke-DunePlayerGrantAllKeystones / Invoke-DunePlayerResetAllKeystones
+#   - Invoke-DunePlayerSetTags      : replace tag set for an account
+#
+# All read calls degrade gracefully when their backing tables don't exist on
+# the live game DB (returns @{ ok=$true; unsupported=$true; rows=@() }).
+# ============================================================================
+
+# Wraps a SQL call; if the error message looks like "relation does not exist"
+# returns a soft "unsupported" instead of bubbling the failure. Lets the
+# frontend render an empty section instead of an error toast when the live
+# server doesn't have a given player-admin table (older builds, etc).
+function Invoke-DuneSqlSoft {
+    param([string]$Ip, [string]$Sql, [int]$MaxRows = 1000, [int]$TimeoutSec = 30)
+    $res = Invoke-DuneSqlQuery -Ip $Ip -Sql $Sql -ReadOnly $true -MaxRows $MaxRows -TimeoutSec $TimeoutSec
+    if (-not $res.ok) {
+        $msg = [string]$res.error
+        if ($msg -match 'does not exist' -or $msg -match 'undefined' -or $msg -match 'permission denied') {
+            return @{ ok = $true; unsupported = $true; reason = $msg; rows = @() }
+        }
+        return @{ ok = $false; error = $msg }
+    }
+    return @{ ok = $true; unsupported = $false; raw = $res }
+}
+
+# ---------------------------------------------------------------------------
+# Server-wide summary — total players, online count, by-faction, by-map,
+# currency totals, average character level. Single round trip via a SQL
+# script that returns several labelled result sets stitched together.
+# Each metric tolerates a missing table by returning 0/empty.
+# ---------------------------------------------------------------------------
+$script:DunePlayerSummarySql = @'
+SELECT 'totals' AS bucket, NULL AS k,
+       (SELECT COUNT(*) FROM dune.actors WHERE class ILIKE '%PlayerCharacter%')::bigint AS v
+UNION ALL
+SELECT 'online_now', NULL,
+       (SELECT COUNT(*) FROM dune.player_state WHERE online_status::text ILIKE 'Online')::bigint
+UNION ALL
+SELECT 'distinct_factions', NULL,
+       (SELECT COUNT(DISTINCT pf.faction_id)
+        FROM dune.player_faction pf
+        WHERE pf.faction_id > 0)::bigint
+UNION ALL
+SELECT 'by_faction', COALESCE(f.name, 'Unaligned'),
+       COUNT(*)::bigint
+  FROM dune.actors a
+  LEFT JOIN dune.player_state   ps ON ps.account_id = a.owner_account_id
+  LEFT JOIN dune.player_faction pf ON pf.actor_id   = ps.player_controller_id
+  LEFT JOIN dune.factions f ON f.id = pf.faction_id
+  WHERE a.class ILIKE '%PlayerCharacter%'
+  GROUP BY 2
+UNION ALL
+SELECT 'by_map', COALESCE(a.map, '(none)'),
+       COUNT(*)::bigint
+  FROM dune.actors a
+  WHERE a.class ILIKE '%PlayerCharacter%'
+  GROUP BY 2
+ORDER BY 1, 2;
+'@
+
+function Get-DunePlayerSummaryLive {
+    param([string]$Ip)
+    $res = Invoke-DuneSqlQuery -Ip $Ip -Sql $script:DunePlayerSummarySql -ReadOnly $true -MaxRows 2000 -TimeoutSec 30
+    if (-not $res.ok) { return @{ ok = $false; error = $res.error } }
+    $totals = [ordered]@{ players = 0; online = 0; factions = 0 }
+    $byFaction = @()
+    $byMap = @()
+    foreach ($r in (ConvertTo-DuneRowMaps -Result $res)) {
+        $bucket = [string]$r['bucket']
+        switch ($bucket) {
+            'totals'             { $totals.players  = (ConvertTo-DuneInt $r['v']) }
+            'online_now'         { $totals.online   = (ConvertTo-DuneInt $r['v']) }
+            'distinct_factions'  { $totals.factions = (ConvertTo-DuneInt $r['v']) }
+            'by_faction'         { $byFaction += [ordered]@{ name = [string]$r['k']; count = (ConvertTo-DuneInt $r['v']) } }
+            'by_map'             { $byMap     += [ordered]@{ name = [string]$r['k']; count = (ConvertTo-DuneInt $r['v']) } }
+        }
+    }
+    return @{ ok = $true; totals = $totals; by_faction = $byFaction; by_map = $byMap }
+}
+
+function Get-DunePlayerSummaryDemo {
+    return @{
+        totals     = [ordered]@{ players = 4; online = 2; factions = 2 }
+        by_faction = @(
+            [ordered]@{ name = 'Atreides';   count = 2 }
+            [ordered]@{ name = 'Harkonnen';  count = 1 }
+            [ordered]@{ name = 'Unaligned';  count = 1 }
+        )
+        by_map = @(
+            [ordered]@{ name = 'Hagga Basin'; count = 3 }
+            [ordered]@{ name = 'Deep Desert'; count = 1 }
+        )
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Per-player stats — currency balances, faction tier, char xp/level, last
+# avatar activity. Defensive: each subquery wrapped so a missing column on
+# older schemas degrades to NULL instead of failing the whole call.
+# ---------------------------------------------------------------------------
+$script:DunePlayerStatsSql = @'
+SELECT
+    a.id                                                              AS pawn_id,
+    COALESCE(a.owner_account_id, 0)                                   AS account_id,
+    COALESCE(ps.player_controller_id, 0)                              AS controller_id,
+    COALESCE(ps.character_name, '')                                   AS character_name,
+    a.class                                                           AS class,
+    COALESCE(a.map, '')                                               AS map,
+    COALESCE(ps.online_status::text, 'Offline')                       AS online_status,
+    COALESCE(to_char(ps.last_avatar_activity AT TIME ZONE 'UTC',
+                     'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '')               AS last_seen,
+    COALESCE(pf.faction_id, 0)                                        AS faction_id,
+    COALESCE(f.name, '')                                              AS faction_name,
+    COALESCE((SELECT balance FROM dune.player_virtual_currency_balances
+              WHERE player_controller_id = ps.player_controller_id
+                AND currency_id = __SOLARIS_CURRENCY__), 0)::bigint  AS solaris,
+    COALESCE((SELECT SUM(balance) FROM dune.player_virtual_currency_balances
+              WHERE player_controller_id = ps.player_controller_id), 0)::bigint AS total_currency
+FROM dune.actors a
+LEFT JOIN dune.player_state    ps ON ps.account_id = a.owner_account_id
+LEFT JOIN dune.player_faction  pf ON pf.actor_id   = ps.player_controller_id
+LEFT JOIN dune.factions        f  ON f.id          = pf.faction_id
+WHERE a.id = {0}::bigint
+LIMIT 1;
+'@
+
+function Get-DunePlayerStatsLive {
+    param([string]$Ip, [long]$PawnId)
+    $sql = [string]::Format($script:DunePlayerStatsSql, $PawnId)
+    $sql = $sql.Replace('__SOLARIS_CURRENCY__', (Get-V6SolarisSqlExpression -Ip $Ip))
+    $res = Invoke-DuneSqlQuery -Ip $Ip -Sql $sql -ReadOnly $true -MaxRows 1 -TimeoutSec 30
+    if (-not $res.ok) { return @{ ok = $false; error = $res.error } }
+    $maps = ConvertTo-DuneRowMaps -Result $res
+    if (-not $maps -or $maps.Count -lt 1) { return @{ ok = $true; stats = $null } }
+    $r = $maps[0]
+    $stats = [ordered]@{
+        pawn_id        = (ConvertTo-DuneInt $r['pawn_id'])
+        account_id     = (ConvertTo-DuneInt $r['account_id'])
+        controller_id  = (ConvertTo-DuneInt $r['controller_id'])
+        character_name = [string]$r['character_name']
+        class          = (Get-DuneShortClass ([string]$r['class']))
+        map            = [string]$r['map']
+        online_status  = [string]$r['online_status']
+        last_seen      = [string]$r['last_seen']
+        faction_id     = (ConvertTo-DuneInt $r['faction_id'])
+        faction_name   = [string]$r['faction_name']
+        solaris        = (ConvertTo-DuneInt $r['solaris'])
+        total_currency = (ConvertTo-DuneInt $r['total_currency'])
+    }
+    # Per-faction reputation already applied to this player (keyed off the
+    # controller/actor id, same as the give-faction-rep write). Surfaced so the
+    # Stats tab shows current standing before an admin adjusts it.
+    $reps = @()
+    $cid = [long]$stats['controller_id']
+    if ($cid -gt 0) {
+        $repSql = @"
+SELECT pfr.faction_id::int AS fid, f.name AS fname, COALESCE(pfr.reputation_amount, 0) AS rep
+FROM dune.player_faction_reputation pfr
+JOIN dune.factions f ON f.id = pfr.faction_id
+WHERE pfr.actor_id = $cid::bigint
+ORDER BY pfr.faction_id;
+"@
+        $rr = Invoke-DuneSqlQuery -Ip $Ip -Sql $repSql -ReadOnly $true -MaxRows 50 -TimeoutSec 20
+        if ($rr.ok) {
+            foreach ($row in (ConvertTo-DuneRowMaps -Result $rr)) {
+                $reps += [ordered]@{
+                    faction_id   = (ConvertTo-DuneInt $row['fid'])
+                    faction_name = [string]$row['fname']
+                    reputation   = (ConvertTo-DuneInt $row['rep'])
+                }
+            }
+        }
+    }
+    $stats['faction_reps'] = $reps
+    $stats['faction_rep_cap'] = if (Get-Variable -Name DuneFactionRepCap -Scope Script -ErrorAction SilentlyContinue) { [int]$script:DuneFactionRepCap } else { 12474 }
+
+    # Scrip (Landsraad Scrip) balance — shown read-only beside the Give Scrip
+    # action so admins see the current standing without guessing.
+    $scrip = $null
+    if ($cid -gt 0) {
+        try {
+            $scripCurrencySql = Get-DuneScripCurrencySqlExpression -Ip $Ip
+            if ($null -ne $scripCurrencySql) {
+                $scSql = "SELECT COALESCE((SELECT balance FROM dune.player_virtual_currency_balances WHERE player_controller_id = $cid::bigint AND currency_id = $scripCurrencySql LIMIT 1), 0) AS bal;"
+                $sc = Invoke-DuneSqlQuery -Ip $Ip -Sql $scSql -ReadOnly $true -MaxRows 1 -TimeoutSec 15
+                if ($sc.ok) {
+                    $scm = ConvertTo-DuneRowMaps -Result $sc
+                    if ($scm.Count -ge 1) { $scrip = (ConvertTo-DuneInt $scm[0]['bal']) }
+                }
+            }
+        } catch {}
+    }
+    $stats['scrip'] = $scrip
+
+    # Intel (TechKnowledgePlayerComponent.m_TechKnowledgePoints) lives on the
+    # pawn actor. Surfaced read-only beside Give Intel.
+    $intel = 0
+    try {
+        $inSql = "SELECT COALESCE((properties->'TechKnowledgePlayerComponent'->>'m_TechKnowledgePoints')::int, 0) AS intel FROM dune.actors WHERE id = $PawnId::bigint;"
+        $inR = Invoke-DuneSqlQuery -Ip $Ip -Sql $inSql -ReadOnly $true -MaxRows 1 -TimeoutSec 15
+        if ($inR.ok) {
+            $inm = ConvertTo-DuneRowMaps -Result $inR
+            if ($inm.Count -ge 1) { $intel = (ConvertTo-DuneInt $inm[0]['intel']) }
+        }
+    } catch {}
+    $stats['intel'] = $intel
+    $stats['intel_max'] = if (Get-Variable -Name DuneMaxIntelPoints -Scope Script -ErrorAction SilentlyContinue) { [int]$script:DuneMaxIntelPoints } else { 2779 }
+
+    return @{ ok = $true; stats = $stats }
+}
+
+# ---------------------------------------------------------------------------
+# Full specs view (5 tracks plus keystone count + max).
+# Both dune.specialization_tracks and dune.purchased_specialization_keystones
+# key off the player CONTROLLER id (player_id column = controller id), NOT the
+# pawn/actor id (per the reference implementation's insertAllPurchasedKeystones path).
+# Max keystone id is 205 (matches the reference implementation's generate_series upper bound).
+# ---------------------------------------------------------------------------
+$script:DunePlayerSpecsFullSql = @'
+WITH tracks AS (
+    SELECT track_type::text AS track_type, xp_amount, level
+    FROM dune.specialization_tracks
+    WHERE player_id = {1}::bigint
+),
+ks_total AS (
+    SELECT COUNT(*)::bigint AS n
+    FROM dune.purchased_specialization_keystones
+    WHERE player_id = {1}::bigint
+)
+SELECT 'track' AS kind, t.track_type AS k, t.xp_amount AS v_int, t.level AS v_real FROM tracks t
+UNION ALL
+SELECT 'keystones_total', NULL, n, 0 FROM ks_total;
+'@
+
+$script:DuneSpecXpMax    = 44182
+$script:DuneSpecLevelMax = 100.0
+$script:DuneKeystoneMax  = 205
+
+function Get-DunePlayerSpecsFullLive {
+    param([string]$Ip, [long]$PawnId, [long]$ControllerId)
+    $sql = [string]::Format($script:DunePlayerSpecsFullSql, $PawnId, $ControllerId)
+    $soft = Invoke-DuneSqlSoft -Ip $Ip -Sql $sql -MaxRows 200 -TimeoutSec 30
+    if (-not $soft.ok) { return @{ ok = $false; error = $soft.error } }
+    if ($soft.unsupported) {
+        return @{ ok = $true; tracks = @(); keystones_total = 0; keystones_max = $script:DuneKeystoneMax; unsupported = $true }
+    }
+    $tracks = @()
+    $kTotal = 0
+    foreach ($r in (ConvertTo-DuneRowMaps -Result $soft.raw)) {
+        $kind = [string]$r['kind']
+        if ($kind -eq 'track') {
+            $tracks += [ordered]@{
+                track_type = [string]$r['k']
+                xp         = (ConvertTo-DuneInt $r['v_int'])
+                level      = [double]([string]$r['v_real'])
+                xp_max     = $script:DuneSpecXpMax
+                level_max  = $script:DuneSpecLevelMax
+            }
+        } elseif ($kind -eq 'keystones_total') {
+            $kTotal = (ConvertTo-DuneInt $r['v_int'])
+        }
+    }
+    return @{
+        ok              = $true
+        tracks          = $tracks
+        keystones_total = $kTotal
+        keystones_max   = $script:DuneKeystoneMax
+    }
+}
+
+# Max uses the same reward and effect reconciliation as Apply level.
+function Invoke-DunePlayerGrantMaxSpec {
+    param([string]$Ip, [long]$ControllerId, [string]$TrackType)
+    return Invoke-DunePlayerApplySpecLevel -Ip $Ip -ControllerId $ControllerId -TrackType $TrackType -Level 100
+}
+
+# Reset one track — DELETE the row (keyed by controller id).
+function Invoke-DunePlayerResetSpec {
+    param([string]$Ip, [long]$ControllerId, [string]$TrackType)
+    $safeTrack = ConvertTo-DuneSqlString $TrackType
+    $sql = "DELETE FROM dune.specialization_tracks WHERE player_id = $ControllerId::bigint AND track_type::text = '$safeTrack';"
+    $res = Invoke-DuneSqlQuery -Ip $Ip -Sql $sql -ReadOnly $false -MaxRows 1 -TimeoutSec 30
+    if (-not $res.ok) { return @{ ok = $false; error = $res.error } }
+    return @{ ok = $true; message = "Reset '$TrackType' track for controller $ControllerId." }
+}
+
+# Reset ALL spec tracks (and ALL keystones) — runs both reset functions (keyed by controller id).
+function Invoke-DunePlayerResetAllSpecs {
+    param([string]$Ip, [long]$ControllerId)
+    $effectSql = Get-DuneSpecEffectTagSql -ControllerId $ControllerId -Catalog (Get-DuneKeystoneCatalog) -Reset
+    $sql = @"
+BEGIN;
+SELECT dune.reset_specialization_tracks($ControllerId::bigint);
+SELECT dune.reset_specialization_keystones($ControllerId::bigint);
+$effectSql
+COMMIT;
+"@
+    $res = Invoke-DuneSqlQuery -Ip $Ip -Sql $sql -ReadOnly $false -MaxRows 1 -TimeoutSec 30
+    if (-not $res.ok) { return @{ ok = $false; error = $res.error } }
+    return @{ ok = $true; message = "Reset all spec tracks and keystones for controller $ControllerId." }
+}
+
+# Grant all keystones — uses controller id (per the reference implementation's insertAllPurchasedKeystones).
+function Invoke-DunePlayerGrantAllKeystones {
+    param([string]$Ip, [long]$ControllerId)
+    $offline = Test-DunePlayerOfflineByController -Ip $Ip -ControllerId $ControllerId -RequireExistingPlayerState
+    if (-not $offline.ok) { return @{ ok = $false; error = $offline.reason } }
+    $max = $script:DuneKeystoneMax
+    $effectSql = Get-DuneSpecEffectTagSql -ControllerId $ControllerId -Catalog (Get-DuneKeystoneCatalog)
+    $bonusSql = Get-DuneSpecBonusSql -ControllerId $ControllerId -catalog (Get-DuneKeystoneCatalog)
+    $recipeSql = Get-DuneSpecRecipeSql -ControllerId $ControllerId -Catalog (Get-DuneKeystoneCatalog)
+    $sql = @"
+BEGIN;
+INSERT INTO dune.purchased_specialization_keystones (player_id, keystone_id)
+SELECT $ControllerId::bigint, generate_series(1, $max)
+ON CONFLICT DO NOTHING;
+$effectSql
+$recipeSql
+$bonusSql
+COMMIT;
+"@
+    $res = Invoke-DuneSqlQuery -Ip $Ip -Sql $sql -ReadOnly $false -MaxRows 1 -TimeoutSec 30
+    if (-not $res.ok) { return @{ ok = $false; error = $res.error } }
+    return @{ ok = $true; message = "Granted all $max keystones for controller $ControllerId." }
+}
+
+# Reset all keystones — dune.reset_specialization_keystones (keyed by controller id).
+function Invoke-DunePlayerResetAllKeystones {
+    param([string]$Ip, [long]$ControllerId)
+    $effectSql = Get-DuneSpecEffectTagSql -ControllerId $ControllerId -Catalog (Get-DuneKeystoneCatalog) -Reset
+    $sql = "BEGIN; SELECT dune.reset_specialization_keystones($ControllerId::bigint); $effectSql COMMIT;"
+    $res = Invoke-DuneSqlQuery -Ip $Ip -Sql $sql -ReadOnly $false -MaxRows 1 -TimeoutSec 30
+    if (-not $res.ok) { return @{ ok = $false; error = $res.error } }
+    return @{ ok = $true; message = "Reset all keystones for controller $ControllerId." }
+}
+
+# ---------------------------------------------------------------------------
+# Player tags (gameplay tags like Journey.*, Contract.*, Faction.*, plus admin
+# labels). Stored in dune.player_tags(character_id, tag). Funcom rekeyed this
+# table from account_id to character_id in patch 1.4.10.0, so every access
+# resolves the account to its character via dune.player_state.id. Read returns
+# string[]; the overwrite write replaces the full set for the account's
+# character. (Delta writes go through dune.update_player_tags, whose proc
+# signature Funcom kept account_id-based, so those are unaffected.)
+# ---------------------------------------------------------------------------
+function Get-DunePlayerTagsLive {
+    param([string]$Ip, [long]$AccountId)
+    $sql = "SELECT tag FROM dune.player_tags WHERE character_id IN (SELECT id FROM dune.player_state WHERE account_id = $AccountId::bigint) ORDER BY tag;"
+    # MaxRows 5000: player_tags is an unbounded per-character list — a mature
+    # character legitimately holds 200+ tags (Contract.* alone can be 150+, plus
+    # the 26-tag Journey.* group, BigMoments, Faction, etc.). The old MaxRows 200
+    # cap combined with ORDER BY tag truncated everything past ~position 200,
+    # silently hiding whole alphabetically-later groups (Journey and beyond) from
+    # the UI even though the tags exist in the DB. Rows are tiny text values, so a
+    # high cap is cheap. (Contrast Get-DunePlayerSpecsFullLive's MaxRows 200 read,
+    # which is safe because it returns a fixed small enum of spec track types.)
+    $soft = Invoke-DuneSqlSoft -Ip $Ip -Sql $sql -MaxRows 5000 -TimeoutSec 30
+    if (-not $soft.ok) { return @{ ok = $false; error = $soft.error } }
+    if ($soft.unsupported) { return @{ ok = $true; tags = @(); unsupported = $true } }
+    $tags = @()
+    foreach ($r in (ConvertTo-DuneRowMaps -Result $soft.raw)) {
+        $t = [string]$r['tag']
+        if ($t) { $tags += $t }
+    }
+    return @{ ok = $true; tags = $tags }
+}
+
+function Invoke-DunePlayerSetTags {
+    param([string]$Ip, [long]$AccountId, [string[]]$Tags)
+    $clean = @()
+    foreach ($t in @($Tags)) {
+        $s = ([string]$t).Trim()
+        if ($s -and $s.Length -le 64) { $clean += $s }
+    }
+    $values = if ($clean.Count -gt 0) {
+        ($clean | ForEach-Object { "('" + (ConvertTo-DuneSqlString $_) + "')" }) -join ', '
+    } else { $null }
+    # player_tags is keyed by character_id (Funcom 1.4.10.0 rekey). Resolve the
+    # account to its character inline so the overwrite stays a single round trip.
+    $sqlParts = @("DELETE FROM dune.player_tags WHERE character_id IN (SELECT id FROM dune.player_state WHERE account_id = $AccountId::bigint);")
+    if ($values) { $sqlParts += "INSERT INTO dune.player_tags (character_id, tag) SELECT ps.id, v.tag FROM dune.player_state ps CROSS JOIN (VALUES $values) AS v(tag) WHERE ps.account_id = $AccountId::bigint ON CONFLICT DO NOTHING;" }
+    $sql = $sqlParts -join "`n"
+    $res = Invoke-DuneSqlQuery -Ip $Ip -Sql $sql -ReadOnly $false -MaxRows 1 -TimeoutSec 30
+    if (-not $res.ok) { return @{ ok = $false; error = $res.error } }
+    return @{ ok = $true; message = "Tags updated for account $AccountId ($($clean.Count) tag(s))."; tags = $clean }
+}
+
+# v11.5.9 - update_player_tags delta path. Mirrors the reference implementation cmdUpdatePlayerTags:
+# calls dune.update_player_tags(account_id, add[], remove[]) via the stored
+# proc rather than DELETE-INSERT, so the server-side trigger logic (faction
+# rep cascades, journey hooks) fires correctly.
+function Invoke-DunePlayerUpdateTags {
+    param([string]$Ip, [long]$AccountId, [string[]]$Add, [string[]]$Remove)
+    if ($AccountId -le 0) { return @{ ok = $false; error = 'account_id is required.' } }
+    $addClean = @(); foreach ($t in @($Add))    { $s = ([string]$t).Trim(); if ($s -and $s.Length -le 128) { $addClean += $s } }
+    $remClean = @(); foreach ($t in @($Remove)) { $s = ([string]$t).Trim(); if ($s -and $s.Length -le 128) { $remClean += $s } }
+    if ($addClean.Count -eq 0 -and $remClean.Count -eq 0) {
+        return @{ ok = $false; error = 'at least one of add[] or remove[] must be non-empty.' }
+    }
+    $addArr = if ($addClean.Count -gt 0) { ConvertTo-DunePgTextArray $addClean } else { 'ARRAY[]::text[]' }
+    $remArr = if ($remClean.Count -gt 0) { ConvertTo-DunePgTextArray $remClean } else { 'ARRAY[]::text[]' }
+    $sql = "SELECT dune.update_player_tags($AccountId::bigint, $addArr, $remArr);"
+    $r = Invoke-DuneSqlQuery -Ip $Ip -Sql $sql -ReadOnly $false -MaxRows 1 -TimeoutSec 30
+    if (-not $r.ok) { return @{ ok = $false; error = "update_player_tags: $($r.error)" } }
+    return @{
+        ok = $true
+        message = "Tags updated for account $AccountId (+$($addClean.Count) / -$($remClean.Count))."
+        added = $addClean; removed = $remClean
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Recent events (history). Joins event_log to accounts via fls_id.
+# Returns most recent N rows; meta is JSON kept as a string for the client.
+# ---------------------------------------------------------------------------
+$script:DunePlayerEventsSql = @'
+SELECT * FROM (
+SELECT
+    -row_number() OVER (ORDER BY ge.universe_time DESC, ge.event_type, ge.custom_data::text) AS id,
+    to_char(ge.universe_time AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS ts,
+    'communinet_' || ge.event_type::text AS event_type,
+    (COALESCE(ge.custom_data, '{{}}'::jsonb) || jsonb_build_object('map',ge.map))::text AS meta_json
+FROM dune.game_events ge
+WHERE ge.player_facing_event=true
+  AND ge.actor_id IN (SELECT player_controller_id FROM dune.player_state WHERE account_id={0}::bigint
+                     UNION SELECT player_pawn_id FROM dune.player_state WHERE account_id={0}::bigint)
+UNION ALL
+SELECT
+    el.id,
+    COALESCE(to_char(el.event_time AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '') AS ts,
+    COALESCE(el.message::text, '')   AS event_type,
+    COALESCE(el.meta::text, '{{}}')        AS meta_json
+FROM dune.event_log el
+JOIN dune.accounts ac ON ac."user" = el.meta->>'fls_id'
+WHERE ac.id = {0}::bigint
+) activity
+ORDER BY ts DESC, id DESC
+LIMIT {1};
+'@
+
+function Get-DunePlayerEventsLive {
+    param([string]$Ip, [long]$AccountId, [int]$Limit = 100)
+    if ($Limit -le 0 -or $Limit -gt 500) { $Limit = 100 }
+    $sql = [string]::Format($script:DunePlayerEventsSql, $AccountId, $Limit)
+    $soft = Invoke-DuneSqlSoft -Ip $Ip -Sql $sql -MaxRows ($Limit + 10) -TimeoutSec 30
+    if (-not $soft.ok) { return @{ ok = $false; error = $soft.error } }
+    if ($soft.unsupported) { return @{ ok = $true; events = @(); unsupported = $true } }
+    $events = @()
+    foreach ($r in (ConvertTo-DuneRowMaps -Result $soft.raw)) {
+        $events += [ordered]@{
+            id         = (ConvertTo-DuneInt $r['id'])
+            ts         = [string]$r['ts']
+            event_type = [string]$r['event_type']
+            meta       = ConvertTo-DuneActivityMeta -Json ([string]$r['meta_json'])
+        }
+    }
+    return @{ ok = $true; events = $events }
+}
+
+function ConvertTo-DuneActivityMeta {
+    param([string]$Json)
+    $allowed=@('map','solaris_delta','solaris_balance','m_BaseName','m_BuildableName','m_StateChange','m_TotemShieldState','m_TotemShieldStateChangedReason','m_PowerTimeLeftSeconds','m_OldName','m_NewName','m_OldPermissionRank','m_NewPermissionRank','m_CauserName','m_KillerType','m_DamageType')
+    $safe=@{}
+    try {
+        $value=$Json | ConvertFrom-Json
+        foreach($key in $allowed) {
+            $property=$value.PSObject.Properties[$key]
+            if($property -and ($property.Value -is [string] -or $property.Value -is [ValueType])) { $safe[$key]=$property.Value }
+        }
+    } catch {}
+    return ConvertTo-Json -InputObject $safe -Compress
+}
+
+# Demo data for new sections — used when live DB is unreachable.
+function Get-DunePlayerStatsDemo {
+    param([long]$PawnId)
+    return [ordered]@{
+        pawn_id = $PawnId; account_id = 9001; controller_id = 30001
+        character_name = 'Duncan Idaho'; class = 'PlayerCharacter'
+        map = 'Hagga Basin'; online_status = 'Online'
+        last_seen = '2026-06-12T06:00:00Z'
+        faction_id = 1; faction_name = 'Atreides'
+        solaris = 125000; total_currency = 132100
+        faction_reps = @(
+            [ordered]@{ faction_id = 1; faction_name = 'Atreides';  reputation = 8400 }
+            [ordered]@{ faction_id = 2; faction_name = 'Harkonnen'; reputation = 1200 }
+        )
+        faction_rep_cap = 12474
+        scrip = 3250; intel = 540; intel_max = 2779
+    }
+}
+
+function Get-DunePlayerSpecsFullDemo {
+    return @{
+        tracks = @(
+            [ordered]@{ track_type='Combat';      xp=44182; level=100.0; xp_max=44182; level_max=100.0 }
+            [ordered]@{ track_type='Crafting';    xp=18250; level=42.0;  xp_max=44182; level_max=100.0 }
+            [ordered]@{ track_type='Exploration'; xp=8900;  level=21.0;  xp_max=44182; level_max=100.0 }
+            [ordered]@{ track_type='Gathering';   xp=12500; level=30.0;  xp_max=44182; level_max=100.0 }
+            [ordered]@{ track_type='Sabotage';    xp=0;     level=0.0;   xp_max=44182; level_max=100.0 }
+        )
+        keystones_total = 87
+        keystones_max   = 205
+    }
+}
+
+function Get-DunePlayerTagsDemo { return @('VIP', 'Discord Verified') }
+
+function Get-DunePlayerEventsDemo {
+    return @(
+        [ordered]@{ id=1; ts='2026-06-12T05:55:00Z'; event_type='give_currency'; meta='{"solaris_delta":50000,"by":"admin"}' }
+        [ordered]@{ id=2; ts='2026-06-12T05:42:00Z'; event_type='login';         meta='{"map":"Hagga Basin"}' }
+        [ordered]@{ id=3; ts='2026-06-11T22:10:00Z'; event_type='logout';        meta='{}' }
+    )
+}
+
+# ---------------------------------------------------------------------------
+# v11.5.7 — Fill Water (offline path). Ported from the reference implementation db.go:6325
+# cmdRefillWaterOffline. Sets all water-fillable items in the actor's relevant
+# inventories to their MaxAmount via jsonb_set. Takes effect on next relog for
+# online players; instant for offline players.
+#
+# Source list: the reference implementation fillables_gen.go waterFillableTemplates (49 entries,
+# generated from DT_ItemTableFillables.json — FillableTypeRestriction=Water).
+# repairGearInventoryTypes is DST's narrowed set (0,1,15): backpack + equipped
+# armor + equipped weapons only. (the reference implementation's original set also included emote
+# and empty buckets 14/27/30, which Repair/Restore should not touch.)
+# ---------------------------------------------------------------------------
+$script:DuneWaterFillableTemplates = @(
+    'advancedstillsuit','combat_nati_fremenexile04_top','decajon','dewpack',
+    'highcapacityliterjon','highcapacityliterjon_02','highcapacityliterjon_03',
+    'highcapacityliterjon_04','highcapacityliterjon_05','highcapacityliterjon_06',
+    'literjon','literjon_03','literjon_04','literjon_05','literjon_06',
+    'literjon_07','literjon_08','literjon_09','literjon_t6','simplestillsuit',
+    'stillsuit_choam_01_top','stillsuit_choam_02_top','stillsuit_choam_04_top',
+    'stillsuit_choam_05_top','stillsuit_choam_06_top',
+    'stillsuit_choam_unique_dashed02_top','stillsuit_choam_unique_dashed03_top',
+    'stillsuit_choam_unique_dashed04_top','stillsuit_choam_unique_dashed05_top',
+    'stillsuit_choam_unique_dashed06_top','stillsuit_nati_05_body',
+    'stillsuit_nati_06_body','stillsuit_nati_07_body','stillsuit_nati_08_body',
+    'stillsuit_nati_arrakeen05_body','stillsuit_neut_leaking01_top',
+    'stillsuit_neut_patchy02_top','stillsuit_unique_armored_01_top',
+    'stillsuit_unique_armored_02_top','stillsuit_unique_armored_03_top',
+    'stillsuit_unique_armored_04_top','stillsuit_unique_armored_05_top',
+    'stillsuit_unique_armored_06_top','stillsuit_unique_efficient_04_top',
+    'stillsuit_unique_efficient_05_top','stillsuit_unique_efficient_06_top',
+    'stillsuit_unique_highcapacity_06_top','stillsuit_unique_thermalsuit_06_top',
+    'waterpack_consumable'
+)
+$script:DuneWaterFillableInventoryTypes = @(0, 1, 14, 15, 27, 30)
+
+function Invoke-DunePlayerFillWater {
+    param([string]$Ip, [long]$PawnId)
+    if ($PawnId -le 0) { return @{ ok = $false; error = 'pawn_id (actor id) is required.' } }
+    $tmplCsv = ($script:DuneWaterFillableTemplates | ForEach-Object { "'" + $_ + "'" }) -join ','
+    $invCsv  = ($script:DuneWaterFillableInventoryTypes -join ',')
+    $waterDefaults = Get-DuneItemStatDefaultsSql -Block FFillableItemStats
+    $sql = @"
+WITH targets AS (
+    SELECT i.id,
+           COALESCE(i.stats->'FFillableItemStats', $waterDefaults -> lower(i.template_id)) AS fillable,
+           COALESCE(NULLIF(i.stats->'FFillableItemStats'->1->'MaxAmount', '0'::jsonb),
+                    $waterDefaults -> lower(i.template_id) -> 1 -> 'MaxAmount') AS capacity
+    FROM dune.items i JOIN dune.inventories inv ON inv.id=i.inventory_id
+    WHERE inv.actor_id = $PawnId::bigint
+      AND inv.inventory_type = ANY(ARRAY[$invCsv]::int[])
+      AND lower(i.template_id) = ANY(ARRAY[$tmplCsv]::text[])
+      AND (NOT (i.stats ? 'FFillableItemStats')
+           OR i.stats->'FFillableItemStats'->1->>'FillableType' IN ('Water','None'))
+), upd AS (
+    UPDATE dune.items i
+    SET stats = jsonb_set(
+        jsonb_set(jsonb_set(jsonb_set(i.stats, '{FFillableItemStats}', t.fillable, true),
+            '{FFillableItemStats,1,FillableType}', '"Water"'::jsonb, true),
+            '{FFillableItemStats,1,MaxAmount}', t.capacity, true),
+        '{FFillableItemStats,1,CurrentAmount}',
+        t.capacity, true
+    )
+    FROM targets t
+    WHERE i.id=t.id AND t.capacity IS NOT NULL AND t.fillable IS NOT NULL
+    RETURNING i.id
+)
+SELECT COUNT(*)::bigint AS refilled FROM upd;
+"@
+    $res = Invoke-DuneSqlQuery -Ip $Ip -Sql $sql -ReadOnly $false -MaxRows 1 -TimeoutSec 30 -Bulk
+    if (-not $res.ok) { return @{ ok = $false; error = $res.error } }
+    $maps = ConvertTo-DuneRowMaps -Result $res
+    $count = 0
+    if ($maps.Count -ge 1) { $count = [int](ConvertTo-DuneInt $maps[0]['refilled']) }
+    if ($count -le 0) {
+        return @{ ok = $true; refilled = 0; message = 'No water-fillable items found for that player (already empty inventory or no stillsuits/jons).' }
+    }
+    return @{ ok = $true; refilled = $count; message = "Refilled $count water-fillable item(s)." }
+}

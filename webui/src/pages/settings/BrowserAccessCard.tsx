@@ -1,0 +1,255 @@
+import { useState, useEffect } from 'react'
+import { QRCodeSVG } from 'qrcode.react'
+import { Icon } from '../../components/Icon'
+import { CollapsibleCard } from '../../components/CollapsibleCard'
+import { api } from '../../api/client'
+import { buildBrowserPortalLink } from '../../util/browserPortalLink'
+import { isLocalViewer } from '../../util/viewer'
+import { PortalAccountsManager } from './PortalAccountsManager'
+
+interface BridgeStatus {
+  ready: boolean
+  port: number
+  elevated: boolean
+  canRepair: boolean
+  task: boolean
+  taskState: string
+  listening: boolean
+  healthOk: boolean
+  issues: string[]
+}
+
+interface MobilePairingData {
+  token: string
+  url?: string | null
+  source?: string
+  port: number
+  bridge?: BridgeStatus | null
+  pairingId?: string
+  remoteToken?: string
+  accountLoginEnabled?: boolean
+}
+
+export function BrowserAccessCard() {
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [data, setData] = useState<MobilePairingData | null>(null)
+  const [copied, setCopied] = useState(false)
+  const [showLink, setShowLink] = useState(false)
+  const localViewer = isLocalViewer()
+
+  const [bridge, setBridge] = useState<BridgeStatus | null>(null)
+  const [bridgeLoading, setBridgeLoading] = useState(false)
+  const [repairing, setRepairing] = useState(false)
+  const [repairError, setRepairError] = useState<string | null>(null)
+
+  const loadBridge = async () => {
+    setBridgeLoading(true)
+    try {
+      const res = await api<BridgeStatus>('/api/mobile/bridge-status')
+      setBridge(res)
+    } catch {
+      setBridge(null)
+    } finally {
+      setBridgeLoading(false)
+    }
+  }
+
+  useEffect(() => { void load() }, [])
+
+  const repairBridge = async () => {
+    setRepairing(true)
+    setRepairError(null)
+    try {
+      const res = await api<{ ok: boolean; status?: BridgeStatus }>('/api/mobile/bridge-repair', { method: 'POST' })
+      if (res.status) setBridge(res.status)
+      else await loadBridge()
+    } catch (e) {
+      setRepairError(e instanceof Error ? e.message : String(e))
+      await loadBridge()
+    } finally {
+      setRepairing(false)
+    }
+  }
+
+  const load = async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      const res = await api<MobilePairingData>('/api/mobile/pairing')
+      setData(res)
+      if (res.bridge) setBridge(res.bridge)
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const bridgePort = data?.port ?? bridge?.port ?? 47900
+  const pairUrl = data?.url ?? ''
+  const stableToken = data?.remoteToken || data?.token || ''
+  const browserPortalLink = buildBrowserPortalLink(pairUrl, stableToken, !!data?.accountLoginEnabled)
+
+  return (
+    <CollapsibleCard
+      id="settings.mobileApp"
+      icon="Smartphone"
+      title="Remote Access"
+      titleClassName="card-title"
+      className=""
+      headerClassName="card-header"
+      bodyClassName="card-body"
+    >
+
+        {/* Secure remote access via Tailscale Funnel. */}
+        <div className="card p-3" style={{ marginBottom: '1rem' }}>
+          <div className="flex items-center gap-2" style={{ fontWeight: 600 }}>
+            <Icon name="Globe" size={16} /> Secure remote access
+            {data && (
+              data.url
+                ? <span className="badge safe" style={{ marginLeft: 'auto' }}>Tailscale Funnel</span>
+                : <span className="badge" style={{ marginLeft: 'auto' }}>not set up</span>
+            )}
+          </div>
+
+          {data?.url ? (
+            <div style={{ marginTop: '0.75rem' }}>
+              <div className="card p-2 text-text-muted text-sm flex items-center gap-2">
+                <Icon name="Globe" size={16} /> Stable public address configured
+              </div>
+              <div style={{ marginTop: '0.5rem', fontSize: '13px', fontFamily: 'monospace', wordBreak: 'break-all' }}>{data.url}</div>
+              <div className="help-text" style={{ marginTop: '0.5rem' }}>
+                The address remains stable across DST restarts. Scan the current QR
+                whenever you need to open or save the Browser Portal on a device.
+              </div>
+
+            </div>
+          ) : (
+            <div className="help-text" style={{ marginTop: '0.75rem' }}>
+              No remote address yet. Install <a href="https://tailscale.com/download" target="_blank" rel="noreferrer">Tailscale</a> on this PC, then enable a Funnel on the bridge port for a free, no-domain public HTTPS address:
+              <div style={{ marginTop: '0.5rem', fontSize: '12px', fontFamily: 'monospace', background: 'var(--color-surface-2)', padding: '0.5rem', borderRadius: '6px', wordBreak: 'break-all' }}>tailscale funnel --bg http://127.0.0.1:{bridgePort}</div>
+              <div style={{ marginTop: '0.5rem' }}>The address appears here automatically once the Funnel is active.</div>
+            </div>
+          )}
+        </div>
+
+        {/* Local bridge health — the loopback proxy phones reach through the
+            tunnel. Binds 127.0.0.1 only, so no admin/firewall is involved. */}
+        {localViewer && bridge && (
+          bridge.ready ? (
+            <div className="card p-3 border-success/40 bg-success/10 text-success text-sm flex items-center gap-2" style={{ marginBottom: '1rem' }}>
+              <Icon name="CheckCircle2" size={16} /> Remote access bridge ready (local port {bridge.port}).
+            </div>
+          ) : (
+            <div className="card p-3 border-warning/40 bg-warning/10 text-sm" style={{ marginBottom: '1rem' }}>
+              <div className="flex items-center gap-2 text-warning" style={{ fontWeight: 600 }}>
+                <Icon name="AlertTriangle" size={16} /> {bridge.listening ? 'Remote access bridge not responding' : 'Remote access bridge not running'}
+              </div>
+              <ul style={{ margin: '0.5rem 0 0', paddingLeft: '1.25rem' }} className="text-text-muted">
+                {bridge.issues.map((it, i) => <li key={i}>{it}</li>)}
+              </ul>
+              <button className="btn-primary" style={{ marginTop: '0.75rem' }} disabled={repairing} onClick={() => void repairBridge()}>
+                {repairing ? <><Icon name="Loader2" className="animate-spin" /> Repairing…</> : <><Icon name="Wrench" /> Repair remote bridge</>}
+              </button>
+              {repairError && <div className="text-danger text-sm" style={{ marginTop: '0.5rem' }}>{repairError}</div>}
+              <button className="btn" style={{ marginTop: '0.5rem' }} disabled={bridgeLoading || repairing} onClick={() => void loadBridge()}>
+                {bridgeLoading ? 'Checking…' : 'Re-check'}
+              </button>
+            </div>
+          )
+        )}
+
+        <p className="help-text" style={{ marginBottom: '1rem' }}>
+          Set up a remote address above, then scan this code with any phone or
+          tablet camera to open the Browser Portal. Account login is optional and configured below.
+          {' '}On iPad, open the scanned page in Safari to keep the Live Map screen awake.
+        </p>
+
+        {!data && !loading && (
+          <button className="btn-primary" onClick={() => void load()}>
+            <Icon name="QrCode" /> Generate QR Code
+          </button>
+        )}
+
+        {loading && <div className="text-text-dim flex items-center gap-2"><Icon name="Loader2" className="animate-spin" /> Generating...</div>}
+        {error && <div className="card p-3 border-danger/40 bg-danger/10 text-danger text-sm flex items-center gap-2"><Icon name="AlertCircle" /> {error}</div>}
+
+        {data && (
+          <div style={{ display: 'flex', gap: '2rem', flexWrap: 'wrap', alignItems: 'flex-start' }}>
+            {browserPortalLink ? (
+              <div style={{ background: '#fff', padding: '1rem', borderRadius: '8px' }}>
+                <QRCodeSVG value={browserPortalLink} size={200} />
+              </div>
+            ) : (
+              <div className="text-secondary" style={{ width: 200, textAlign: 'center' }}>
+                Set up a Tailscale Funnel to generate a QR code.
+              </div>
+            )}
+
+            <div style={{ flex: 1, minWidth: '300px' }}>
+              <div className="form-group">
+                <label>Connection Address</label>
+                <div className="help-text">The Browser Portal uses this address to reach your server.</div>
+                <div style={{ marginTop: '0.5rem', fontSize: '13px', fontFamily: 'monospace', wordBreak: 'break-all' }}>
+                  {pairUrl ? pairUrl : <span className="text-text-muted">No remote address yet — set one up above.</span>}
+                </div>
+              </div>
+              <button className="btn" onClick={() => setData(null)} style={{ marginTop: '1rem' }}>
+                Hide QR Code
+              </button>
+
+              {localViewer && pairUrl && (data.remoteToken || data.accountLoginEnabled) && (
+                <div className="form-group" style={{ marginTop: '1.25rem' }}>
+                  <label>Browser portal link (give this to a co-admin)</label>
+                  <div className="help-text">{data.accountLoginEnabled
+                    ? 'This stable address contains no credential. Portal users sign in with a local account.'
+                    : 'They open it in any browser - no app or install. Anyone with this magic link can manage the server, so only share it with people you trust.'}</div>
+                  {!showLink ? (
+                    <button className="btn" style={{ marginTop: '0.5rem' }} onClick={() => setShowLink(true)}>
+                      <Icon name="Eye" /> Show portal link
+                    </button>
+                  ) : (
+                    <>
+                      <div style={{ marginTop: '0.5rem', fontSize: '12px', fontFamily: 'monospace', wordBreak: 'break-all', background: 'var(--color-surface-2)', padding: '0.5rem', borderRadius: '6px' }}>
+                        {browserPortalLink}
+                      </div>
+                      <div className="flex items-center gap-2" style={{ marginTop: '0.5rem' }}>
+                        <button
+                          className="btn-primary"
+                          onClick={() => {
+                            void navigator.clipboard.writeText(browserPortalLink)
+                            setCopied(true)
+                            window.setTimeout(() => setCopied(false), 2000)
+                          }}
+                        >
+                          <Icon name={copied ? 'Check' : 'Copy'} /> {copied ? 'Copied!' : 'Copy portal link'}
+                        </button>
+                        <button className="btn" onClick={() => setShowLink(false)}>
+                          <Icon name="EyeOff" /> Hide
+                        </button>
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+
+              {pairUrl && !data.accountLoginEnabled && (
+                <div style={{ marginTop: '2rem', padding: '1rem', backgroundColor: 'var(--color-surface-2)', borderRadius: '8px', border: '1px solid var(--color-border)' }}>
+                  <h4 style={{ margin: '0 0 0.5rem 0', fontSize: '14px', color: 'var(--color-text)' }}>Manual Entry Details</h4>
+                  <div style={{ fontSize: '13px', fontFamily: 'monospace', color: 'var(--color-text)' }}>
+                    <div style={{ marginBottom: '4px', wordBreak: 'break-all' }}><strong>URL:</strong> {pairUrl}</div>
+                    <div style={{ wordBreak: 'break-all' }}><strong>Token:</strong> {data.token}</div>
+                  </div>
+                  <div className="help-text" style={{ marginTop: '0.5rem' }}>
+                    On the same network you can also use <code>http://&lt;this-pc-lan-ip&gt;:{bridgePort}</code>.
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+        {localViewer && <PortalAccountsManager />}
+    </CollapsibleCard>
+  )
+}

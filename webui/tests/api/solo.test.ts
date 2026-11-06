@@ -1,0 +1,294 @@
+// @vitest-environment jsdom
+
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import * as solo from '../../src/api/solo'
+
+interface FetchCall {
+  url: string
+  method?: string
+  body?: unknown
+}
+
+let calls: FetchCall[]
+
+beforeEach(() => {
+  calls = []
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input.toString()
+    const body = init?.body ? JSON.parse(String(init.body)) : undefined
+    calls.push({ url, method: init?.method, body })
+    return new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }))
+})
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+  vi.restoreAllMocks()
+})
+
+function last(): FetchCall {
+  const call = calls.at(-1)
+  if (!call) throw new Error('No fetch call recorded')
+  return call
+}
+
+it('targets a specific Solo item revision and preserves decimal inventory edits', async () => {
+  const item = { itemId: 9, templateId: 'Literjon', stackSize: 2, quality: 0, revision: 'a'.repeat(64) }
+  await solo.editSoloInventoryItem(item, 'water', { amount: 1234.5 }, 'connected-profile')
+  expect(last()).toEqual({ url: '/api/solo/items/edit', method: 'POST', body: {
+    itemId: 9, revision: item.revision, field: 'water', values: { amount: 1234.5 },
+    expectedProfileToken: 'connected-profile', confirm: 'EDIT SOLO ITEM',
+  } })
+})
+
+describe('Solo Mode API contracts', () => {
+  it('sends the reviewed group scope, total and selected-profile guard for bulk deletion', async () => {
+    await solo.deleteSoloInventoryGroup('Blood', 'inventory:1', 19991, 19991, 'profile-token')
+    expect(last()).toEqual({ url: '/api/solo/items/delete-group', method: 'POST',
+      body: { templateId: 'Blood', destination: 'inventory:1', expectedCount: 19991,
+        expectedTotal: 19991, expectedProfileToken: 'profile-token', confirm: 'DELETE SOLO ITEM GROUP' } })
+  })
+  it('sends character XP separately from faction progression with a selected-profile guard', async () => {
+    await solo.setSoloCharacterXp('set', 100000, 'profile-token')
+    expect(last()).toEqual({ url: '/api/solo/progression/character-xp', method: 'PUT',
+      body: { action: 'set', amount: 100000, expectedProfileToken: 'profile-token', confirm: 'SET SOLO CHARACTER XP' } })
+  })
+  it('targets the selected main quest with the offline confirmation and profile token', async () => {
+    await solo.unlockSoloMainQuest('DA_MQ_AssassinsHandbook', 'profile-token')
+    expect(last()).toEqual({ url: '/api/solo/progression/main-quest/unlock', method: 'POST',
+      body: { quest: 'DA_MQ_AssassinsHandbook', expectedProfileToken: 'profile-token', confirm: 'UNLOCK SOLO MAIN QUEST' } })
+  })
+  it('discovers profiles before connecting a selected root', async () => {
+    await solo.discoverSolo('C:\\Solo\\Saved')
+    expect(last()).toEqual({
+      url: '/api/solo/discover',
+      method: 'POST',
+      body: { path: 'C:\\Solo\\Saved' },
+    })
+  })
+
+  it('requests automatic discovery for the selected Xbox platform', async () => {
+    await solo.discoverSolo('', 'xbox')
+    expect(last()).toEqual({ url: '/api/solo/discover', method: 'POST', body: { path: '', platform: 'xbox' } })
+  })
+
+  it('connects a selected data root and optional profile', async () => {
+    await solo.connectSolo('C:\\Solo\\Saved', 'C:\\Solo\\Saved\\Cloud\\game.db')
+    expect(last()).toEqual({
+      url: '/api/solo/connect',
+      method: 'POST',
+      body: {
+        path: 'C:\\Solo\\Saved',
+        dbPath: 'C:\\Solo\\Saved\\Cloud\\game.db',
+      },
+    })
+  })
+
+  it('sends the exact offline settings confirmation phrase', async () => {
+    await solo.saveSoloSettings({ GatheringAmount: '2.500000' }, 'profile-token')
+    expect(last()).toEqual({
+      url: '/api/solo/settings',
+      method: 'PUT',
+      body: {
+        settings: { GatheringAmount: '2.500000' },
+        expectedProfileToken: 'profile-token',
+        confirm: 'APPLY SOLO SETTINGS',
+      },
+    })
+  })
+
+  it('creates and restores backups through distinct endpoints', async () => {
+    await solo.createSoloBackup('profile-token')
+    expect(last()).toEqual({
+      url: '/api/solo/backups',
+      method: 'POST',
+      body: { expectedProfileToken: 'profile-token' },
+    })
+
+    await solo.restoreSoloBackup('123\\game-20260814.db', 'profile-token')
+    expect(last()).toEqual({
+      url: '/api/solo/restore',
+      method: 'POST',
+      body: {
+        relativePath: '123\\game-20260814.db',
+        expectedProfileToken: 'profile-token',
+        confirm: 'RESTORE SOLO SAVE',
+      },
+    })
+
+    await solo.deleteSoloBackup('FLS_retail-123\\game-old.db', 'profile-token')
+    expect(last()).toEqual({
+      url: '/api/solo/backups',
+      method: 'DELETE',
+      body: {
+        relativePath: 'FLS_retail-123\\game-old.db',
+        expectedProfileToken: 'profile-token',
+        confirm: 'DELETE SOLO BACKUP',
+      },
+    })
+  })
+
+  it('sends item grants with destination, profile token, and offline confirmation', async () => {
+    await solo.grantSoloItems(
+      'inventory:49',
+      [{ templateId: 'CopperBar', quantity: 100, quality: 0 }],
+      'profile-token',
+    )
+    expect(last()).toEqual({
+      url: '/api/solo/items/grant',
+      method: 'POST',
+      body: {
+        destination: 'inventory:49',
+        moddedStorageCapacity: false,
+        items: [{ templateId: 'CopperBar', quantity: 100, quality: 0 }],
+        expectedProfileToken: 'profile-token',
+        confirm: 'GIVE SOLO ITEMS',
+      },
+    })
+  })
+
+  it('sends the explicit modded-storage volume override only when selected', async () => {
+    await solo.grantSoloItems('inventory:49', [{ templateId: 'CopperBar', quantity: 100, quality: 0 }], 'profile-token', true)
+    expect(last().body).toMatchObject({ destination: 'inventory:49', moddedStorageCapacity: true, confirm: 'GIVE SOLO ITEMS' })
+  })
+
+  it('lists and exports saved Solo blueprints', async () => {
+    await solo.getSoloBlueprints('profile-token')
+    expect(last()).toEqual({
+      url: '/api/solo/blueprints?expectedProfileToken=profile-token',
+      method: undefined,
+      body: undefined,
+    })
+    await solo.exportSoloBlueprint(7, 'profile-token')
+    expect(last()).toEqual({
+      url: '/api/solo/blueprints/export?id=7&expectedProfileToken=profile-token',
+      method: undefined,
+      body: undefined,
+    })
+  })
+
+  it('imports portable blueprints with profile token and offline confirmation', async () => {
+    const blueprint = {
+      name: 'Compact Base',
+      instances: [{
+        instance_id: 1,
+        building_type: 'Atreides_Outpost_Foundation',
+        x: 0,
+        y: 0,
+        z: 0,
+        rotation: 0,
+        provides_stability: true,
+      }],
+      placeables: [],
+      pentashields: [],
+    }
+    await solo.importSoloBlueprint(blueprint, 'profile-token')
+    expect(last()).toEqual({
+      url: '/api/solo/blueprints/import',
+      method: 'POST',
+      body: {
+        blueprint,
+        expectedProfileToken: 'profile-token',
+        confirm: 'IMPORT SOLO BLUEPRINT',
+      },
+    })
+  })
+
+  it('sets exact currency balances with profile and offline confirmation', async () => {
+    await solo.setSoloCurrencies(1_000_000, 250_000, 'profile-token')
+    expect(last()).toEqual({
+      url: '/api/solo/currencies',
+      method: 'PUT',
+      body: {
+        solari: 1_000_000,
+        scrip: 250_000,
+        expectedProfileToken: 'profile-token',
+        confirm: 'SET SOLO CURRENCIES',
+      },
+    })
+  })
+
+  it('fills a confirmed water container with profile and offline confirmation', async () => {
+    await solo.fillSoloWaterContainer(787987, 'profile-token')
+    expect(last()).toEqual({
+      url: '/api/solo/fillables/water',
+      method: 'POST',
+      body: {
+        itemId: 787987,
+        expectedProfileToken: 'profile-token',
+        confirm: 'FILL SOLO WATER',
+      },
+    })
+  })
+
+  it('sends the verified progression actions with exact confirmations', async () => {
+    await solo.maxSoloSpecializations('profile-token')
+    expect(last()).toEqual({
+      url: '/api/solo/progression/specializations/max',
+      method: 'POST',
+      body: {
+        expectedProfileToken: 'profile-token',
+        confirm: 'MAX SOLO SPECIALIZATIONS',
+      },
+    })
+
+    await solo.completeSoloFindTheFremen('profile-token')
+    expect(last()).toEqual({
+      url: '/api/solo/progression/find-the-fremen',
+      method: 'POST',
+      body: {
+        expectedProfileToken: 'profile-token',
+        confirm: 'COMPLETE FIND THE FREMEN',
+      },
+    })
+
+    await solo.completeSoloNpe('profile-token')
+    expect(last()).toEqual({
+      url: '/api/solo/progression/npe/complete',
+      method: 'POST',
+      body: {
+        expectedProfileToken: 'profile-token',
+        confirm: 'COMPLETE SOLO NPE',
+      },
+    })
+
+    await solo.enableSoloAllSkills('profile-token')
+    expect(last()).toEqual({
+      url: '/api/solo/progression/skills/enable-all',
+      method: 'POST',
+      body: {
+        expectedProfileToken: 'profile-token',
+        confirm: 'ENABLE SOLO SKILLS',
+      },
+    })
+
+    await solo.setSoloProgressionPoints(321, 654, 'profile-token')
+    expect(last()).toEqual({
+      url: '/api/solo/progression/points',
+      method: 'PUT',
+      body: {
+        skillPoints: 321,
+        intel: 654,
+        expectedProfileToken: 'profile-token',
+        confirm: 'SET SOLO PROGRESSION POINTS',
+      },
+    })
+  })
+})
+
+it('exports diagnostics for the exact connected profile and sends an explicit specialization target', async () => {
+  await solo.exportSoloDiagnostics('profile token')
+  expect(last().url).toBe('/api/solo/diagnostics?expectedProfileToken=profile%20token')
+  await solo.setSoloSpecialization('Crafting', 37, 'profile-token')
+  expect(last()).toEqual({ url: '/api/solo/progression/specializations', method: 'PUT', body: { track: 'Crafting', level: 37, expectedProfileToken: 'profile-token', confirm: 'SET SOLO SPECIALIZATION' } })
+  await solo.resetSoloSpecializationRewards('Crafting', 'profile-token')
+  expect(last()).toEqual({ url: '/api/solo/progression/specializations/reset-rewards', method: 'POST', body: { track: 'Crafting', expectedProfileToken: 'profile-token', confirm: 'RESET SOLO SPECIALIZATION REWARDS' } })
+})
+
+it('unlocks the selected trainer for the exact connected Solo profile', async () => {
+  await solo.unlockSoloTrainer('Mentat', 'xbox-profile-token')
+  expect(last()).toEqual({ url: '/api/solo/progression/trainer/unlock', method: 'POST', body: { job: 'Mentat', expectedProfileToken: 'xbox-profile-token', confirm: 'UNLOCK SOLO TRAINER' } })
+})

@@ -1,0 +1,1390 @@
+using System.Text.Json;
+using System.Text.Json.Nodes;
+using Microsoft.Data.Sqlite;
+
+namespace DuneSoloDb;
+
+internal static partial class Program
+{
+    private static object MaxSpecializations(
+        string input,
+        string safetyBackup,
+        string adapterPath,
+        string keystonePath)
+    {
+        var adapter = ReadSoloAdapter(adapterPath);
+        AssertProgressionAdapter(input, adapter);
+        var keystones = ReadKeystones(keystonePath);
+        return RunProgressionMutation(
+            input,
+            safetyBackup,
+            "specializations",
+            sqlitePath =>
+            {
+                using var connection = OpenWritable(sqlitePath);
+                var identity = ReadIdentity(connection);
+                BeginImmediate(connection);
+                try
+                {
+                    foreach (var track in adapter.Tracks)
+                    {
+                        ExecuteNonQuery(
+                            connection,
+                            """
+                            INSERT INTO specialization_tracks (
+                                player_id, track_type, xp_amount, level
+                            )
+                            VALUES ($player, $track, $xp, $level)
+                            ON CONFLICT(player_id, track_type)
+                            DO UPDATE SET xp_amount = excluded.xp_amount,
+                                          level = excluded.level;
+                            """,
+                            ("$player", identity.ControllerId),
+                            ("$track", track.Value),
+                            ("$xp", adapter.MaxXp),
+                            ("$level", adapter.MaxLevel));
+                    }
+
+                    foreach (var reward in keystones)
+                    {
+                        ExecuteNonQuery(
+                            connection,
+                            """
+                            INSERT INTO purchased_specialization_keystones (
+                                player_id, keystone_id
+                            )
+                            VALUES ($player, $reward)
+                            ON CONFLICT(player_id, keystone_id) DO NOTHING;
+                            """,
+                            ("$player", identity.ControllerId),
+                            ("$reward", reward.Key));
+                        foreach (var tag in reward.Value.PlayerTags)
+                        {
+                            ExecuteNonQuery(connection,
+                                "INSERT INTO player_tags(character_id,tag) VALUES($character,$tag) ON CONFLICT(character_id,tag) DO NOTHING;",
+                                ("$character", identity.CharacterId), ("$tag", tag));
+                            if (ScalarLong(connection,
+                                "SELECT COUNT(*) FROM player_tags WHERE character_id=$character AND tag=$tag;",
+                                ("$character", identity.CharacterId), ("$tag", tag)) != 1)
+                                throw new InvalidDataException("Specialization effect tag verification failed.");
+                        }
+                    }
+
+                    var recipeRules = keystones.Values.SelectMany(rule => rule.Recipes).ToArray();
+                    if (recipeRules.Length > 0)
+                    {
+                        var properties = ReadActorProperties(connection, identity.PawnId);
+                        var library = properties["CraftingRecipesLibraryActorComponent"] as JsonObject
+                            ?? throw new InvalidDataException("Crafting recipe library is unavailable; no specialization changes were saved.");
+                        var recipes = library["m_KnownItemRecipes"] as JsonArray;
+                        if (recipes is null)
+                        {
+                            if (library.ContainsKey("m_KnownItemRecipes"))
+                                throw new InvalidDataException("Crafting recipe library has an unsupported shape.");
+                            recipes = new JsonArray();
+                            library["m_KnownItemRecipes"] = recipes;
+                        }
+                        foreach (var rule in recipeRules)
+                        {
+                            if (recipes.OfType<JsonObject>().Any(recipe =>
+                                recipe["BaseRecipeId"]?["Name"]?.GetValue<string>() == rule.Id
+                                && GetInt(recipe, "m_QualityLevel") == rule.Quality)) continue;
+                            recipes.Add(new JsonObject {
+                                ["BaseRecipeId"] = new JsonObject { ["Name"] = rule.Id },
+                                ["m_QualityLevel"] = rule.Quality,
+                                ["m_bIsNew"] = false,
+                                ["m_NumberOfRecipeUses"] = rule.Uses,
+                                ["m_bIsLimitedUseRecipe"] = rule.Uses > 0,
+                                ["m_Source"] = "SchematicPickup"
+                            });
+                        }
+                        WriteActorProperties(connection, identity.PawnId, properties);
+                        var verified = ReadActorProperties(connection, identity.PawnId)
+                            ["CraftingRecipesLibraryActorComponent"]?["m_KnownItemRecipes"] as JsonArray;
+                        if (verified is null || recipeRules.Any(rule => !verified.OfType<JsonObject>().Any(recipe =>
+                            recipe["BaseRecipeId"]?["Name"]?.GetValue<string>() == rule.Id
+                            && GetInt(recipe, "m_QualityLevel") == rule.Quality)))
+                            throw new InvalidDataException("Specialization recipe verification failed.");
+                    }
+
+                    var components = ReadFglComponents(connection, identity.EntityId);
+                    var level = RequireComponentObject(components, "FLevelComponent");
+                    var moduleData = level["ModuleData"] as JsonObject ?? new JsonObject();
+                    level["ModuleData"] = moduleData;
+                    var moduleSpent = SumSkillSpend(moduleData);
+                    var currentBonus = GetInt(level, "KeystoneBonusSkillPoints");
+                    var currentTotal = GetInt(level, "TotalSkillPoints");
+                    var currentUnspent = GetInt(level, "UnspentSkillPoints");
+                    var expectedBonus = ReadSpecializationBonus(
+                        connection,
+                        identity.ControllerId,
+                        keystones)
+                        + ReadCharacterKeystoneBonus(connection, identity.PawnId);
+                    if (expectedBonus > currentBonus)
+                    {
+                        var delta = expectedBonus - currentBonus;
+                        level["KeystoneBonusSkillPoints"] = expectedBonus;
+                        level["TotalSkillPoints"] = currentTotal + delta;
+                        if (moduleSpent + currentUnspent <= currentTotal)
+                        {
+                            level["UnspentSkillPoints"] = currentUnspent + delta;
+                        }
+                    }
+                    WriteFglComponents(connection, identity.EntityId, components);
+
+                    foreach (var track in adapter.Tracks)
+                    {
+                        var rowCount = ScalarLong(
+                            connection,
+                            """
+                            SELECT COUNT(*)
+                            FROM specialization_tracks
+                            WHERE player_id = $player
+                              AND track_type = $track
+                              AND level = $level
+                              AND xp_amount = $xp;
+                            """,
+                            ("$player", identity.ControllerId),
+                            ("$track", track.Value),
+                            ("$level", adapter.MaxLevel),
+                            ("$xp", adapter.MaxXp));
+                        if (rowCount != 1)
+                        {
+                            throw new InvalidDataException(
+                                $"Specialization verification failed for {track.Key}.");
+                        }
+                    }
+                    var rewardCount = ScalarLong(
+                        connection,
+                        """
+                        SELECT COUNT(*)
+                        FROM purchased_specialization_keystones
+                        WHERE player_id = $player;
+                        """,
+                        ("$player", identity.ControllerId));
+                    if (rewardCount < keystones.Count)
+                    {
+                        throw new InvalidDataException(
+                            $"Expected {keystones.Count} specialization rewards, found {rewardCount}.");
+                    }
+                    ValidateDatabase(connection);
+                    Commit(connection);
+                    return new
+                    {
+                        tracks = adapter.Tracks.Count,
+                        level = adapter.MaxLevel,
+                        rewards = rewardCount,
+                        expectedSkillPointBonus = expectedBonus
+                    };
+                }
+                catch
+                {
+                    Rollback(connection);
+                    throw;
+                }
+            }, requireGameClosed: true);
+    }
+
+    private static object CompleteFindTheFremen(
+        string input,
+        string safetyBackup,
+        string adapterPath)
+    {
+        var adapter = ReadSoloAdapter(adapterPath);
+        AssertProgressionAdapter(input, adapter);
+        return RunProgressionMutation(
+            input,
+            safetyBackup,
+            "find-the-fremen",
+            sqlitePath =>
+            {
+                using var connection = OpenWritable(sqlitePath);
+                var identity = ReadIdentity(connection);
+                var observedNodes = ReadStrings(
+                    connection,
+                    """
+                    SELECT story_node_id
+                    FROM journey_story_node
+                    WHERE character_id = $character
+                      AND (
+                          story_node_id = 'DA_MQ_FindTheFremen'
+                          OR story_node_id LIKE 'DA_MQ_FindTheFremen.%'
+                      )
+                    ORDER BY story_node_id;
+                    """,
+                    ("$character", identity.CharacterId));
+                if (!observedNodes.SequenceEqual(adapter.FremenNodes, StringComparer.Ordinal))
+                {
+                    throw new InvalidDataException(
+                        $"Solo Find-the-Fremen adapter mismatch: expected {adapter.FremenNodes.Count} exact nodes, found {observedNodes.Length}.");
+                }
+
+                BeginImmediate(connection);
+                try
+                {
+                    var updated = ExecuteNonQuery(
+                        connection,
+                        """
+                        UPDATE journey_story_node
+                        SET complete_condition_state = jsonb('true'),
+                            reveal_condition_state = jsonb('true'),
+                            has_pending_reward = 0
+                        WHERE character_id = $character
+                          AND (
+                              story_node_id = 'DA_MQ_FindTheFremen'
+                              OR story_node_id LIKE 'DA_MQ_FindTheFremen.%'
+                          );
+                        """,
+                        ("$character", identity.CharacterId));
+                    if (updated != adapter.FremenNodes.Count)
+                    {
+                        throw new InvalidDataException(
+                            $"Expected to update {adapter.FremenNodes.Count} journey nodes, updated {updated}.");
+                    }
+
+                    foreach (var tag in adapter.FremenTags)
+                    {
+                        ExecuteNonQuery(
+                            connection,
+                            """
+                            INSERT INTO player_tags (character_id, tag)
+                            VALUES ($character, $tag)
+                            ON CONFLICT(character_id, tag) DO NOTHING;
+                            """,
+                            ("$character", identity.CharacterId),
+                            ("$tag", tag));
+                    }
+
+                    var properties = ReadActorProperties(connection, identity.PawnId);
+                    var techComponent = EnsureObject(properties, "TechKnowledgePlayerComponent");
+                    var tech = EnsureObject(techComponent, "m_TechKnowledge");
+                    var recipes = tech["m_TechKnowledgeData"] as JsonArray ?? new JsonArray();
+                    tech["m_TechKnowledgeData"] = recipes;
+                    foreach (var recipe in adapter.FremenRecipes)
+                    {
+                        var existing = recipes
+                            .OfType<JsonObject>()
+                            .FirstOrDefault(value =>
+                                string.Equals(
+                                    value["ItemKey"]?.GetValue<string>(),
+                                    recipe,
+                                    StringComparison.Ordinal));
+                        if (existing is null)
+                        {
+                            recipes.Add(new JsonObject
+                            {
+                                ["ItemKey"] = recipe,
+                                ["bIsNewEntry"] = false,
+                                ["UnlockedState"] = "Purchased"
+                            });
+                        }
+                        else
+                        {
+                            existing["UnlockedState"] = "Purchased";
+                        }
+                    }
+                    WriteActorProperties(connection, identity.PawnId, properties);
+
+                    var components = ReadFglComponents(connection, identity.EntityId);
+                    var spice = RequireComponentObject(components, "FSpiceAddictionComponent");
+                    spice["SystemStatus"] = adapter.SpiceStatus;
+                    spice["SpiceVisionEnabledStatus"] = adapter.SpiceStatus;
+                    WriteFglComponents(connection, identity.EntityId, components);
+
+                    var completedCount = ScalarLong(
+                        connection,
+                        """
+                        SELECT COUNT(*)
+                        FROM journey_story_node
+                        WHERE character_id = $character
+                          AND (
+                              story_node_id = 'DA_MQ_FindTheFremen'
+                              OR story_node_id LIKE 'DA_MQ_FindTheFremen.%'
+                          )
+                          AND json(complete_condition_state) = 'true'
+                          AND json(reveal_condition_state) = 'true'
+                          AND has_pending_reward = 0;
+                        """,
+                        ("$character", identity.CharacterId));
+                    var tagCount = CountMatchingStrings(
+                        connection,
+                        "player_tags",
+                        "tag",
+                        "character_id",
+                        identity.CharacterId,
+                        adapter.FremenTags);
+                    var verifyProperties = ReadActorProperties(connection, identity.PawnId);
+                    var recipeCount = CountPurchasedRecipes(
+                        verifyProperties,
+                        adapter.FremenRecipes);
+                    var verifyComponents = ReadFglComponents(connection, identity.EntityId);
+                    var verifySpice = RequireComponentObject(
+                        verifyComponents,
+                        "FSpiceAddictionComponent");
+                    if (completedCount != adapter.FremenNodes.Count
+                        || tagCount != adapter.FremenTags.Count
+                        || recipeCount != adapter.FremenRecipes.Count
+                        || verifySpice["SystemStatus"]?.GetValue<string>() != adapter.SpiceStatus
+                        || verifySpice["SpiceVisionEnabledStatus"]?.GetValue<string>() != adapter.SpiceStatus)
+                    {
+                        throw new InvalidDataException(
+                            "Find-the-Fremen semantic verification failed.");
+                    }
+                    ValidateDatabase(connection);
+                    Commit(connection);
+                    return new
+                    {
+                        nodes = completedCount,
+                        tags = tagCount,
+                        recipes = recipeCount,
+                        spiceVision = adapter.SpiceStatus
+                    };
+                }
+                catch
+                {
+                    Rollback(connection);
+                    throw;
+                }
+            }, requireGameClosed: true);
+    }
+
+    private static object EnableAllSkillsCore(
+        string input,
+        string safetyBackup,
+        string adapterPath,
+        string skillsPath)
+    {
+        var adapter = ReadSoloAdapter(adapterPath);
+        AssertProgressionAdapter(input, adapter);
+        var catalog = ReadSkillCatalog(skillsPath);
+        var included = catalog
+            .Where(key => !adapter.SkillExcludes.Contains(key))
+            .ToArray();
+        return RunProgressionMutation(
+            input,
+            safetyBackup,
+            "enable-all-skills",
+            sqlitePath =>
+            {
+                using var connection = OpenWritable(sqlitePath);
+                var identity = ReadIdentity(connection);
+                BeginImmediate(connection);
+                try
+                {
+                    var components = ReadFglComponents(connection, identity.EntityId);
+                    var level = RequireComponentObject(components, "FLevelComponent");
+                    var moduleData = level["ModuleData"] as JsonObject ?? new JsonObject();
+                    level["ModuleData"] = moduleData;
+                    var catalogSet = catalog.ToHashSet(StringComparer.Ordinal);
+                    var unknownBefore = moduleData
+                        .Where(pair => !catalogSet.Contains(pair.Key))
+                        .ToDictionary(
+                            pair => pair.Key,
+                            pair => pair.Value?.ToJsonString() ?? "null",
+                            StringComparer.Ordinal);
+                    var excludedBefore = adapter.SkillExcludes.ToDictionary(
+                        key => key,
+                        key => moduleData[key]?.ToJsonString() ?? "null",
+                        StringComparer.Ordinal);
+
+                    foreach (var key in included)
+                    {
+                        var skill = moduleData[key] as JsonObject ?? new JsonObject();
+                        var current = GetInt(skill, "SkillPointsSpent");
+                        if (current < adapter.SkillLevel)
+                        {
+                            skill["SkillPointsSpent"] = adapter.SkillLevel;
+                        }
+                        moduleData[key] = skill;
+                    }
+                    var spent = SumSkillSpend(moduleData);
+                    var currentUnspent = GetInt(level, "UnspentSkillPoints");
+                    var unspent = Math.Max(currentUnspent, adapter.SkillBuffer);
+                    level["UnspentSkillPoints"] = unspent;
+                    level["TotalSkillPoints"] = Math.Max(
+                        GetInt(level, "TotalSkillPoints"),
+                        spent + unspent);
+                    WriteFglComponents(connection, identity.EntityId, components);
+
+                    var properties = ReadActorProperties(connection, identity.PawnId);
+                    var tech = EnsureObject(properties, "TechKnowledgePlayerComponent");
+                    tech["m_TechKnowledgePoints"] = Math.Max(
+                        GetInt(tech, "m_TechKnowledgePoints"),
+                        adapter.IntelFloor);
+                    WriteActorProperties(connection, identity.PawnId, properties);
+
+                    var verifyComponents = ReadFglComponents(connection, identity.EntityId);
+                    var verifyLevel = RequireComponentObject(
+                        verifyComponents,
+                        "FLevelComponent");
+                    var verifyModule = verifyLevel["ModuleData"] as JsonObject
+                        ?? throw new InvalidDataException("ModuleData missing after skill write.");
+                    var applied = included.Count(key =>
+                        GetInt(verifyModule[key] as JsonObject, "SkillPointsSpent")
+                        >= adapter.SkillLevel);
+                    foreach (var pair in unknownBefore)
+                    {
+                        if ((verifyModule[pair.Key]?.ToJsonString() ?? "null") != pair.Value)
+                        {
+                            throw new InvalidDataException(
+                                $"Unknown Solo skill key was modified: {pair.Key}");
+                        }
+                    }
+                    foreach (var pair in excludedBefore)
+                    {
+                        if ((verifyModule[pair.Key]?.ToJsonString() ?? "null") != pair.Value)
+                        {
+                            throw new InvalidDataException(
+                                $"Excluded skill key was modified: {pair.Key}");
+                        }
+                    }
+                    var verifyProps = ReadActorProperties(connection, identity.PawnId);
+                    var verifyIntel = GetInt(
+                        verifyProps["TechKnowledgePlayerComponent"] as JsonObject,
+                        "m_TechKnowledgePoints");
+                    if (applied != included.Length
+                        || GetInt(verifyLevel, "UnspentSkillPoints") < adapter.SkillBuffer
+                        || GetInt(verifyLevel, "TotalSkillPoints")
+                            < SumSkillSpend(verifyModule)
+                                + GetInt(verifyLevel, "UnspentSkillPoints")
+                        || verifyIntel < adapter.IntelFloor)
+                    {
+                        throw new InvalidDataException(
+                            "Enable-All-Skills semantic verification failed.");
+                    }
+                    ValidateDatabase(connection);
+                    Commit(connection);
+                    return new
+                    {
+                        catalogSize = catalog.Length,
+                        applied,
+                        excluded = adapter.SkillExcludes.Count,
+                        unknownPreserved = unknownBefore.Count,
+                        levelValue = adapter.SkillLevel,
+                        unspent = GetInt(verifyLevel, "UnspentSkillPoints"),
+                        total = GetInt(verifyLevel, "TotalSkillPoints"),
+                        intel = verifyIntel
+                    };
+                }
+                catch
+                {
+                    Rollback(connection);
+                    throw;
+                }
+            });
+    }
+
+    private static object CompleteNpe(
+        string input,
+        string safetyBackup,
+        string adapterPath)
+    {
+        var adapter = ReadSoloAdapter(adapterPath);
+        AssertProgressionAdapter(input, adapter);
+        return RunProgressionMutation(
+            input,
+            safetyBackup,
+            "complete-npe",
+            sqlitePath =>
+            {
+                using var connection = OpenWritable(sqlitePath);
+                var identity = ReadIdentity(connection);
+                var observedNodes = ReadStrings(
+                    connection,
+                    """
+                    SELECT story_node_id
+                    FROM journey_story_node
+                    WHERE character_id = $character
+                      AND (
+                          story_node_id = 'DA_MQ_ANewBeginning'
+                          OR story_node_id LIKE 'DA_MQ_ANewBeginning.%'
+                          OR story_node_id = 'DA_MQ_NPEAutocompleted'
+                          OR story_node_id LIKE 'DA_MQ_NPEAutocompleted.%'
+                      )
+                    ORDER BY story_node_id;
+                    """,
+                    ("$character", identity.CharacterId));
+                var catalog = adapter.NpeNodes.ToHashSet(StringComparer.Ordinal);
+                var unknown = observedNodes
+                    .Where(node => !catalog.Contains(node))
+                    .ToArray();
+                if (unknown.Length > 0)
+                {
+                    throw new InvalidDataException(
+                        $"Solo NPE adapter mismatch: found {unknown.Length} unknown journey node(s), beginning with {unknown[0]}.");
+                }
+
+                BeginImmediate(connection);
+                try
+                {
+                    foreach (var node in adapter.NpeNodes)
+                    {
+                        ExecuteNonQuery(
+                            connection,
+                            """
+                            INSERT INTO journey_story_node (
+                                character_id,
+                                story_node_id,
+                                complete_condition_state,
+                                reveal_condition_state,
+                                has_pending_reward,
+                                metadata_state,
+                                reset_group,
+                                fail_condition_state
+                            )
+                            VALUES (
+                                $character,
+                                $node,
+                                jsonb('true'),
+                                jsonb('true'),
+                                0,
+                                jsonb('{}'),
+                                0,
+                                jsonb('{}')
+                            )
+                            ON CONFLICT(character_id, story_node_id)
+                            DO UPDATE SET complete_condition_state = jsonb('true'),
+                                          reveal_condition_state = jsonb('true'),
+                                          has_pending_reward = 0;
+                            """,
+                            ("$character", identity.CharacterId),
+                            ("$node", node));
+                    }
+                    ExecuteNonQuery(
+                        connection,
+                        """
+                        INSERT INTO player_tags (character_id, tag)
+                        VALUES ($character, $tag)
+                        ON CONFLICT(character_id, tag) DO NOTHING;
+                        """,
+                        ("$character", identity.CharacterId),
+                        ("$tag", adapter.NpeTag));
+
+                    var completed = ScalarLong(
+                        connection,
+                        """
+                        SELECT COUNT(*)
+                        FROM journey_story_node
+                        WHERE character_id = $character
+                          AND (
+                              story_node_id = 'DA_MQ_ANewBeginning'
+                              OR story_node_id LIKE 'DA_MQ_ANewBeginning.%'
+                              OR story_node_id = 'DA_MQ_NPEAutocompleted'
+                              OR story_node_id LIKE 'DA_MQ_NPEAutocompleted.%'
+                          )
+                          AND json(complete_condition_state) = 'true'
+                          AND json(reveal_condition_state) = 'true'
+                          AND has_pending_reward = 0;
+                        """,
+                        ("$character", identity.CharacterId));
+                    var tagCount = ScalarLong(
+                        connection,
+                        """
+                        SELECT COUNT(*)
+                        FROM player_tags
+                        WHERE character_id = $character AND tag = $tag;
+                        """,
+                        ("$character", identity.CharacterId),
+                        ("$tag", adapter.NpeTag));
+                    if (completed != adapter.NpeNodes.Count || tagCount != 1)
+                    {
+                        throw new InvalidDataException(
+                            $"Complete-NPE semantic verification failed (nodes={completed}/{adapter.NpeNodes.Count}, tag={tagCount}).");
+                    }
+                    ValidateDatabase(connection);
+                    Commit(connection);
+                    return new
+                    {
+                        nodes = completed,
+                        tag = adapter.NpeTag
+                    };
+                }
+                catch
+                {
+                    Rollback(connection);
+                    throw;
+                }
+            });
+    }
+
+    private static object SetProgressionPoints(
+        string input,
+        string safetyBackup,
+        string adapterPath,
+        long skillPoints,
+        long intel)
+    {
+        var adapter = ReadSoloAdapter(adapterPath);
+        AssertProgressionAdapter(input, adapter);
+        return RunProgressionMutation(
+            input,
+            safetyBackup,
+            "set-progression-points",
+            sqlitePath =>
+            {
+                using var connection = OpenWritable(sqlitePath);
+                var identity = ReadIdentity(connection);
+                BeginImmediate(connection);
+                try
+                {
+                    var components = ReadFglComponents(connection, identity.EntityId);
+                    var level = RequireComponentObject(components, "FLevelComponent");
+                    var moduleData = level["ModuleData"] as JsonObject ?? new JsonObject();
+                    level["ModuleData"] = moduleData;
+                    var moduleBefore = moduleData.ToJsonString();
+                    var spent = SumSkillSpend(moduleData);
+                    var total = (long)spent + skillPoints;
+                    if (total > 2_000_000_000)
+                    {
+                        throw new ArgumentException(
+                            "Skill points plus currently spent points must not exceed 2000000000.");
+                    }
+                    level["UnspentSkillPoints"] = (int)skillPoints;
+                    level["TotalSkillPoints"] = (int)total;
+                    WriteFglComponents(connection, identity.EntityId, components);
+
+                    var properties = ReadActorProperties(connection, identity.PawnId);
+                    var tech = EnsureObject(properties, "TechKnowledgePlayerComponent");
+                    tech["m_TechKnowledgePoints"] = (int)intel;
+                    WriteActorProperties(connection, identity.PawnId, properties);
+
+                    var verifyComponents = ReadFglComponents(connection, identity.EntityId);
+                    var verifyLevel = RequireComponentObject(
+                        verifyComponents,
+                        "FLevelComponent");
+                    var verifyModule = verifyLevel["ModuleData"] as JsonObject
+                        ?? throw new InvalidDataException("ModuleData missing after point write.");
+                    var verifyProperties = ReadActorProperties(connection, identity.PawnId);
+                    var verifyIntel = GetInt(
+                        verifyProperties["TechKnowledgePlayerComponent"] as JsonObject,
+                        "m_TechKnowledgePoints");
+                    if (verifyModule.ToJsonString() != moduleBefore
+                        || GetInt(verifyLevel, "UnspentSkillPoints") != skillPoints
+                        || GetInt(verifyLevel, "TotalSkillPoints") != total
+                        || verifyIntel != intel)
+                    {
+                        throw new InvalidDataException(
+                            "Progression-point semantic verification failed.");
+                    }
+                    ValidateDatabase(connection);
+                    Commit(connection);
+                    return new
+                    {
+                        skillPoints,
+                        totalSkillPoints = total,
+                        spentSkillPoints = spent,
+                        intel
+                    };
+                }
+                catch
+                {
+                    Rollback(connection);
+                    throw;
+                }
+            });
+    }
+
+    private static object RunProgressionMutation(
+        string input,
+        string safetyBackup,
+        string action,
+        Func<string, object> mutation,
+        bool requireGameClosed = false)
+    {
+        var original = ReadStable(input);
+        EnsureWritableInspection(InspectBytes(original, input));
+        var wrapped = Unwrap(original);
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            $"dune-solo-{action}-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            var sqlitePath = Path.Combine(root, "progression.sqlite");
+            File.WriteAllBytes(sqlitePath, wrapped.SqliteBytes);
+            var details = mutation(sqlitePath);
+            var mutated = Path.Combine(root, "game.db");
+            WrapSqlite(sqlitePath, mutated);
+            EnsureWritableInspection(InspectPath(mutated));
+            Restore(mutated, input, safetyBackup, expectedTargetBytes: original, requireGameClosed: requireGameClosed);
+            return new
+            {
+                ok = true,
+                action,
+                safetyBackup,
+                details,
+                inspection = InspectPath(input)
+            };
+        }
+
+        finally
+        {
+            try
+            {
+                if (Directory.Exists(root))
+                {
+                    Directory.Delete(root, recursive: true);
+                }
+            }
+            catch
+            {
+                // A retained temp directory is safer than hiding the result.
+            }
+        }
+    }
+
+    private static void AssertProgressionAdapter(
+        string input,
+        SoloAdapter adapter)
+    {
+        // Validate the wrapper and save health, not a whole-database hash.
+        // Required SQL/JSON fields are checked by the operation on its private
+        // working copy before any replacement of the original save.
+        EnsureWritableInspection(InspectBytes(ReadStable(input), input, adapter: adapter));
+    }
+
+    private static ProgressionSummary ReadProgressionSummary(
+        SqliteConnection connection,
+        SoloAdapter? adapter = null)
+    {
+        try
+        {
+            var tracks = new List<SpecializationStatus>();
+            if (TableExists(connection, "specialization_tracks"))
+            {
+                using var command = connection.CreateCommand();
+                command.CommandText = """
+                    SELECT track_type, level, xp_amount
+                    FROM specialization_tracks
+                    WHERE player_id = (
+                        SELECT player_controller_id FROM player_state LIMIT 1
+                    )
+                    ORDER BY track_type;
+                    """;
+                using var reader = command.ExecuteReader();
+                while (reader.Read())
+                {
+                    tracks.Add(new SpecializationStatus(
+                        TrackType: reader.GetInt32(0),
+                        Level: reader.GetDouble(1),
+                        Xp: reader.GetInt64(2)));
+                }
+            }
+            var rewards = TableExists(connection, "purchased_specialization_keystones")
+                ? ScalarLong(
+                    connection,
+                    """
+                    SELECT COUNT(*)
+                    FROM purchased_specialization_keystones
+                    WHERE player_id = (
+                        SELECT player_controller_id FROM player_state LIMIT 1
+                    );
+                    """)
+                : 0;
+            var fremenTotal = TableExists(connection, "journey_story_node")
+                ? ScalarLong(
+                    connection,
+                    """
+                    SELECT COUNT(*)
+                    FROM journey_story_node
+                    WHERE character_id = (SELECT id FROM player_state LIMIT 1)
+                      AND (
+                          story_node_id = 'DA_MQ_FindTheFremen'
+                          OR story_node_id LIKE 'DA_MQ_FindTheFremen.%'
+                      );
+                    """)
+                : 0;
+            var fremenComplete = TableExists(connection, "journey_story_node")
+                ? ScalarLong(
+                    connection,
+                    """
+                    SELECT COUNT(*)
+                    FROM journey_story_node
+                    WHERE character_id = (SELECT id FROM player_state LIMIT 1)
+                      AND (
+                          story_node_id = 'DA_MQ_FindTheFremen'
+                          OR story_node_id LIKE 'DA_MQ_FindTheFremen.%'
+                      )
+                      AND json(complete_condition_state) = 'true'
+                      AND json(reveal_condition_state) = 'true';
+                    """)
+                : 0;
+            var completedNpeNodes = TableExists(connection, "journey_story_node")
+                ? ReadStrings(
+                    connection,
+                    """
+                    SELECT story_node_id
+                    FROM journey_story_node
+                    WHERE character_id = (SELECT id FROM player_state LIMIT 1)
+                      AND (
+                          story_node_id = 'DA_MQ_ANewBeginning'
+                          OR story_node_id LIKE 'DA_MQ_ANewBeginning.%'
+                          OR story_node_id = 'DA_MQ_NPEAutocompleted'
+                          OR story_node_id LIKE 'DA_MQ_NPEAutocompleted.%'
+                      )
+                      AND json(complete_condition_state) = 'true'
+                      AND json(reveal_condition_state) = 'true';
+                    """)
+                : Array.Empty<string>();
+            var npeCatalog = adapter?.NpeNodes.ToHashSet(StringComparer.Ordinal);
+            var npeTotal = npeCatalog?.Count ?? completedNpeNodes.Length;
+            var npeComplete = npeCatalog is null
+                ? completedNpeNodes.Length
+                : completedNpeNodes.Count(npeCatalog.Contains);
+            var npeTag = adapter?.NpeTag ?? "NPE.HasCompletedNPE";
+            var npeTagPresent = TableExists(connection, "player_tags")
+                && ScalarLong(
+                    connection,
+                    """
+                    SELECT COUNT(*)
+                    FROM player_tags
+                    WHERE character_id = (SELECT id FROM player_state LIMIT 1)
+                      AND tag = $tag;
+                    """,
+                    ("$tag", npeTag)) == 1;
+
+            var identity = ReadIdentity(connection);
+            var components = ReadFglComponents(connection, identity.EntityId);
+            var level = RequireComponentObject(components, "FLevelComponent");
+            var moduleData = level["ModuleData"] as JsonObject ?? new JsonObject();
+            var enabledAtSeven = moduleData.Count(pair =>
+                pair.Key != "(TagName=\"Skills.Ability.VoiceStop\")"
+                && GetInt(pair.Value as JsonObject, "SkillPointsSpent") >= 7);
+            var spice = RequireComponentObject(
+                components,
+                "FSpiceAddictionComponent");
+            var properties = ReadActorProperties(connection, identity.PawnId);
+            var intel = GetInt(
+                properties["TechKnowledgePlayerComponent"] as JsonObject,
+                "m_TechKnowledgePoints");
+            return new ProgressionSummary(
+                Specializations: tracks.ToArray(),
+                PurchasedRewards: rewards,
+                FremenNodesTotal: fremenTotal,
+                FremenNodesComplete: fremenComplete,
+                NpeNodesTotal: npeTotal,
+                NpeNodesComplete: npeComplete,
+                NpeTagPresent: npeTagPresent,
+                SpiceSystemStatus: spice["SystemStatus"]?.GetValue<string>() ?? "",
+                SpiceVisionStatus: spice["SpiceVisionEnabledStatus"]?.GetValue<string>() ?? "",
+                SkillsAtSeven: enabledAtSeven,
+                ModuleKeyCount: moduleData.Count,
+                TotalSkillPoints: GetInt(level, "TotalSkillPoints"),
+                UnspentSkillPoints: GetInt(level, "UnspentSkillPoints"),
+                KeystoneBonusSkillPoints: GetInt(level, "KeystoneBonusSkillPoints"),
+                Intel: intel,
+                CharacterXp: level["TotalXPEarned"] is JsonValue savedXp && savedXp.TryGetValue<long>(out var characterXp) ? characterXp : null);
+        }
+        catch
+        {
+            return ProgressionSummary.Empty;
+        }
+    }
+
+    private static SqliteConnection OpenWritable(string path)
+    {
+        var connection = new SqliteConnection(
+            new SqliteConnectionStringBuilder
+            {
+                DataSource = path,
+                Mode = SqliteOpenMode.ReadWrite,
+                Pooling = false
+            }.ToString());
+        connection.Open();
+        ExecuteNonQuery(connection, "PRAGMA foreign_keys = ON;");
+        return connection;
+    }
+
+    private static void BeginImmediate(SqliteConnection connection)
+        => ExecuteNonQuery(connection, "BEGIN IMMEDIATE;");
+
+    private static void Commit(SqliteConnection connection)
+        => ExecuteNonQuery(connection, "COMMIT;");
+
+    private static void Rollback(SqliteConnection connection)
+    {
+        try { ExecuteNonQuery(connection, "ROLLBACK;"); } catch { }
+    }
+
+    private static void ValidateDatabase(SqliteConnection connection)
+    {
+        var integrity = ScalarString(connection, "PRAGMA integrity_check;");
+        var foreignKeys = ScalarLong(
+            connection,
+            "SELECT COUNT(*) FROM pragma_foreign_key_check;");
+        if (!string.Equals(integrity, "ok", StringComparison.OrdinalIgnoreCase)
+            || foreignKeys != 0)
+        {
+            throw new InvalidDataException(
+                $"SQLite validation failed (integrity={integrity}, foreignKeys={foreignKeys}).");
+        }
+    }
+
+    private static SoloIdentity ReadIdentity(SqliteConnection connection)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT id, player_controller_id, player_pawn_id
+            FROM player_state;
+            """;
+        using var reader = command.ExecuteReader();
+        if (!reader.Read())
+        {
+            throw new InvalidDataException("No Solo character found.");
+        }
+        var characterId = reader.GetInt64(0);
+        var controllerId = reader.GetInt64(1);
+        var pawnId = reader.GetInt64(2);
+        if (reader.Read())
+        {
+            throw new InvalidDataException("More than one Solo character found.");
+        }
+        var entityId = ScalarLong(
+            connection,
+            """
+            SELECT entity_id
+            FROM actor_fgl_entities
+            WHERE actor_id = $pawn
+              AND slot_name = 'DuneCharacter'
+            LIMIT 1;
+            """,
+            ("$pawn", pawnId));
+        if (entityId == 0)
+        {
+            throw new InvalidDataException(
+                "DuneCharacter FGL entity was not found.");
+        }
+        return new SoloIdentity(characterId, controllerId, pawnId, entityId);
+    }
+
+    private static JsonObject ReadActorProperties(
+        SqliteConnection connection,
+        long pawnId)
+        => ReadJsonObject(
+            connection,
+            "SELECT json(properties) FROM actors WHERE id = $id;",
+            ("$id", pawnId));
+
+    private static void WriteActorProperties(
+        SqliteConnection connection,
+        long pawnId,
+        JsonObject properties)
+    {
+        var changed = ExecuteNonQuery(
+            connection,
+            "UPDATE actors SET properties = jsonb($json) WHERE id = $id;",
+            ("$json", properties.ToJsonString()),
+            ("$id", pawnId));
+        if (changed != 1)
+        {
+            throw new InvalidDataException("Pawn property write failed.");
+        }
+    }
+
+    private static JsonObject ReadFglComponents(
+        SqliteConnection connection,
+        long entityId)
+        => ReadJsonObject(
+            connection,
+            "SELECT json(components) FROM fgl_entities WHERE entity_id = $id;",
+            ("$id", entityId));
+
+    private static void WriteFglComponents(
+        SqliteConnection connection,
+        long entityId,
+        JsonObject components)
+    {
+        var changed = ExecuteNonQuery(
+            connection,
+            "UPDATE fgl_entities SET components = jsonb($json) WHERE entity_id = $id;",
+            ("$json", components.ToJsonString()),
+            ("$id", entityId));
+        if (changed != 1)
+        {
+            throw new InvalidDataException("FGL component write failed.");
+        }
+    }
+
+    private static JsonObject ReadJsonObject(
+        SqliteConnection connection,
+        string sql,
+        params (string Name, object Value)[] parameters)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        foreach (var parameter in parameters)
+        {
+            command.Parameters.AddWithValue(parameter.Name, parameter.Value);
+        }
+        var raw = Convert.ToString(command.ExecuteScalar());
+        return JsonNode.Parse(raw ?? "{}") as JsonObject
+            ?? throw new InvalidDataException("Expected JSON object.");
+    }
+
+    private static JsonObject RequireComponentObject(
+        JsonObject components,
+        string name)
+    {
+        var array = components[name] as JsonArray
+            ?? throw new InvalidDataException($"{name} is missing.");
+        if (array.Count < 2 || array[1] is not JsonObject value)
+        {
+            throw new InvalidDataException($"{name}[1] is missing.");
+        }
+        return value;
+    }
+
+    private static JsonObject EnsureObject(JsonObject parent, string name)
+    {
+        if (parent[name] is JsonObject value) { return value; }
+        value = new JsonObject();
+        parent[name] = value;
+        return value;
+    }
+
+    private static int GetInt(JsonObject? value, string name)
+    {
+        if (value?[name] is not JsonValue node) { return 0; }
+        if (node.TryGetValue<int>(out var integer)) { return integer; }
+        if (node.TryGetValue<long>(out var longValue)) {
+            return checked((int)longValue);
+        }
+        if (node.TryGetValue<double>(out var doubleValue)) {
+            return checked((int)Math.Round(doubleValue));
+        }
+        return 0;
+    }
+
+    private static int SumSkillSpend(JsonObject moduleData)
+        => moduleData.Sum(pair =>
+            GetInt(pair.Value as JsonObject, "SkillPointsSpent"));
+
+    private static int ReadSpecializationBonus(
+        SqliteConnection connection,
+        long controllerId,
+        IReadOnlyDictionary<int, KeystoneRule> keystones)
+    {
+        var purchased = ReadLongs(
+            connection,
+            """
+            SELECT keystone_id
+            FROM purchased_specialization_keystones
+            WHERE player_id = $player;
+            """,
+            ("$player", controllerId));
+        return purchased.Sum(id =>
+            keystones.TryGetValue(checked((int)id), out var rule)
+                ? SkillPointBonus(rule.Name)
+                : 0);
+    }
+
+    private static int ReadCharacterKeystoneBonus(
+        SqliteConnection connection,
+        long pawnId)
+    {
+        var properties = ReadActorProperties(connection, pawnId);
+        var array = properties["KeystonePlayerComponent"]?
+            ["m_PurchasedKeystoneIDs"] as JsonArray;
+        if (array is null) { return 0; }
+        return array.Count(value =>
+        {
+            if (value is not JsonValue node) { return false; }
+            return node.TryGetValue<int>(out var id)
+                && id is 7 or 14 or 21;
+        });
+    }
+
+    private static int SkillPointBonus(string name)
+    {
+        if (name.EndsWith("_SkillPoint_Super", StringComparison.Ordinal)) return 5;
+        if (name.EndsWith("_SkillPoint_Major", StringComparison.Ordinal)) return 3;
+        if (name.EndsWith("_SkillPoint", StringComparison.Ordinal)) return 1;
+        return 0;
+    }
+
+    private static int CountPurchasedRecipes(
+        JsonObject properties,
+        IReadOnlyList<string> required)
+    {
+        var recipes = properties["TechKnowledgePlayerComponent"]?
+            ["m_TechKnowledge"]?
+            ["m_TechKnowledgeData"] as JsonArray;
+        if (recipes is null) { return 0; }
+        var purchased = recipes
+            .OfType<JsonObject>()
+            .Where(value =>
+                value["UnlockedState"]?.GetValue<string>() == "Purchased")
+            .Select(value => value["ItemKey"]?.GetValue<string>() ?? "")
+            .ToHashSet(StringComparer.Ordinal);
+        return required.Count(purchased.Contains);
+    }
+
+    private static int CountMatchingStrings(
+        SqliteConnection connection,
+        string table,
+        string valueColumn,
+        string ownerColumn,
+        long ownerId,
+        IReadOnlyList<string> values)
+    {
+        var count = 0;
+        foreach (var value in values)
+        {
+            count += checked((int)ScalarLong(
+                connection,
+                $"SELECT COUNT(*) FROM {table} WHERE {ownerColumn} = $owner AND {valueColumn} = $value;",
+                ("$owner", ownerId),
+                ("$value", value)));
+        }
+        return count;
+    }
+
+    private static bool TableExists(
+        SqliteConnection connection,
+        string table)
+        => ScalarLong(
+            connection,
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=$name;",
+            ("$name", table)) == 1;
+
+    private static string[] ReadStrings(
+        SqliteConnection connection,
+        string sql,
+        params (string Name, object Value)[] parameters)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        foreach (var parameter in parameters) {
+            command.Parameters.AddWithValue(parameter.Name, parameter.Value);
+        }
+        var result = new List<string>();
+        using var reader = command.ExecuteReader();
+        while (reader.Read()) { result.Add(reader.GetString(0)); }
+        return result.ToArray();
+    }
+
+    private static long[] ReadLongs(
+        SqliteConnection connection,
+        string sql,
+        params (string Name, object Value)[] parameters)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        foreach (var parameter in parameters) {
+            command.Parameters.AddWithValue(parameter.Name, parameter.Value);
+        }
+        var result = new List<long>();
+        using var reader = command.ExecuteReader();
+        while (reader.Read()) { result.Add(reader.GetInt64(0)); }
+        return result.ToArray();
+    }
+
+    private static SoloAdapter ReadSoloAdapter(string path)
+    {
+        using var document = JsonDocument.Parse(File.ReadAllText(path));
+        var root = document.RootElement;
+        var tracks = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var maxLevel = 0;
+        var maxXp = 0;
+        if (root.TryGetProperty("specializations", out var specializations))
+        {
+            maxLevel = specializations.GetProperty("max_level").GetInt32();
+            maxXp = specializations.GetProperty("max_xp").GetInt32();
+            foreach (var property in specializations.GetProperty("tracks").EnumerateObject())
+            {
+                tracks[property.Name] = property.Value.GetInt32();
+            }
+        }
+        var fremenNodes = Array.Empty<string>();
+        var fremenTags = Array.Empty<string>();
+        var fremenRecipes = Array.Empty<string>();
+        var spiceStatus = string.Empty;
+        if (root.TryGetProperty("find_the_fremen", out var fremen))
+        {
+            fremenNodes = fremen.GetProperty("nodes").EnumerateArray()
+                .Select(value => value.GetString() ?? "").ToArray();
+            fremenTags = fremen.GetProperty("tags").EnumerateArray()
+                .Select(value => value.GetString() ?? "").ToArray();
+            fremenRecipes = fremen.GetProperty("recipes").EnumerateArray()
+                .Select(value => value.GetString() ?? "").ToArray();
+            spiceStatus = fremen.GetProperty("spice_status").GetString() ?? "";
+        }
+        var npeNodes = Array.Empty<string>();
+        var npeTag = string.Empty;
+        if (root.TryGetProperty("complete_npe", out var npe))
+        {
+            npeNodes = npe.GetProperty("nodes").EnumerateArray()
+                .Select(value => value.GetString() ?? "")
+                .Where(value => value.Length > 0)
+                .ToArray();
+            var declaredNpeNodes = npe.GetProperty("node_count").GetInt32();
+            if (npeNodes.Length != declaredNpeNodes
+                || npeNodes.Distinct(StringComparer.Ordinal).Count() != npeNodes.Length)
+            {
+                throw new InvalidDataException(
+                    $"Solo NPE catalog expected {declaredNpeNodes} unique nodes, found {npeNodes.Length}.");
+            }
+            npeTag = npe.GetProperty("tag").GetString() ?? "";
+        }
+        var schemaFingerprints = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            root.GetProperty("schema_fingerprint").GetString() ?? ""
+        };
+        if (root.TryGetProperty("compatible_schema_fingerprints", out var compatibleFingerprints))
+        {
+            foreach (var fingerprint in compatibleFingerprints.EnumerateArray())
+            {
+                var value = fingerprint.GetString();
+                if (!string.IsNullOrWhiteSpace(value)) { schemaFingerprints.Add(value); }
+            }
+        }
+        var waterCapacities = root.TryGetProperty("water_fillable_capacities", out var water)
+            ? water.EnumerateObject().ToDictionary(
+                property => property.Name,
+                property => property.Value.GetInt32(),
+                StringComparer.OrdinalIgnoreCase)
+            : new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var skillLevel = 0;
+        var skillBuffer = 0;
+        var intelFloor = 0;
+        var skillExcludes = new HashSet<string>(StringComparer.Ordinal);
+        if (root.TryGetProperty("enable_all_skills", out var skills))
+        {
+            skillLevel = skills.GetProperty("level_value").GetInt32();
+            skillBuffer = skills.GetProperty("point_buffer").GetInt32();
+            intelFloor = skills.GetProperty("intel_floor").GetInt32();
+            skillExcludes = skills.GetProperty("exclude").EnumerateArray()
+                .Select(value => value.GetString() ?? "")
+                .ToHashSet(StringComparer.Ordinal);
+        }
+        return new SoloAdapter(
+            Id: root.GetProperty("id").GetString() ?? "",
+            WrapperVersion: root.TryGetProperty("wrapper_version", out var wrapperVersion)
+                ? wrapperVersion.GetUInt32()
+                : 1,
+            SchemaFingerprints: schemaFingerprints,
+            MaxLevel: maxLevel,
+            MaxXp: maxXp,
+            Tracks: tracks,
+            FremenNodes: fremenNodes,
+            FremenTags: fremenTags,
+            FremenRecipes: fremenRecipes,
+            SpiceStatus: spiceStatus,
+            NpeNodes: npeNodes,
+            NpeTag: npeTag,
+            WaterCapacities: waterCapacities,
+            SkillLevel: skillLevel,
+            SkillBuffer: skillBuffer,
+            IntelFloor: intelFloor,
+            SkillExcludes: skillExcludes);
+    }
+
+    private static Dictionary<int, KeystoneRule> ReadKeystones(string path)
+    {
+        using var document = JsonDocument.Parse(File.ReadAllText(path));
+        var result = new Dictionary<int, KeystoneRule>();
+        foreach (var property in document.RootElement.EnumerateObject())
+        {
+            var value = property.Value;
+            result[int.Parse(property.Name)] = new KeystoneRule(
+                Track: value.GetProperty("track").GetString() ?? "",
+                Level: value.GetProperty("level").GetInt32(),
+                Name: value.GetProperty("name").GetString() ?? "",
+                PlayerTags: value.TryGetProperty("player_tags", out var tags)
+                    ? tags.EnumerateArray().Select(tag => tag.GetString()
+                        ?? throw new InvalidDataException("Invalid specialization effect tag.")).ToArray()
+                    : Array.Empty<string>(),
+                Recipes: value.TryGetProperty("recipes", out var recipes)
+                    ? recipes.EnumerateArray().Select(recipe => new SpecializationRecipe(
+                        recipe.GetProperty("id").GetString() ?? throw new InvalidDataException("Invalid specialization recipe ID."),
+                        recipe.GetProperty("quality").GetInt32(), recipe.GetProperty("uses").GetInt32())).ToArray()
+                    : Array.Empty<SpecializationRecipe>());
+        }
+        return result;
+    }
+
+    private static string[] ReadSkillCatalog(string path)
+    {
+        using var document = JsonDocument.Parse(File.ReadAllText(path));
+        return document.RootElement.GetProperty("keys")
+            .EnumerateArray()
+            .Select(value => value.GetString() ?? "")
+            .Where(value => value.Length > 0)
+            .ToArray();
+    }
+
+    private sealed record SoloAdapter(
+        string Id,
+        uint WrapperVersion,
+        HashSet<string> SchemaFingerprints,
+        int MaxLevel,
+        int MaxXp,
+        IReadOnlyDictionary<string, int> Tracks,
+        IReadOnlyList<string> FremenNodes,
+        IReadOnlyList<string> FremenTags,
+        IReadOnlyList<string> FremenRecipes,
+        string SpiceStatus,
+        IReadOnlyList<string> NpeNodes,
+        string NpeTag,
+        IReadOnlyDictionary<string, int> WaterCapacities,
+        int SkillLevel,
+        int SkillBuffer,
+        int IntelFloor,
+        HashSet<string> SkillExcludes);
+
+    private sealed record KeystoneRule(
+        string Track,
+        int Level,
+        string Name,
+        IReadOnlyList<string> PlayerTags,
+        IReadOnlyList<SpecializationRecipe> Recipes);
+
+    private sealed record SpecializationRecipe(string Id, int Quality, int Uses);
+
+    private sealed record SoloIdentity(
+        long CharacterId,
+        long ControllerId,
+        long PawnId,
+        long EntityId);
+
+    private sealed record SpecializationStatus(
+        int TrackType,
+        double Level,
+        long Xp);
+
+    private sealed record ProgressionSummary(
+        SpecializationStatus[] Specializations,
+        long PurchasedRewards,
+        long FremenNodesTotal,
+        long FremenNodesComplete,
+        long NpeNodesTotal,
+        long NpeNodesComplete,
+        bool NpeTagPresent,
+        string SpiceSystemStatus,
+        string SpiceVisionStatus,
+        int SkillsAtSeven,
+        int ModuleKeyCount,
+        int TotalSkillPoints,
+        int UnspentSkillPoints,
+        int KeystoneBonusSkillPoints,
+        int Intel,
+        long? CharacterXp = null)
+    {
+        public static ProgressionSummary Empty { get; } = new(
+            Array.Empty<SpecializationStatus>(),
+            0,
+            0,
+            0,
+            0,
+            0,
+            false,
+            "",
+            "",
+            0,
+            0,
+            0,
+            0,
+            0,
+            0);
+    }
+}

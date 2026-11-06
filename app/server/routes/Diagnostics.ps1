@@ -1,0 +1,1431 @@
+﻿# /api/diagnostics — build a redacted ZIP of logs the owner can attach in a
+# DST Discord support thread. Triggered from React's
+# "Help → Create Diagnostics Package" action.
+#
+# Hard rules:
+#   - Everything that lands in the ZIP runs through Invoke-DstRedaction first.
+#     We never write the user's real VM IP, SSH key path, or Windows username
+#     into a file they're about to share with support.
+#   - Failures on individual sources (missing log, locked file, OneDrive
+#     Desktop read-only) are recorded in manifest.txt as warnings; the ZIP
+#     still builds with whatever did succeed.
+#   - The ZIP is staged under %TEMP% and only renamed into place after a
+#     successful Compress-Archive — no partial files on the user's Desktop.
+
+# --- Sanitization ------------------------------------------------------------
+
+# Returns a copy of $Text with anything personally identifying replaced.
+# Cheap to call on every line / every file we include in the bundle.
+function Invoke-DstRedaction {
+    param(
+        [string]$Text,
+        [string]$WindowsUser,
+        [string]$SshKeyPath,
+        [string]$SteamPath
+    )
+    if ([string]::IsNullOrEmpty($Text)) { return $Text }
+    $out = $Text
+
+    # 1) ?t= / ?key= portal credentials -> <redacted>
+    $out = [regex]::Replace($out, '([?&;])(t|key)=[^&\s"''<>]+', '$1$2=<redacted>')
+
+    # 1b) Discord webhook URL token -> <redacted> (secret: grants channel posts)
+    $out = [regex]::Replace($out, '(/api/webhooks/\d+/)[A-Za-z0-9_-]+', '${1}<redacted>')
+
+    # 1c) Bare JWTs (header.payload.signature, base64url) — the Funcom FLS
+    #     ServiceAuthToken is printed verbatim in server-gateway pod logs and
+    #     carries the HostId + ServiceAuthKey. It MUST never leave the machine,
+    #     so scrub any JWT-shaped token regardless of surrounding text.
+    $out = [regex]::Replace($out, '\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+', '<jwt-redacted>')
+
+    # 1d) Known FLS secret fields in "<Name>: value" / "<Name>=value" /
+    #     JSON "<Name>": "value" form, as a safety net for any non-JWT token.
+    $out = [regex]::Replace($out, '(?i)\b(ServiceAuthToken|ServiceAuthKey|ServiceAuthSecret|ServiceAuthKeyId)\b(["'']?\s*[:=]\s*["'']?)[A-Za-z0-9._/+\-]{6,}', '${1}${2}<redacted>')
+
+    # 1e) Credentials embedded in connection-string URIs, e.g. the Postgres
+    #     connection string the battlegroup director / gateway print:
+    #       db=postgresql://dune:<password>@host:5432/...
+    #     Also covers amqp:// (RabbitMQ), redis://, mongodb://, etc. Capture the
+    #     password FIRST so we can also scrub standalone copies of it (the
+    #     battlegroup CR JSON repeats it as "password":"<value>"), then redact
+    #     the URI form. Keep the scheme + username for readability.
+    $capturedSecrets = New-Object System.Collections.Generic.List[string]
+    foreach ($m in [regex]::Matches($out, '(?i)[a-z][a-z0-9+.\-]*://[^:/?#\s@]+:([^@/?#\s]+)@')) {
+        $pw = $m.Groups[1].Value
+        if ($pw -and $pw -ne '<redacted>' -and $pw.Length -ge 4) { [void]$capturedSecrets.Add($pw) }
+    }
+    $out = [regex]::Replace($out, '(?i)([a-z][a-z0-9+.\-]*://[^:/?#\s@]+:)[^@/?#\s]+(@)', '${1}<redacted>${2}')
+
+    # 1f) Generic password / secret fields in JSON ("password":"x") or
+    #     key=value (PGPASSWORD=x) form, as a safety net for credentials that
+    #     never appear in a URI — e.g. the battlegroup CR's "password" field
+    #     and game-server state messages containing "loginPassword".
+    $out = [regex]::Replace($out, '(?i)("(?:password|loginpassword|passwd|pwd|pgpassword|dbpassword|secret)"\s*:\s*")[^"]+(")', '${1}<redacted>${2}')
+    $out = [regex]::Replace($out, '(?im)^(\s*(?:PGPASSWORD|PASSWORD|DB_PASSWORD|DATABASE_PASSWORD)\s*=\s*).+$', '${1}<redacted>')
+
+    # 1g) Global scrub of every captured connection-string password, so a copy
+    #     of the same secret elsewhere in the bundle (with different surrounding
+    #     syntax) can never slip through.
+    foreach ($secret in ($capturedSecrets | Select-Object -Unique)) {
+        $out = $out.Replace($secret, '<redacted>')
+    }
+
+    # 1h) Windows PowerShell transcript identity headers. Updater relaunch logs
+    # include domain\user and machine names before ordinary path redaction runs.
+    $out = [regex]::Replace(
+        $out,
+        '(?im)^(Username|RunAs User|Machine):\s*.*$',
+        '${1}: <redacted>')
+
+    # 1i) Chat teleport traces correlate the command with its dispatch and
+    # readback stages, but their sender, bookmark, map, and position values are
+    # private gameplay data. Keep trace IDs, stages, and result status useful.
+    $out = [regex]::Replace(
+        $out,
+        '(?im)(chat command !tp from )[^:\r\n]+(:)',
+        '${1}<chat-sender>${2}')
+    $out = [regex]::Replace($out, '(?im)^.*\bchat tp trace=[^\r\n]*\r?$', {
+        param($trace)
+        return [regex]::Replace(
+            $trace.Value,
+            '(?i)\b(destination|(?:chat_origin|source|target)_(?:map|partition|dimension|x|y|z)|map|partition|dimension|x|y|z)="[^"]*"',
+            '${1}="<redacted>"')
+    })
+
+    # 2) IPv4 addresses (but leave 127.0.0.1 / 0.0.0.0 / 255.255.255.255 alone —
+    #    those carry no identifying info and matter for log readability).
+    $out = [regex]::Replace($out, '\b(?!(?:127\.0\.0\.1|0\.0\.0\.0|255\.255\.255\.255)\b)(?:\d{1,3}\.){3}\d{1,3}\b', '<ip>')
+
+    # 3) IPv6 addresses (anything with two or more colon-separated hex groups,
+    #    minus the loopback ::1).
+    $out = [regex]::Replace($out, '(?<![:\w])(?:[0-9a-fA-F]{1,4}:){2,7}[0-9a-fA-F]{1,4}(?![:\w])', {
+        param($m) if ($m.Value -eq '::1') { return '::1' } else { return '<ipv6>' }
+    })
+
+    # 4) Specific config paths we know carry the username.
+    if ($WindowsUser) {
+        $out = [regex]::Replace($out, [regex]::Escape($WindowsUser), '<user>', 'IgnoreCase')
+    }
+    if ($SshKeyPath) {
+        $out = [regex]::Replace($out, [regex]::Escape($SshKeyPath), '<ssh-key-path>', 'IgnoreCase')
+    }
+    if ($SteamPath) {
+        $out = [regex]::Replace($out, [regex]::Escape($SteamPath), '<steam-path>', 'IgnoreCase')
+    }
+    # 5) Generic Windows user-profile path:  C:\Users\<anyone>\  ->  C:\Users\<user>\
+    $out = [regex]::Replace($out, '([A-Za-z]):\\Users\\[^\\/:*?"<>|\r\n]+', '$1:\Users\<user>', 'IgnoreCase')
+
+    # 6) SshKey=<value> / SteamPath=<value> / WindowsUser=<value> lines in
+    #    INI-style config files. Belt-and-braces in case the value didn't
+    #    match the explicit redactions above.
+    foreach ($k in @('SshKey', 'WindowsUser', 'SteamPath', 'PortCheckUrlTemplate')) {
+        $out = [regex]::Replace($out, "(?m)^(\s*$k\s*=\s*).+$", "`${1}<redacted>")
+    }
+
+    return $out
+}
+
+# Export only operational state. The durable file also contains rollback paths
+# and research identities that must never enter a public diagnostics bundle.
+function ConvertTo-DstWorldRestartDiagnosticState {
+    param([Parameter(Mandatory)]$State)
+    $steps = @($State.steps | ForEach-Object {
+        [ordered]@{
+            id = [string]$_.id
+            status = [string]$_.status
+        }
+    })
+    return [ordered]@{
+        phase = [string]$State.phase
+        running = [bool]$State.running
+        operation = [string]$State.operation
+        started = [string]$State.started
+        finished = [string]$State.finished
+        rollbackAvailable = [bool]$State.rollbackAvailable
+        recoveryRequired = [bool]$State.recoveryRequired
+        researchRecoveryRequired = [bool]$State.researchRecoveryRequired
+        researchRecoveryRunning = [bool]$State.researchRecoveryRunning
+        automaticRollback = [bool]$State.automaticRollback
+        hasError = -not [string]::IsNullOrWhiteSpace([string]$State.error)
+        steps = $steps
+    }
+}
+
+# Returns the section-header names that appear more than once in an INI body,
+# formatted "Name xN". Pure (no SSH/IO) so it's unit-testable. Duplicate
+# headers are the root cause of the "DST override silently ignored" class of
+# Game Config bugs (UE5 honours the first header + last-key-wins), so surfacing
+# them at the top of each snapshot makes triage a one-liner.
+function Get-DstIniDuplicateHeaders {
+    param([string]$Raw)
+    if ([string]::IsNullOrEmpty($Raw)) { return @() }
+    $headers = [regex]::Matches($Raw, '(?m)^\s*\[(.+?)\]\s*$') | ForEach-Object { $_.Groups[1].Value }
+    return @(
+        $headers | Group-Object | Where-Object { $_.Count -gt 1 } |
+            ForEach-Object { "$($_.Name) x$($_.Count)" }
+    )
+}
+
+# --- Bundle builder ----------------------------------------------------------
+
+function Get-DstDesktopPath {
+    # Resolve Desktop via .NET (respects OneDrive / Group Policy redirection).
+    # Falls back to %APPDATA%\DuneServer\Diagnostics if Desktop is unwritable.
+    try {
+        $desktop = [Environment]::GetFolderPath('Desktop')
+        if ($desktop -and (Test-Path -LiteralPath $desktop)) {
+            $probe = Join-Path $desktop ".dst-diag-write-test-$([guid]::NewGuid().ToString('N'))"
+            try {
+                Set-Content -LiteralPath $probe -Value 'x' -Encoding ASCII -ErrorAction Stop
+                Remove-Item -LiteralPath $probe -ErrorAction SilentlyContinue
+                return @{ path = $desktop; fallback = $false }
+            } catch {}
+        }
+    } catch {}
+    $fallback = Join-Path $env:APPDATA 'DuneServer\Diagnostics'
+    [void](New-Item -ItemType Directory -Force -Path $fallback -ErrorAction SilentlyContinue)
+    return @{ path = $fallback; fallback = $true }
+}
+
+function Get-DstWebView2Version {
+    foreach ($p in @(
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}',
+        'HKLM:\SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}',
+        'HKCU:\SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
+    )) {
+        try {
+            $v = (Get-ItemProperty -Path $p -Name 'pv' -ErrorAction Stop).pv
+            if ($v -and $v -ne '0.0.0.0') { return $v }
+        } catch {}
+    }
+    return '(not installed / not detected)'
+}
+
+# Read a file that may be open for append. Returns the complete file unless
+# TailBytes requests a bounded tail. Uses FileShare.ReadWrite so a writer that
+# holds the file open does not block diagnostics collection.
+function Read-DstLogText {
+    param(
+        [string]$Path,
+        [Nullable[int]]$TailBytes = $null
+    )
+    if (-not (Test-Path -LiteralPath $Path)) { return $null }
+    try {
+        $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open,
+                                            [System.IO.FileAccess]::Read,
+                                            [System.IO.FileShare]::ReadWrite)
+        try {
+            $len = $fs.Length
+            if ($null -ne $TailBytes -and $TailBytes -gt 0 -and $len -gt $TailBytes) {
+                [void]$fs.Seek($len - $TailBytes, [System.IO.SeekOrigin]::Begin)
+            }
+            $reader = New-Object System.IO.StreamReader($fs, [System.Text.Encoding]::UTF8, $true)
+            try { return $reader.ReadToEnd() } finally { $reader.Dispose() }
+        } finally { $fs.Dispose() }
+    } catch {
+        return $null
+    }
+}
+
+function Read-DstLogTail {
+    param([string]$Path, [int]$MaxBytes = 204800)
+    return Read-DstLogText -Path $Path -TailBytes $MaxBytes
+}
+
+function Get-DstMapDiagnosticValue {
+    param($InputObject, [Parameter(Mandatory)][string]$Name)
+    if ($null -eq $InputObject) { return $null }
+    if ($InputObject -is [Collections.IDictionary]) { return $InputObject[$Name] }
+    $property = $InputObject.PSObject.Properties[$Name]
+    if ($property) { return $property.Value }
+    return $null
+}
+
+function ConvertTo-DstMapPlatformDiagnosticState {
+    param(
+        [Parameter(Mandatory)]$State,
+        $Integrity,
+        $Health
+    )
+
+    $snapshot = $State.snapshot
+    $sources = if ($Health) { @($Health.sources) } else { @() }
+    $layers = @()
+    if ($snapshot) {
+        $layers = @(Get-DstMapDiagnosticValue $snapshot 'layers' | ForEach-Object {
+            [ordered]@{
+                layerId = [string](Get-DstMapDiagnosticValue $_ 'layerId')
+                sourceKey = [string](Get-DstMapDiagnosticValue $_ 'sourceKey')
+                observedAt = Get-DstMapDiagnosticValue $_ 'observedAt'
+                cachedAt = Get-DstMapDiagnosticValue $_ 'cachedAt'
+                expiresAt = Get-DstMapDiagnosticValue $_ 'expiresAt'
+                freshnessState = [string](Get-DstMapDiagnosticValue $_ 'freshnessState')
+                lastErrorCode = Get-DstMapDiagnosticValue $_ 'lastErrorCode'
+                rowCount = [long](Get-DstMapDiagnosticValue $_ 'rowCount')
+                truncated = [bool](Get-DstMapDiagnosticValue $_ 'truncated')
+            }
+        })
+    }
+    return [ordered]@{
+        generatedAt = [DateTime]::UtcNow.ToString('o')
+        cache = [ordered]@{
+            available = [bool]$State.available
+            revision = [long]$State.revision
+            lastErrorCode = $State.lastErrorCode
+            integrity = if ($Integrity) {
+                [ordered]@{
+                    available = [bool]$Integrity.available
+                    schemaVersion = $Integrity.schemaVersion
+                    schemaChecksum = $Integrity.schemaChecksum
+                    quickCheck = $Integrity.quickCheck
+                    fileBytes = $Integrity.fileBytes
+                    generationPresent = $Integrity.generationPresent
+                    counts = $Integrity.counts
+                    errorCode = $Integrity.errorCode
+                }
+            } else {
+                $null
+            }
+        }
+        sources = @($sources | ForEach-Object {
+            [ordered]@{
+                sourceKey = [string]$_.sourceKey
+                schemaFingerprint = [string]$_.schemaFingerprint
+                lastAttemptAt = $_.lastAttemptAt
+                lastSuccessAt = $_.lastSuccessAt
+                expiresAt = $_.expiresAt
+                lastErrorCode = $_.lastErrorCode
+                runtime = if ($_.runtime) {
+                    [ordered]@{
+                        attemptCount = $_.runtime.attemptCount
+                        successCount = $_.runtime.successCount
+                        failureCount = $_.runtime.failureCount
+                        failureStreak = $_.runtime.failureStreak
+                        lastAttemptAt = $_.runtime.lastAttemptAt
+                        lastSuccessAt = $_.runtime.lastSuccessAt
+                        lastDurationMs = $_.runtime.lastDurationMs
+                        lastRowCount = $_.runtime.lastRowCount
+                        lastPayloadBytes = $_.runtime.lastPayloadBytes
+                        lastErrorCode = $_.runtime.lastErrorCode
+                        nextAttemptAt = $_.runtime.nextAttemptAt
+                        nextDueAt = $_.runtime.nextDueAt
+                    }
+                } else {
+                    $null
+                }
+                details = if ($_.details) {
+                    [ordered]@{
+                        available = $_.details.available
+                        errorCode = $_.details.errorCode
+                        cadenceSeconds = $_.details.cadenceSeconds
+                        cached = $_.details.cached
+                        stale = $_.details.stale
+                        observedAt = $_.details.observedAt
+                        expiresAt = $_.details.expiresAt
+                        lastErrorCode = $_.details.lastErrorCode
+                        enabled = $_.details.enabled
+                        reasonCode = $_.details.reasonCode
+                        identityStatus = $_.details.identityStatus
+                        partitionStatus = $_.details.partitionStatus
+                        mapDimensionCount = $_.details.mapDimensionCount
+                        mapDimensionsTruncated = $_.details.mapDimensionsTruncated
+                        mapDimensions = @($_.details.mapDimensions | ForEach-Object {
+                            [ordered]@{
+                                map = [string]$_.map
+                                dimensionIndex = [int]$_.dimensionIndex
+                            }
+                        })
+                    }
+                } else {
+                    $null
+                }
+            }
+        })
+        layers = $layers
+    }
+}
+
+function Get-DstMapPlatformDiagnosticState {
+    $state = Get-DunePlatformSnapshot
+    $health = Get-DuneMapsCacheHealth -State $state
+    if (Get-Command Get-DuneMapsRuntimeSourceHealth -ErrorAction SilentlyContinue) {
+        $health.sources = @(Get-DuneMapsRuntimeSourceHealth -Snapshot $state.snapshot)
+    }
+    $integrity = $null
+    try {
+        $integrity = Invoke-DunePlatformHelper -Command integrity -TimeoutSec 30
+    } catch {
+        $integrity = [pscustomobject]@{
+            available = $false
+            errorCode = 'integrity-unavailable'
+        }
+    }
+    return ConvertTo-DstMapPlatformDiagnosticState `
+        -State $state `
+        -Integrity $integrity `
+        -Health $health
+}
+
+function Get-DstBackendLogFiles {
+    param([string]$ActiveLogPath, [string]$LocalDataRoot = $env:LOCALAPPDATA)
+    $paths = @()
+    if ($ActiveLogPath) { $paths += $ActiveLogPath }
+    if ($LocalDataRoot) { $paths += (Join-Path $LocalDataRoot 'DuneServer\dune-server.log') }
+    $index = 0
+    foreach ($path in @($paths | Select-Object -Unique)) {
+        foreach ($candidate in @($path, "$path.old")) {
+            if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+                $index++
+                [pscustomobject]@{
+                    Path = $candidate
+                    Name = "backend-runtime-$index.log"
+                }
+            }
+        }
+    }
+}
+
+# Builds the diagnostic bundle. Returns a hashtable with the same shape the
+# /api/diagnostics/bundle handler echoes back to the React client.
+function New-DstDiagnosticBundle {
+    [CmdletBinding()]
+    param()
+
+    $warnings = New-Object System.Collections.Generic.List[string]
+    $included = New-Object System.Collections.Generic.List[hashtable]
+    $soloOnly = (Get-Command Test-DuneSoloInstallation -ErrorAction SilentlyContinue) -and (Test-DuneSoloInstallation)
+
+    # 1) Pick the on-disk destination ----------------------------------------
+    $destInfo = Get-DstDesktopPath
+    if ($destInfo.fallback) {
+        $warnings.Add("Desktop is not writable (OneDrive / Group Policy?). Saved under %APPDATA%\DuneServer\Diagnostics instead.")
+    }
+    $ts = (Get-Date).ToString('yyyyMMdd-HHmmss-fff')
+    $finalZip = Join-Path $destInfo.path "dst-diagnostics-$ts.zip"
+    # NB: Compress-Archive ONLY accepts a destination ending in ".zip". Under
+    # Windows PowerShell 5.1 (which the packaged DuneServer.exe runs on) a
+    # ".tmp" destination throws ".tmp is not a supported archive file format",
+    # which silently failed the whole bundle. Stage to a real .zip name in
+    # %TEMP%, then move it onto the final path.
+    $stageZip = Join-Path $env:TEMP "dst-diagnostics-$ts.partial.zip"
+
+    # Stage everything in %TEMP% so writes to the user's Desktop are atomic
+    # (we Compress-Archive into the staging .zip, then move on success).
+    $stageDir = Join-Path $env:TEMP "dst-diagnostics-$ts"
+    [void](New-Item -ItemType Directory -Force -Path $stageDir -ErrorAction SilentlyContinue)
+
+    # 2) Resolve config so we know what to redact ----------------------------
+    $cfg = $null
+    try { $cfg = Read-DuneConfigRaw } catch { $warnings.Add("Could not read dune-server.config: $($_.Exception.Message)") }
+    $redactArgs = @{
+        WindowsUser  = if ($cfg) { [string]$cfg.WindowsUser  } else { '' }
+        SshKeyPath   = if ($cfg) { [string]$cfg.SshKey       } else { '' }
+        SteamPath    = if ($cfg) { [string]$cfg.SteamPath    } else { '' }
+    }
+
+    # 3) env.txt -------------------------------------------------------------
+    $envInfo = [System.Collections.Generic.List[string]]::new()
+    $envInfo.Add("Tool version       : v$script:DuneToolVersion")
+    $envInfo.Add("Solo-only install  : $([bool]$soloOnly)")
+    $envInfo.Add("PowerShell         : $($PSVersionTable.PSVersion) ($($PSVersionTable.PSEdition))")
+    $envInfo.Add("OS                 : Windows $([System.Environment]::OSVersion.Version)")
+    $envInfo.Add("WebView2 runtime   : $(Get-DstWebView2Version)")
+    $envInfo.Add("AppDir             : $script:AppDir")
+    $envInfo.Add("UserDataFolder     : $(Join-Path $env:LOCALAPPDATA 'DuneServer\webview2')")
+    $envInfo.Add("Config dir         : $(Join-Path $env:APPDATA 'DuneServer')")
+    $envInfo.Add("Generated          : $(Get-Date -Format 'o')")
+    $envText = Invoke-DstRedaction -Text ($envInfo -join "`r`n") @redactArgs
+    $envPath = Join-Path $stageDir 'env.txt'
+    Set-Content -LiteralPath $envPath -Value $envText -Encoding UTF8
+    $included.Add(@{ name = 'env.txt'; bytes = (Get-Item -LiteralPath $envPath).Length })
+
+    # 4) Sanitized config copy -----------------------------------------------
+    $cfgPath = Get-DuneConfigPath
+    if (Test-Path -LiteralPath $cfgPath) {
+        try {
+            $raw  = Get-Content -LiteralPath $cfgPath -Raw -ErrorAction Stop
+            $san  = Invoke-DstRedaction -Text $raw @redactArgs
+            $out  = Join-Path $stageDir 'dune-server.config.sanitized.txt'
+            Set-Content -LiteralPath $out -Value $san -Encoding UTF8
+            $included.Add(@{ name = 'dune-server.config.sanitized.txt'; bytes = (Get-Item -LiteralPath $out).Length })
+        } catch {
+            $warnings.Add("Failed to sanitize dune-server.config: $($_.Exception.Message)")
+        }
+    } else {
+        $warnings.Add("dune-server.config not found at $cfgPath.")
+    }
+
+    # 5) WebView2 debug log (complete, sanitized) ----------------------------
+    # The desktop shell rotates this source at 2 MB, so preserving the complete
+    # log is bounded and retains startup failures that a tail would discard.
+    $wv2 = Join-Path $env:APPDATA 'DuneServer\webview2-debug.log'
+    $wv2Log = Read-DstLogText -Path $wv2
+    if ($null -ne $wv2Log) {
+        try {
+            $wv2Bytes  = (Get-Item -LiteralPath $wv2 -ErrorAction Stop).Length
+            $header    = "# webview2-debug.log (complete, sanitized; source size: $wv2Bytes bytes)`r`n# Path: $wv2`r`n`r`n"
+            $san       = $header + (Invoke-DstRedaction -Text $wv2Log @redactArgs)
+            $out       = Join-Path $stageDir 'webview2-debug.log'
+            Set-Content -LiteralPath $out -Value $san -Encoding UTF8
+            $included.Add(@{ name = 'webview2-debug.log'; bytes = (Get-Item -LiteralPath $out).Length })
+        } catch {
+            $warnings.Add("Failed to copy webview2-debug.log: $($_.Exception.Message)")
+        }
+    } else {
+        $warnings.Add('webview2-debug.log not present — the desktop app may not have been launched on this machine yet.')
+    }
+
+    # 6) Recent CLI logs (last 3 dune-server-*.log) --------------------------
+    $logRoots = @(
+        (Join-Path (Split-Path -Parent $script:AppDir) '.logs'),
+        (Join-Path $env:APPDATA 'DuneServer\.logs')
+    ) | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -Unique
+    $foundCliLogs = $false
+    foreach ($root in $logRoots) {
+        $logs = Get-ChildItem -LiteralPath $root -Filter 'dune-server-*.log' -File -ErrorAction SilentlyContinue |
+                Sort-Object LastWriteTime -Descending | Select-Object -First 3
+        foreach ($lg in $logs) {
+            $foundCliLogs = $true
+            $tail = Read-DstLogTail -Path $lg.FullName -MaxBytes 51200   # 50 KB each
+            if ($null -ne $tail) {
+                $header = "# $($lg.Name) (tail, sanitized; source size: $($lg.Length) bytes)`r`n# Path: $($lg.FullName)`r`n`r`n"
+                $san    = $header + (Invoke-DstRedaction -Text $tail @redactArgs)
+                $out    = Join-Path $stageDir $lg.Name
+                Set-Content -LiteralPath $out -Value $san -Encoding UTF8
+                $included.Add(@{ name = $lg.Name; bytes = (Get-Item -LiteralPath $out).Length })
+            } else {
+                $warnings.Add("Could not read $($lg.FullName).")
+            }
+        }
+    }
+    if (-not $foundCliLogs) {
+        $warnings.Add('No dune-server-*.log CLI transcripts found.')
+    }
+
+    # Backend/scheduler logs are separate from the dated launcher transcripts.
+    $backendLogFiles = @(Get-DstBackendLogFiles -ActiveLogPath $script:DuneLogPath)
+    foreach ($backendLog in $backendLogFiles) {
+        $tail = Read-DstLogTail -Path $backendLog.Path -MaxBytes 262144
+        if ($null -eq $tail) {
+            $warnings.Add("Could not read $($backendLog.Name).")
+            continue
+        }
+        $san = "# Backend runtime log (bounded tail, sanitized)`r`n" + (Invoke-DstRedaction -Text $tail @redactArgs)
+        $out = Join-Path $stageDir $backendLog.Name
+        Set-Content -LiteralPath $out -Value $san -Encoding UTF8
+        $included.Add(@{ name = $backendLog.Name; bytes = (Get-Item -LiteralPath $out).Length })
+    }
+    if ($backendLogFiles.Count -eq 0) {
+        $warnings.Add('No active backend runtime logs found; chat-command execution evidence is unavailable.')
+    }
+
+    # 6a) In-app updater evidence (best-effort, protected ProgramData) ----------
+    # Keep only text/JSON evidence, never downloaded installers or generated
+    # relaunch scripts. These logs decide false-success cases where Inno returned
+    # exit 0 but the installed executable identity did not advance.
+    $updateRoot = Join-Path $env:ProgramData 'DuneServer\Updates'
+    if (Test-Path -LiteralPath $updateRoot -PathType Container) {
+        try {
+            $updateLogs = @(Get-ChildItem -LiteralPath $updateRoot -File -Force -ErrorAction Stop |
+                Where-Object {
+                    $_.Name -match '^(?:relaunch|inno)-[A-Za-z0-9._-]+-[0-9a-f]{32}\.log$' -or
+                    $_.Name -match '^update-result-[A-Za-z0-9._-]+-[0-9a-f]{32}\.json$'
+                } |
+                Sort-Object LastWriteTimeUtc -Descending |
+                Select-Object -First 12)
+            foreach ($updateLog in $updateLogs) {
+                $tail = Read-DstLogTail -Path $updateLog.FullName -MaxBytes 102400
+                if ($null -eq $tail) { continue }
+                $header = "# $($updateLog.Name) (tail, sanitized; source size: $($updateLog.Length) bytes)`r`n`r`n"
+                $san = $header + (Invoke-DstRedaction -Text $tail @redactArgs)
+                $outName = "updater-$($updateLog.Name)"
+                $out = Join-Path $stageDir $outName
+                Set-Content -LiteralPath $out -Value $san -Encoding UTF8
+                $included.Add(@{ name = $outName; bytes = (Get-Item -LiteralPath $out).Length })
+            }
+        } catch {
+            $warnings.Add("Updater logs could not be collected: $($_.Exception.Message)")
+        }
+    }
+
+    # 6b) Live game-config INI snapshot (best-effort over SSH) ----------------
+    # The duplicate-section-header / "my setting didn't apply" class of bug can
+    # only be diagnosed from the ACTUAL on-disk UserGame.ini / UserEngine.ini,
+    # so pull a redacted copy when the VM is reachable. Never fatal — an absent
+    # or unreachable VM is a warning and the rest of the bundle still builds.
+    if (-not $soloOnly -and (Get-Command Get-DuneGameConfigContext -ErrorAction SilentlyContinue) -and
+        (Get-Command Get-DuneGameConfig -ErrorAction SilentlyContinue)) {
+        try {
+            $ctx = Get-DuneGameConfigContext
+            if ($ctx.ok) {
+                $gc = Get-DuneGameConfig -Ip $ctx.ip
+                foreach ($pair in @(
+                    @{ key = 'game';   file = 'UserGame.ini' },
+                    @{ key = 'engine'; file = 'UserEngine.ini' }
+                )) {
+                    $node = $gc[$pair.key]
+                    $raw  = if ($node) { [string]$node.raw } else { '' }
+                    if ([string]::IsNullOrWhiteSpace($raw)) {
+                        $warnings.Add("Game config: $($pair.file) came back empty (source: $($gc.source)).")
+                        continue
+                    }
+                    $dupes   = Get-DstIniDuplicateHeaders -Raw $raw
+                    $dupLine = if ($dupes.Count -gt 0) { 'DUPLICATE SECTION HEADERS: ' + ($dupes -join '; ') } else { 'No duplicate section headers detected.' }
+                    $header  = "# $($pair.file) snapshot (sanitized; source: $($gc.source); path: $($node.path))`r`n# $dupLine`r`n`r`n"
+                    $san     = $header + (Invoke-DstRedaction -Text $raw @redactArgs)
+                    $outName = "$($pair.file).snapshot.txt"
+                    $out     = Join-Path $stageDir $outName
+                    Set-Content -LiteralPath $out -Value $san -Encoding UTF8
+                    $included.Add(@{ name = $outName; bytes = (Get-Item -LiteralPath $out).Length })
+                }
+            } else {
+                $warnings.Add("Game config INI snapshot skipped: $($ctx.message)")
+            }
+        } catch {
+            $warnings.Add("Game config INI snapshot failed: $($_.Exception.Message)")
+        }
+    } else {
+        if (-not $soloOnly) { $warnings.Add('Game config helpers not loaded — INI snapshot skipped.') }
+    }
+
+    # 6b2) Local player-client INI snapshot ----------------------------------
+    # Server/client setting mismatches cannot be diagnosed from the VM files
+    # alone. Capture the local files DST actually reads and writes.
+    if (Get-Command Get-DuneGameConfigClient -ErrorAction SilentlyContinue) {
+        try {
+            $clientGc = Get-DuneGameConfigClient
+            foreach ($pair in @(
+                @{ key = 'game';   file = 'ClientGame.ini' },
+                @{ key = 'engine'; file = 'ClientEngine.ini' }
+            )) {
+                $node = $clientGc[$pair.key]
+                if (-not $node -or -not $node.exists) {
+                    $warnings.Add("Local client config: $($pair.file) was not found at the configured path.")
+                    continue
+                }
+                $raw = [string]$node.raw
+                if ([string]::IsNullOrWhiteSpace($raw)) {
+                    $warnings.Add("Local client config: $($pair.file) was empty.")
+                    continue
+                }
+                $dupes   = Get-DstIniDuplicateHeaders -Raw $raw
+                $dupLine = if ($dupes.Count -gt 0) { 'DUPLICATE SECTION HEADERS: ' + ($dupes -join '; ') } else { 'No duplicate section headers detected.' }
+                $header  = "# $($pair.file) snapshot (sanitized; path: $($node.path))`r`n# $dupLine`r`n`r`n"
+                $san     = Invoke-DstRedaction -Text ($header + $raw) @redactArgs
+                $outName = "$($pair.file).snapshot.txt"
+                $out     = Join-Path $stageDir $outName
+                Set-Content -LiteralPath $out -Value $san -Encoding UTF8
+                $included.Add(@{ name = $outName; bytes = (Get-Item -LiteralPath $out).Length })
+            }
+        } catch {
+            $warnings.Add("Local client config snapshot failed: $($_.Exception.Message)")
+        }
+    } else {
+        $warnings.Add('Local client config helpers not loaded — client INI snapshot skipped.')
+    }
+
+    # 6b3) Host-local Solo Mode health ---------------------------------------
+    # Never include the configured data root, Steam/account folder, save path,
+    # or backup paths. The schema and health facts are enough to distinguish an
+    # unsupported wrapper/schema from a process-lock or integrity failure.
+    if (Get-Command Get-DuneSoloStatus -ErrorAction SilentlyContinue) {
+        try {
+            $solo = Get-DuneSoloStatus
+            $soloLines = [System.Collections.Generic.List[string]]::new()
+            $soloLines.Add("Supported          : $([bool]$solo.supported)")
+            $soloLines.Add("Platform           : $([string]$solo.platform)")
+            $soloLines.Add("Connected          : $([bool]$solo.connected)")
+            $soloLines.Add("Adapter            : $([string]$solo.adapter)")
+            $soloLines.Add("Game running       : $([bool]$solo.gameRunning)")
+            $soloLines.Add("Detected processes : $(@($solo.processes).Count)")
+            $soloLines.Add("Helper available   : $([bool]$solo.helperAvailable)")
+            if ($solo.inspection) {
+                $soloLines.Add("Wrapper version    : $($solo.inspection.wrapperVersion)")
+                $soloLines.Add("SQLite bytes       : $($solo.inspection.actualSqliteBytes)")
+                $soloLines.Add("Tables             : $($solo.inspection.tableCount)")
+                $soloLines.Add("Characters         : $($solo.inspection.characterCount)")
+                $soloLines.Add("Integrity          : $($solo.inspection.integrity)")
+                $soloLines.Add("Foreign-key issues : $($solo.inspection.foreignKeyViolations)")
+                $soloLines.Add("Schema fingerprint : $($solo.inspection.schemaFingerprint)")
+                $soloLines.Add("Item destinations   : $(@($solo.inspection.inventories).Count)")
+                $soloLines.Add("Confirmed fillables : $(@($solo.inspection.fillables).Count)")
+                if ($solo.inspection.currencies) {
+                    $soloLines.Add("Solari balance      : $($solo.inspection.currencies.solari)")
+                    $soloLines.Add("Scrip balance       : $($solo.inspection.currencies.scrip)")
+                }
+                if ($solo.inspection.progression) {
+                    $soloLines.Add("Spec tracks         : $(@($solo.inspection.progression.specializations).Count)")
+                    $soloLines.Add("Spec rewards        : $($solo.inspection.progression.purchasedRewards)")
+                    $soloLines.Add("Fremen nodes        : $($solo.inspection.progression.fremenNodesComplete)/$($solo.inspection.progression.fremenNodesTotal)")
+                    $soloLines.Add("NPE nodes           : $($solo.inspection.progression.npeNodesComplete)/$($solo.inspection.progression.npeNodesTotal), tag=$($solo.inspection.progression.npeTagPresent)")
+                    $soloLines.Add("Skills at value 7   : $($solo.inspection.progression.skillsAtSeven)")
+                    $soloLines.Add("Skill points        : total=$($solo.inspection.progression.totalSkillPoints), unspent=$($solo.inspection.progression.unspentSkillPoints), bonus=$($solo.inspection.progression.keystoneBonusSkillPoints)")
+                    $soloLines.Add("Intel               : $($solo.inspection.progression.intel)")
+                }
+            } elseif ($solo.inspectionError) {
+                $soloLines.Add('Inspection error   : present (path and account identifiers omitted)')
+            }
+            if ($solo.connected) {
+                try {
+                    $soloSettings = Read-DuneSoloSettings
+                    $soloLines.Add("Settings file      : $(if ($soloSettings.exists) { 'present' } else { 'missing' })")
+                    $soloLines.Add("Settings present   : $(@($soloSettings.entries | Where-Object present).Count)/$(@($soloSettings.entries).Count)")
+                } catch {
+                    $soloLines.Add('Settings inspection: failed (details omitted)')
+                }
+                try {
+                    $soloLines.Add("Profile backups    : $(@(Get-DuneSoloBackups).Count)")
+                } catch {
+                    $soloLines.Add('Backup inspection  : failed (details omitted)')
+                }
+            }
+            $out = Join-Path $stageDir 'solo-mode.txt'
+            $soloText = Invoke-DstRedaction -Text ($soloLines -join "`r`n") @redactArgs
+            Set-Content -LiteralPath $out -Value $soloText -Encoding UTF8
+            $included.Add(@{ name = 'solo-mode.txt'; bytes = (Get-Item -LiteralPath $out).Length })
+        } catch {
+            $warnings.Add('Solo Mode health snapshot failed; path-bearing details were omitted.')
+        }
+    } else {
+        $warnings.Add('Solo Mode helpers not loaded — Solo health snapshot skipped.')
+    }
+
+    # 6c) Scheduled-restart state -------------------------------------------
+    # Helps diagnose "my restart didn't fire" / stale Funcom-update badge bugs.
+    # The discordWebhookUrl is a secret (grants posting to the user's channel),
+    # so it is stripped before the file is staged — never include it.
+    try {
+        $restartState = Join-Path $env:LOCALAPPDATA 'DuneServer\restart-schedule.json'
+        if (Test-Path -LiteralPath $restartState) {
+            $rsRaw = Get-Content -LiteralPath $restartState -Raw -ErrorAction Stop
+            try {
+                $rsObj = $rsRaw | ConvertFrom-Json -ErrorAction Stop
+                if ($rsObj.PSObject.Properties['discordWebhookUrl']) {
+                    $rsObj.discordWebhookUrl = if ([string]$rsObj.discordWebhookUrl) { '<redacted>' } else { '' }
+                }
+                $rsRaw = $rsObj | ConvertTo-Json -Depth 5
+            } catch {
+                # If parsing fails, fall back to a regex scrub so a secret can
+                # never leak through a malformed file.
+                $rsRaw = [regex]::Replace($rsRaw, '("discordWebhookUrl"\s*:\s*")[^"]*(")', '${1}<redacted>${2}')
+            }
+            $rsRaw = Invoke-DstRedaction -Text $rsRaw @redactArgs
+            $out = Join-Path $stageDir 'restart-schedule.json'
+            Set-Content -LiteralPath $out -Value $rsRaw -Encoding UTF8
+            $included.Add(@{ name = 'restart-schedule.json'; bytes = (Get-Item -LiteralPath $out).Length })
+        }
+    } catch {
+        $warnings.Add("Restart-schedule state read failed: $($_.Exception.Message)")
+    }
+
+    # 6c-1) World Restart state ---------------------------------------------
+    # Captures step-level progress, rollback availability, and durable recovery
+    # lock state for the destructive same-battlegroup restart workflow.
+    try {
+        $worldRestartState = Join-Path $env:APPDATA 'DuneServer\world-restart-state.json'
+        if (Test-Path -LiteralPath $worldRestartState) {
+            $wrState = Get-Content -LiteralPath $worldRestartState -Raw -ErrorAction Stop |
+                ConvertFrom-Json -ErrorAction Stop
+            $wrRaw = ConvertTo-DstWorldRestartDiagnosticState -State $wrState |
+                ConvertTo-Json -Depth 6
+            $wrRaw = Invoke-DstRedaction -Text $wrRaw @redactArgs
+            $out = Join-Path $stageDir 'world-restart-state.json'
+            Set-Content -LiteralPath $out -Value $wrRaw -Encoding UTF8
+            $included.Add(@{ name = 'world-restart-state.json'; bytes = (Get-Item -LiteralPath $out).Length })
+        }
+    } catch {
+        $warnings.Add("World Restart state read failed: $($_.Exception.Message)")
+    }
+
+    # 6c-2) FLS token rotation state (403002 recovery) ----------------------
+    # The rotate-state file records the last token-rotation attempt's steps and
+    # outcome. It never stores the token itself, but redact as a safety net.
+    try {
+        $flsState = Join-Path $env:APPDATA 'DuneServer\fls-token-rotate-state.json'
+        if (Test-Path -LiteralPath $flsState) {
+            $flsRaw = Get-Content -LiteralPath $flsState -Raw -ErrorAction Stop
+            $flsRaw = Invoke-DstRedaction -Text $flsRaw @redactArgs
+            $out = Join-Path $stageDir 'fls-token-rotate-state.json'
+            Set-Content -LiteralPath $out -Value $flsRaw -Encoding UTF8
+            $included.Add(@{ name = 'fls-token-rotate-state.json'; bytes = (Get-Item -LiteralPath $out).Length })
+        }
+    } catch {
+        $warnings.Add("FLS token-rotation state read failed: $($_.Exception.Message)")
+    }
+
+    # 6c-3) Game-server pod status + logs (P34 / "can't connect" diagnosis) ---
+    # The most common P34 reports - server visible in the in-game browser, no
+    # 403002, but players get "Connection Request Timed Out" - are decided at
+    # the Funcom game-server pod layer, which nothing else in this bundle sees.
+    # Pull a pod snapshot plus the recent logs of the connection-path pods
+    # (game servers, server gateway, battlegroup director, text router, the
+    # game message queue) so the actual join-rejection reason is captured.
+    #
+    # 2026-07-26: this section used to `grep -Ev 'dump|backup'` the pod snapshot
+    # itself, which hid exactly the pods involved in a hung database operation -
+    # a bundle from a 24h total outage was complete and correct and still did
+    # not contain its own root cause. The snapshot now shows every pod, adds
+    # DatabaseOperation state (the resource that blocks map pods from ever being
+    # created), the battlegroup's per-map memory limits, node conditions, disk,
+    # swap and retained build images, and collects db-layer pod logs. Log
+    # capture still skips the transient dump/backup pods.
+    # Best-effort over SSH; never fatal.
+    if (-not $soloOnly -and (Get-Command Invoke-V6Ssh -ErrorAction SilentlyContinue)) {
+        $podCtxIp = $null
+        foreach ($getter in 'Get-DuneGameConfigContext', 'Get-DuneDbContext') {
+            if (Get-Command $getter -ErrorAction SilentlyContinue) {
+                try { $c = & $getter; if ($c.ok -and $c.ip) { $podCtxIp = $c.ip; break } } catch {}
+            }
+        }
+        if (-not $podCtxIp -and (Get-Command Get-DuneVmStatus -ErrorAction SilentlyContinue)) {
+            try { $vm = Get-DuneVmStatus; if ($vm.running -and $vm.ip) { $podCtxIp = $vm.ip } } catch {}
+        }
+        if ($podCtxIp) {
+            try {
+                $podBash = @'
+NS=$(sudo kubectl get ns --no-headers -o custom-columns=N:.metadata.name 2>/dev/null | grep -E '^funcom-seabass-sh-' | head -1)
+if [ -z "$NS" ]; then echo "__NO_NS"; exit 0; fi
+echo "=== namespace: $NS ==="
+echo ""
+echo "=== kubectl get pods -o wide (all pods, including dump/backup) ==="
+sudo kubectl get pods -n "$NS" -o wide 2>&1
+echo ""
+echo "=== kubectl get serverset ==="
+sudo kubectl get serverset -n "$NS" 2>&1
+echo ""
+echo "=== kubectl get battlegroup ==="
+sudo kubectl get battlegroup -n "$NS" 2>&1
+echo ""
+echo "=== kubectl get databaseoperations ==="
+sudo kubectl get databaseoperations -n "$NS" 2>&1 | awk 'NR==1 || $0 !~ /Succeeded/'
+echo ""
+echo "=== non-Succeeded database operations (describe) ==="
+STUCK=$(sudo kubectl get databaseoperations -n "$NS" --no-headers 2>/dev/null | awk '$0 !~ /Succeeded/ {print $1}')
+if [ -z "$STUCK" ]; then
+  echo "(none - every DatabaseOperation is Succeeded)"
+else
+  for op in $STUCK; do
+    echo "---------- $op ----------"
+    sudo kubectl describe databaseoperation -n "$NS" "$op" 2>&1
+  done
+fi
+echo ""
+echo "=== per-map memory limits (battlegroup spec) ==="
+sudo kubectl get battlegroup -n "$NS" -o jsonpath='{range .items[0].spec.serverGroup.template.spec.sets[*]}{.map}{"  "}{.resources.limits.memory}{"\n"}{end}' 2>&1
+echo ""
+echo "=== per-map startup arguments (battlegroup podSpecs) ==="
+sudo kubectl get battlegroup -n "$NS" -o jsonpath='{range .items[0].spec.serverGroup.template.spec.sets[*]}{.map}{"\n"}{range .podSpecs[*]}{"  index="}{.index}{" args="}{.arguments}{"\n"}{end}{end}' 2>&1
+echo ""
+echo "=== node conditions ==="
+sudo kubectl get node -o jsonpath='{range .items[0].status.conditions[*]}{.type}{"="}{.status}{"  "}{.reason}{"\n"}{end}' 2>&1
+echo ""
+echo "=== disk (df) ==="
+sudo df -h 2>&1 || sudo df 2>&1
+echo ""
+echo "=== swap (free -h) ==="
+free -h 2>&1 || free 2>&1
+echo ""
+echo "=== retained container images ==="
+(sudo k3s crictl images 2>/dev/null || sudo crictl images 2>/dev/null) | awk 'NR==1 || tolower($0) ~ /seabass/'
+echo "__PODS_END__"
+for p in $(sudo kubectl get pods -n "$NS" --no-headers -o custom-columns=N:.metadata.name 2>/dev/null | grep -Ev 'dump|backup' | grep -E 'sg-|sgw|gateway|bgd|director|textrouter|tr-|mq-|db-dbdepl|db-util'); do
+  echo ""
+  echo "########## $p (tail 200) ##########"
+  sudo kubectl logs -n "$NS" "$p" --tail=200 --all-containers=true 2>&1 | tail -220
+done
+'@ -replace "`r", ''
+                $podRaw = (Invoke-V6Ssh -Ip $podCtxIp -Cmd $podBash -TimeoutSec 150) -join "`n"
+                if ($podRaw -match '__NO_NS') {
+                    $warnings.Add('Game-server pod logs skipped: no self-hosted battlegroup namespace found on the VM.')
+                } elseif ([string]::IsNullOrWhiteSpace($podRaw)) {
+                    $warnings.Add('Game-server pod logs: the VM returned no output.')
+                } else {
+                    $parts = $podRaw -split '__PODS_END__', 2
+                    $statusTxt = Invoke-DstRedaction -Text ($parts[0].Trim()) @redactArgs
+                    $outS = Join-Path $stageDir 'game-pods.txt'
+                    Set-Content -LiteralPath $outS -Value $statusTxt -Encoding UTF8
+                    $included.Add(@{ name = 'game-pods.txt'; bytes = (Get-Item -LiteralPath $outS).Length })
+                    if ($parts.Count -gt 1 -and -not [string]::IsNullOrWhiteSpace($parts[1])) {
+                        $logHeader = "# Game-server pod logs (sanitized; tail 200 per pod; connection-path + database pods)." + "`r`n" +
+                                     "# Used to diagnose P34 / 'can't connect' when the server is visible but players time out," + "`r`n" +
+                                     "# and database-layer outages (db-dbdepl / db-util) that stop map pods being created at all." + "`r`n`r`n"
+                        $logTxt = $logHeader + (Invoke-DstRedaction -Text ($parts[1].Trim()) @redactArgs)
+                        $outL = Join-Path $stageDir 'game-server-logs.txt'
+                        Set-Content -LiteralPath $outL -Value $logTxt -Encoding UTF8
+                        $included.Add(@{ name = 'game-server-logs.txt'; bytes = (Get-Item -LiteralPath $outL).Length })
+                    }
+                }
+            } catch {
+                $warnings.Add("Game-server pod logs failed: $($_.Exception.Message)")
+            }
+        } else {
+            $warnings.Add('Game-server pod logs skipped: VM not reachable.')
+        }
+    } else {
+        if (-not $soloOnly) { $warnings.Add('Game-server pod logs skipped: SSH helper not loaded.') }
+    }
+
+    # 6c-4) VM memory-pressure probe (OOMKilled operators / DB, free -h) -----
+    # The "battlegroup restarted outside its schedule" / "ping surges under
+    # load" class of report is decided at the VM memory layer: when the
+    # home-hosted node runs low on memory the kubelet SIGKILLs the Funcom
+    # operators (exit 137 / OOMKilled, restart counts in the 30s) and evicts
+    # Postgres, and the nightly DB backup hangs. Nothing else in this bundle
+    # sees it. Pull the read-only probe (operator/DB restart + lastState, plus
+    # `free -h`) so a future log export leads with the memory finding instead
+    # of burying it. Best-effort over SSH; never fatal.
+    $memFinding = $null
+    if (-not $soloOnly -and (Get-Command Get-DuneVmMemoryPressure -ErrorAction SilentlyContinue)) {
+        try {
+            $memFinding = Get-DuneVmMemoryPressure -Force
+            $memLines = [System.Collections.Generic.List[string]]::new()
+            $memLines.Add('# VM memory-pressure probe')
+            $memLines.Add("# Generated $(Get-Date -Format 'o')")
+            $memLines.Add('# Detects OOMKilled/exit-137 Funcom operators + Postgres and low MemAvailable with Swap:0.')
+            $memLines.Add('')
+            if (-not $memFinding.ok) {
+                $memLines.Add("Probe unavailable: $($memFinding.message)")
+                $warnings.Add("VM memory-pressure probe skipped: $($memFinding.message)")
+            } else {
+                if ($memFinding.pressure) {
+                    $memLines.Add("RESULT: MEMORY PRESSURE DETECTED (severity: $($memFinding.severity))")
+                    $memLines.Add(">> $($memFinding.headline)")
+                } else {
+                    $memLines.Add('RESULT: no memory-pressure signals (memory has headroom; elevated operator restarts alone are not treated as memory pressure).')
+                }
+                $memLines.Add('')
+                $memLines.Add('The sections below are OBSERVATIONS, not verdicts. Values that differ from a')
+                $memLines.Add('reference are not by themselves evidence of a problem - deployments differ, and')
+                $memLines.Add('Funcom changes its own defaults between patches.')
+                $memLines.Add('')
+                $m = $memFinding.mem
+                $memLines.Add('Node memory:')
+                $memLines.Add(("  MemTotal     : {0}" -f (Format-DuneMemKiB $m.totalK)))
+                $memLines.Add(("  MemAvailable : {0}{1}" -f (Format-DuneMemKiB $m.availK), $(if ($null -ne $m.availPct) { " ($($m.availPct)%)" } else { '' })))
+                $memLines.Add(("  Swap total   : {0}{1}" -f (Format-DuneMemKiB $m.swapTotalK), $(if ($m.swapZero) { '  << no swap cushion' } else { '  << swap ACTIVE (Funcom experimental preset crushes per-map limits when swap is on)' })))
+                $memLines.Add('')
+                if ($memFinding.node -and $memFinding.node.known) {
+                    $memLines.Add('Node conditions:')
+                    foreach ($ck in ($memFinding.node.conditions.Keys | Sort-Object)) {
+                        $flag = if (($ck -ne 'Ready' -and $memFinding.node.conditions[$ck] -eq 'True') -or ($ck -eq 'Ready' -and $memFinding.node.conditions[$ck] -ne 'True')) { '  << ' } else { '' }
+                        $memLines.Add(("  {0,-16} {1}{2}" -f $ck, $memFinding.node.conditions[$ck], $flag))
+                    }
+                    $memLines.Add('')
+                }
+                if ($memFinding.disk -and $memFinding.disk.known) {
+                    $memLines.Add('Root filesystem:')
+                    $memLines.Add(("  Size / Used / Available : {0} / {1} / {2}" -f `
+                        (Format-DuneMemKiB $memFinding.disk.sizeK), (Format-DuneMemKiB $memFinding.disk.usedK), (Format-DuneMemKiB $memFinding.disk.availK)))
+                    $memLines.Add(("  Used                    : {0}%{1}" -f $memFinding.disk.usePct,
+                        $(if ($memFinding.disk.critical) { '  << critical' } elseif ($memFinding.disk.high) { '  << high (kubelet image GC starts at 85%)' } else { '' })))
+                    $memLines.Add('')
+                }
+                if ($memFinding.bg -and ($memFinding.bg.name -or $memFinding.bg.databasePhase)) {
+                    $memLines.Add('Battlegroup database:')
+                    $memLines.Add(("  Battlegroup    : {0}" -f $memFinding.bg.name))
+                    $memLines.Add(("  DATABASE phase : {0}{1}" -f $memFinding.bg.databasePhase,
+                        $(if ($memFinding.bg.databasePhase -and $memFinding.bg.databasePhase -ne 'Ready') { '  << not Ready - no map pods will be created' } else { '' })))
+                    $memLines.Add(("  DatabaseOperations : {0} total, {1} not Succeeded" -f $memFinding.dbOps.total, $memFinding.dbOps.open))
+                    foreach ($op in @($memFinding.dbOps.stuck)) {
+                        $memLines.Add(("    {0,-52} phase={1} age={2}m" -f $op.name, $op.phase, $(if ($null -ne $op.ageMinutes) { [int]$op.ageMinutes } else { '?' })))
+                    }
+                    $memLines.Add('')
+                }
+                if ($memFinding.mapLimits -and $memFinding.mapLimits.known) {
+                    $memLines.Add('Per-map memory limits (reference column = Funcom world-template snapshot, 2026-05;')
+                    $memLines.Add('Funcom changes these between patches and operators legitimately tune them, so a')
+                    $memLines.Add('difference here is information, not a fault):')
+                    foreach ($e in @($memFinding.mapLimits.entries)) {
+                        $memLines.Add(("  {0,-40} {1,-8} reference {2}" -f $e.map, $e.limit, $(if ($e.reference) { $e.reference } else { '(not in snapshot)' })))
+                    }
+                    $memLines.Add('')
+                }
+                if ($memFinding.images -and $memFinding.images.known) {
+                    $memLines.Add(('Retained Funcom build images: {0} build(s), {1} total' -f $memFinding.images.buildCount, (Format-DuneByteSize $memFinding.images.totalBytes)))
+                    foreach ($img in @($memFinding.images.entries)) {
+                        $memLines.Add(("  {0,-52} {1,-10} {2}" -f $img.repo, $img.tag, $img.size))
+                    }
+                    $memLines.Add('')
+                }
+                if ($null -ne $memFinding.dnat.udpRules) {
+                    $memLines.Add(('Game UDP DNAT bridge: {0} rule(s){1}' -f $memFinding.dnat.udpRules,
+                        $(if ($memFinding.dnat.missing) { '  << MISSING while a public IP is configured - players will get P34' } else { '' })))
+                    if (@($memFinding.dnat.ports).Count -gt 0) {
+                        $memLines.Add(('  ports: {0}' -f ((@($memFinding.dnat.ports) | Sort-Object -Unique) -join ' ')))
+                    }
+                    $memLines.Add('')
+                }
+                if ($m.freeH) {
+                    $memLines.Add('free -h:')
+                    foreach ($fl in ($m.freeH -split "`n")) { $memLines.Add("  $fl") }
+                    $memLines.Add('')
+                }
+                $memLines.Add('Funcom operator pods (controller-managers). NOTE: all four restarting in lockstep')
+                $memLines.Add('with lastExit=255 / reason=Unknown is NORMAL Funcom behaviour, not memory pressure:')
+                if (@($memFinding.operators).Count -eq 0) {
+                    $memLines.Add('  (none found)')
+                } else {
+                    foreach ($p in $memFinding.operators) {
+                        $flag = if ($p.oom) { '  << OOMKilled/137' } elseif ($p.churnOnly) { '  (ordinary operator churn)' } elseif ($p.restarts -gt 5) { '  << elevated' } else { '' }
+                        $memLines.Add(("  {0,-46} restarts={1} phase={2} lastExit={3} reason={4}{5}" -f `
+                            $p.shortName, $p.restarts, $p.phase, ((@($p.exitCodes) -join ',')), ((@($p.termReasons) -join ',')), $flag))
+                    }
+                }
+                $memLines.Add('')
+                $memLines.Add('Database (Postgres) pod:')
+                if (@($memFinding.db).Count -eq 0) {
+                    $memLines.Add('  (none found)')
+                } else {
+                    foreach ($p in $memFinding.db) {
+                        $flag = if ($p.oom) { '  << OOMKilled/137/evicted' } elseif ($p.churnOnly) { '  (ordinary churn)' } elseif ($p.restarts -gt 5) { '  << elevated' } else { '' }
+                        $memLines.Add(("  {0,-46} restarts={1} phase={2} lastExit={3} reason={4}{5}" -f `
+                            $p.shortName, $p.restarts, $p.phase, ((@($p.exitCodes) -join ',')), ((@($p.termReasons) -join ',')), $flag))
+                    }
+                }
+                if (@($memFinding.warnings).Count -gt 0) {
+                    $memLines.Add('')
+                    $memLines.Add('Findings:')
+                    foreach ($w in $memFinding.warnings) { $memLines.Add("  - $w") }
+                }
+            }
+            $memText = Invoke-DstRedaction -Text ($memLines -join "`r`n") @redactArgs
+            $memOut  = Join-Path $stageDir 'vm-memory-pressure.txt'
+            Set-Content -LiteralPath $memOut -Value $memText -Encoding UTF8
+            $included.Add(@{ name = 'vm-memory-pressure.txt'; bytes = (Get-Item -LiteralPath $memOut).Length })
+        } catch {
+            $warnings.Add("VM memory-pressure probe failed: $($_.Exception.Message)")
+        }
+    } else {
+        if (-not $soloOnly) { $warnings.Add('VM memory-pressure helper not loaded - probe skipped.') }
+    }
+
+    # 6d) Maps cache health --------------------------------------------------
+    # Cache integrity, schema fingerprints, and source timing are sufficient
+    # for support. Cached rows and coordinates never enter the public bundle.
+    if (-not $soloOnly -and (Get-Command Get-DunePlatformSnapshot -ErrorAction SilentlyContinue) -and
+        (Get-Command Get-DuneMapsCacheHealth -ErrorAction SilentlyContinue) -and
+        (Get-Command Invoke-DunePlatformHelper -ErrorAction SilentlyContinue)) {
+        try {
+            $mapState = Get-DstMapPlatformDiagnosticState
+            $mapText = $mapState | ConvertTo-Json -Depth 10
+            $mapText = Invoke-DstRedaction -Text $mapText @redactArgs
+            $out = Join-Path $stageDir 'maps-platform.txt'
+            Set-Content -LiteralPath $out -Value $mapText -Encoding UTF8
+            $included.Add(@{ name = 'maps-platform.txt'; bytes = (Get-Item -LiteralPath $out).Length })
+        } catch {
+            $warnings.Add("Maps platform health snapshot failed: $($_.Exception.Message)")
+        }
+    } else {
+        if (-not $soloOnly) { $warnings.Add('Maps platform helpers not loaded - cache health snapshot skipped.') }
+    }
+
+    # 6e) Gameplay Admin read-path probe ------------------------------------
+    # The "Players/Bases show top-level rows but blank names / unaligned
+    # factions / 0 pieces" class of bug (e.g. after a character transfer)
+    # cannot be diagnosed from transcripts or INI snapshots - it lives in the
+    # live DB read path. Re-run the exact list queries the Gameplay Admin grid
+    # uses and record COUNTS ONLY (never player names, account ids, or any
+    # other PII) so triage can tell "no rows" from "rows but no detail" at a
+    # glance. Best-effort: an unreachable DB is a warning, not fatal.
+    if (-not $soloOnly -and (Get-Command Get-DuneDbContext -ErrorAction SilentlyContinue) -and
+        (Get-Command Get-DunePlayersLive -ErrorAction SilentlyContinue) -and
+        (Get-Command Get-DuneBasesLive -ErrorAction SilentlyContinue)) {
+        try {
+            $probe = [System.Collections.Generic.List[string]]::new()
+            $probe.Add('# Gameplay Admin read-path probe (counts only - no player names / ids / PII)')
+            $probe.Add("# Generated $(Get-Date -Format 'o')")
+            $probe.Add('# Symptom map: rows>0 with all names blank => row exists but the name/')
+            $probe.Add('#   account join returns nothing (e.g. encrypted_accounts empty or a')
+            $probe.Add('#   different DB after a character transfer). rows=0 => no data at all.')
+            $probe.Add('')
+            $dctx = Get-DuneDbContext
+            if (-not $dctx.ok) {
+                $probe.Add("DB context: NOT available - $($dctx.message)")
+            } else {
+                $probe.Add('DB context: available')
+                $probe.Add('')
+                try {
+                    $pl = Get-DunePlayersLive -Ip $dctx.ip
+                    if (-not $pl.ok) {
+                        $probe.Add("players: QUERY FAILED - $($pl.error)")
+                    } else {
+                        $rows = @($pl.players)
+                        $n = $rows.Count
+                        $blankName = @($rows | Where-Object { [string]::IsNullOrWhiteSpace([string]$_.name) }).Count
+                        $noFaction = @($rows | Where-Object { $_.faction_id -eq 0 -and [string]::IsNullOrWhiteSpace([string]$_.faction_name) }).Count
+                        $online    = @($rows | Where-Object { [string]$_.online_status -match 'online' }).Count
+                        $probe.Add("players: $n rows")
+                        $probe.Add("  blank name:        $blankName / $n")
+                        $probe.Add("  unaligned faction: $noFaction / $n")
+                        $probe.Add("  online:            $online / $n")
+                        if ($n -gt 0 -and $blankName -eq $n) {
+                            $probe.Add('  >> ALL names blank: player rows resolve but the name/account join is empty.')
+                        }
+                    }
+                } catch { $probe.Add("players: PROBE ERROR - $($_.Exception.Message)") }
+                $probe.Add('')
+                try {
+                    $bs = Get-DuneBasesLive -Ip $dctx.ip
+                    if (-not $bs.ok) {
+                        $probe.Add("bases: QUERY FAILED - $($bs.error)")
+                    } else {
+                        $brows = @($bs.bases)
+                        $bn = $brows.Count
+                        $bBlankName  = @($brows | Where-Object { [string]::IsNullOrWhiteSpace([string]$_.name) }).Count
+                        $bZeroPieces = @($brows | Where-Object { $_.pieces -eq 0 }).Count
+                        $probe.Add("bases: $bn rows")
+                        $probe.Add("  blank name: $bBlankName / $bn")
+                        $probe.Add("  0 pieces:   $bZeroPieces / $bn")
+                        if ($bn -gt 0 -and $bZeroPieces -eq $bn) {
+                            $probe.Add('  >> ALL bases 0 pieces: building rows exist but the building_instances join is empty.')
+                        }
+                    }
+                } catch { $probe.Add("bases: PROBE ERROR - $($_.Exception.Message)") }
+            }
+            $probeText = Invoke-DstRedaction -Text ($probe -join "`r`n") @redactArgs
+            $out = Join-Path $stageDir 'gameplay-read-probe.txt'
+            Set-Content -LiteralPath $out -Value $probeText -Encoding UTF8
+            $included.Add(@{ name = 'gameplay-read-probe.txt'; bytes = (Get-Item -LiteralPath $out).Length })
+        } catch {
+            $warnings.Add("Gameplay read-path probe failed: $($_.Exception.Message)")
+        }
+    } else {
+        if (-not $soloOnly) { $warnings.Add('Gameplay read helpers not loaded - read-path probe skipped.') }
+    }
+
+    # 6f) Shared Inventory Explorer read-path probe --------------------------
+    # Handled inventory database failures are returned to the UI and are not
+    # written to dune-server.log. Exercise the same read-only projection with a
+    # one-row bound per supported source, recording no rows or identifiers.
+    if (-not $soloOnly -and (Get-Command Get-DuneDbContext -ErrorAction SilentlyContinue) -and
+        (Get-Command Invoke-DuneInventorySearchLive -ErrorAction SilentlyContinue)) {
+        try {
+            $inventoryProbe = [System.Collections.Generic.List[string]]::new()
+            $inventoryProbe.Add('# Shared Inventory Explorer read-path probe (row-free and identifier-free)')
+            $inventoryProbe.Add("# Generated $(Get-Date -Format 'o')")
+            $inventoryProbe.Add('# Each source query is read-only and bounded to one row; only success/failure is recorded.')
+            $inventoryProbe.Add('')
+            $inventoryContext = Get-DuneDbContext
+            if (-not $inventoryContext.ok) {
+                $inventoryProbe.Add("DB context: NOT available - $($inventoryContext.message)")
+            } else {
+                $inventoryProbe.Add('DB context: available')
+                foreach ($inventoryType in @('player', 'storage')) {
+                    try {
+                        $inventoryResult = Invoke-DuneInventorySearchLive -Ip $inventoryContext.ip `
+                            -EntityTypes @($inventoryType) -Limit 1
+                        if ($inventoryResult.ok) {
+                            $hasSample = @($inventoryResult.items).Count -gt 0
+                            $inventoryProbe.Add("$inventoryType source: query ok; sample row present: $hasSample")
+                        } else {
+                            $inventoryProbe.Add("$inventoryType source: QUERY FAILED - $($inventoryResult.error)")
+                        }
+                    } catch {
+                        $inventoryProbe.Add("$inventoryType source: PROBE ERROR - $($_.Exception.Message)")
+                    }
+                }
+            }
+            $inventoryText = Invoke-DstRedaction -Text ($inventoryProbe -join "`r`n") @redactArgs
+            $inventoryOut = Join-Path $stageDir 'inventory-explorer.txt'
+            Set-Content -LiteralPath $inventoryOut -Value $inventoryText -Encoding UTF8
+            $included.Add(@{ name = 'inventory-explorer.txt'; bytes = (Get-Item -LiteralPath $inventoryOut).Length })
+        } catch {
+            $warnings.Add("Inventory Explorer read-path probe failed: $($_.Exception.Message)")
+        }
+    } else {
+        if (-not $soloOnly) { $warnings.Add('Inventory Explorer helpers not loaded - read-path probe skipped.') }
+    }
+
+    # 7) Manifest ------------------------------------------------------------
+    $manLines = [System.Collections.Generic.List[string]]::new()
+    $manLines.Add("Dune Server Tool diagnostic bundle")
+    $manLines.Add("Generated $(Get-Date -Format 'o') by v$script:DuneToolVersion")
+    try {
+        $configurationMode = Get-DuneRetailStartupSyncPreference
+        $modePath = Join-Path $stageDir 'configuration-management.json'
+        $configurationMode | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $modePath -Encoding UTF8
+        $included.Add(@{name='configuration-management.json';bytes=(Get-Item -LiteralPath $modePath).Length})
+        $manLines.Add("DST configuration management (Solo and self-hosted): enabled=$($configurationMode.enabled); injectionsApplied=$($configurationMode.injectionsApplied)")
+    } catch { $manLines.Add('DST configuration management: state unavailable') }
+    $manLines.Add('')
+    try {
+        $portalAuth = Get-DunePortalDiagnosticState
+        $manLines.Add('Browser Portal account authentication (counts only):')
+        $manLines.Add("  mode enabled: $($portalAuth.accountLoginEnabled)")
+        $manLines.Add("  accounts: $($portalAuth.accountCount) total / $($portalAuth.enabledAccountCount) enabled")
+        $manLines.Add("  temporary lockouts: $($portalAuth.lockedAccountCount)")
+        $manLines.Add('')
+    } catch {
+        $manLines.Add('Browser Portal account authentication: state unavailable')
+        $manLines.Add('')
+    }
+    # Lead with the memory-pressure finding so a triager sees it first - it is
+    # the root cause of the "battlegroup restarted off-schedule" / "ping surge"
+    # class of report and is otherwise buried in per-pod logs.
+    if ($memFinding -and $memFinding.ok -and $memFinding.pressure) {
+        $manLines.Add('*** VM MEMORY PRESSURE DETECTED ***')
+        $manLines.Add("  $($memFinding.headline)")
+        foreach ($w in @($memFinding.warnings)) { $manLines.Add("  - $w") }
+        $manLines.Add('  (full detail: vm-memory-pressure.txt)')
+        $manLines.Add('')
+    }
+    $manLines.Add('Sanitization applied to every text file in this bundle:')
+    $manLines.Add('  - IPv4 / IPv6 addresses (except loopback) -> <ip> / <ipv6>')
+    $manLines.Add('  - C:\Users\<anyone>\... paths              -> C:\Users\<user>\...')
+    $manLines.Add('  - WindowsUser / SshKey / SteamPath values    -> <user> / <ssh-key-path> / <steam-path>')
+    $manLines.Add('  - ?t= / ?key= portal credentials           -> <redacted>')
+    $manLines.Add('  - Discord webhook URL token                -> /api/webhooks/<id>/<redacted>')
+    $manLines.Add('  - JSON password / loginPassword fields      -> <redacted>')
+    $manLines.Add('  - INI key=value redaction for the keys above as a safety net')
+    $manLines.Add('')
+    $manLines.Add('Game config snapshots (UserGame.ini / UserEngine.ini) are pulled live from')
+    $manLines.Add('the VM when reachable, sanitized, and headlined with a duplicate-section check.')
+    $manLines.Add('Local client Game.ini / Engine.ini snapshots are also included when present so')
+    $manLines.Add('client-required settings can be compared with the server values.')
+    $manLines.Add('')
+    $manLines.Add('maps-platform.txt records only derived-cache integrity, structural fingerprints,')
+    $manLines.Add('source timing/backoff, and layer counts. It never includes cached rows, field')
+    $manLines.Add('or player identifiers, payloads, paths, or map coordinates.')
+    $manLines.Add('')
+    $manLines.Add('gameplay-read-probe.txt re-runs the Players/Bases list queries and records')
+    $manLines.Add('COUNTS ONLY (no player names or ids) so "rows but blank detail" bugs are')
+    $manLines.Add('triageable; absent when the DB is unreachable (see Warnings).')
+    $manLines.Add('')
+    $manLines.Add('inventory-explorer.txt exercises the same read-only player and storage inventory')
+    $manLines.Add('projections used by Shared Inventory Explorer, bounded to one row per source. It')
+    $manLines.Add('records only source success/failure and whether a sample row exists; no item,')
+    $manLines.Add('owner, container, inventory, actor, account, or database identifiers are included.')
+    $manLines.Add('')
+    $manLines.Add('vm-memory-pressure.txt probes the VM for the OOMKilled-operators / low-memory')
+    $manLines.Add('signature (Funcom controller-manager restart counts + lastState, Postgres pod')
+    $manLines.Add('state, and free -h / MemAvailable vs Swap). It is the root cause of the')
+    $manLines.Add('"battlegroup restarted outside its schedule" and "ping surges under load"')
+    $manLines.Add('reports; when detected it is also called out at the top of this manifest.')
+    $manLines.Add('')
+    $manLines.Add('game-pods.txt + game-server-logs.txt are pulled live over SSH: a pod/serverset')
+    $manLines.Add('snapshot plus the recent logs of the connection-path pods (game servers, server')
+    $manLines.Add('gateway, battlegroup director, text router, game message queue). These capture')
+    $manLines.Add('the actual join-rejection reason for "P34 / can''t connect" reports where the')
+    $manLines.Add('server is visible but players time out. Dump/backup pods are included so failed')
+    $manLines.Add('database operations remain diagnosable. All IPs')
+    $manLines.Add('are sanitized; absent when the VM is unreachable (see Warnings).')
+    $manLines.Add('')
+    $manLines.Add('updater-*.log/json captures recent in-app update launch, Inno setup, and exact')
+    $manLines.Add('post-install tag/commit verification without including downloaded installers.')
+    $manLines.Add('')
+    $manLines.Add('Files included:')
+    foreach ($f in $included) {
+        $manLines.Add(("  {0,-40} {1,10} bytes" -f $f.name, $f.bytes))
+    }
+    if ($warnings.Count -gt 0) {
+        $manLines.Add('')
+        $manLines.Add('Warnings:')
+        foreach ($w in $warnings) { $manLines.Add("  - $w") }
+    }
+    $manPath = Join-Path $stageDir 'manifest.txt'
+    Set-Content -LiteralPath $manPath -Value ($manLines -join "`r`n") -Encoding UTF8
+    $included.Add(@{ name = 'manifest.txt'; bytes = (Get-Item -LiteralPath $manPath).Length })
+
+    # 8) Compress into a staging .zip then move into place ------------------
+    if (Test-Path -LiteralPath $stageZip) { Remove-Item -LiteralPath $stageZip -Force -ErrorAction SilentlyContinue }
+    if (Test-Path -LiteralPath $finalZip) { Remove-Item -LiteralPath $finalZip -Force -ErrorAction SilentlyContinue }
+    try {
+        Compress-Archive -Path (Join-Path $stageDir '*') -DestinationPath $stageZip -Force -ErrorAction Stop
+        Move-Item -LiteralPath $stageZip -Destination $finalZip -Force -ErrorAction Stop
+    } catch {
+        if (Test-Path -LiteralPath $stageZip) { Remove-Item -LiteralPath $stageZip -Force -ErrorAction SilentlyContinue }
+        Remove-Item -LiteralPath $stageDir -Recurse -Force -ErrorAction SilentlyContinue
+        throw "Failed to build diagnostic ZIP: $($_.Exception.Message)"
+    }
+    Remove-Item -LiteralPath $stageDir -Recurse -Force -ErrorAction SilentlyContinue
+
+    $zipSize = (Get-Item -LiteralPath $finalZip).Length
+
+    # 9) Best-effort: pop Explorer with the ZIP selected ---------------------
+    try {
+        Start-Process -FilePath 'explorer.exe' -ArgumentList "/select,`"$finalZip`"" -ErrorAction Stop | Out-Null
+    } catch {
+        $warnings.Add("Could not open Explorer to reveal the ZIP: $($_.Exception.Message)")
+    }
+
+    return @{
+        ok        = $true
+        path      = $finalZip
+        sizeBytes = $zipSize
+        fileCount = $included.Count
+        sanitized = $true
+        warnings  = @($warnings)
+    }
+}
+
+# --- Route -------------------------------------------------------------------
+
+# POST /api/diagnostics/bundle — build the ZIP and reveal it in Explorer.
+Register-DuneRoute -Method POST -Path '/api/diagnostics/bundle' -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $result = New-DstDiagnosticBundle
+        Write-DuneJson -Response $res -Body $result
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message $_.Exception.Message
+    }
+}
+
+# GET /api/diagnostics/vm-memory — the VM memory-pressure finding, for the
+# Server Health red banner. Read-only + cached (60s) in the lib, so the
+# Dashboard can poll it cheaply. Returns a compact JSON-friendly view; the
+# full per-pod detail lives in the diagnostics bundle. Never 500s on an
+# unreachable VM — it reports ok=false so the banner just stays hidden.
+Register-DuneRoute -Method GET -Path '/api/diagnostics/vm-memory' -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        if (-not (Get-Command Get-DuneVmMemoryPressure -ErrorAction SilentlyContinue)) {
+            Write-DuneJson -Response $res -Body @{ ok=$false; pressure=$false; message='memory-pressure helper not loaded' }
+            return
+        }
+        $f = Get-DuneVmMemoryPressure
+        $body = @{
+            ok       = [bool]$f.ok
+            pressure = [bool]$f.pressure
+            severity = [string]($f.severity)
+            headline = [string]($f.headline)
+            warnings = @($f.warnings)
+            faults   = @($f.faults)
+            message  = [string]($f.message)
+        }
+        if ($f.ok -and $f.mem) {
+            $body.mem = @{
+                availK       = $f.mem.availK
+                totalK       = $f.mem.totalK
+                availPct     = $f.mem.availPct
+                swapZero     = [bool]$f.mem.swapZero
+                lowAvailable = [bool]$f.mem.lowAvailable
+            }
+            $body.maxRestarts = [int]$f.signals.maxRestarts
+            $body.oomKills    = [int]$f.signals.oomKills
+        }
+        Write-DuneJson -Response $res -Body $body
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message $_.Exception.Message
+    }
+}
+
+# GET /api/diagnostics/vm-health - VM facts for the Database page's info card:
+# root-disk usage, node conditions, database-operation state, per-map memory
+# limits, retained Funcom build images, swap, and the game UDP rule count.
+#
+# These are OBSERVATIONS. DST reports them and stops there - the operator knows
+# the intent behind their own configuration and DST does not. `faults` carries
+# the short exception: states the system itself reports as broken, which cannot
+# be true on a healthy server.
+#
+# Backed by the same read-only, 60s-cached probe as /vm-memory, so polling both
+# costs one SSH round-trip. Never 500s on an unreachable VM.
+Register-DuneRoute -Method GET -Path '/api/diagnostics/vm-health' -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        if (-not (Get-Command Get-DuneVmMemoryPressure -ErrorAction SilentlyContinue)) {
+            Write-DuneJson -Response $res -Body @{ ok=$false; faults=@(); message='VM health helper not loaded' }
+            return
+        }
+        $f = Get-DuneVmMemoryPressure
+        $out = @{
+            ok       = [bool]$f.ok
+            faults   = @($f.faults)
+            message  = [string]($f.message)
+        }
+        $out.hyperV = Get-DuneVmResources
+        if ($f.ok) {
+            $out.disk = @{
+                usePct = $f.disk.usePct
+                availK = $f.disk.availK
+                sizeK  = $f.disk.sizeK
+                known  = [bool]$f.disk.known
+            }
+            $out.database = @{
+                phase       = [string]$f.bg.databasePhase
+                total       = [int]$f.dbOps.total
+                open        = [int]$f.dbOps.open
+                activeCount = [int]$f.dbOps.activeCount
+                failedCount = [int]$f.dbOps.failedCount
+                active      = @($f.dbOps.active | ForEach-Object { @{ name=$_.name; phase=$_.phase; ageMinutes=$_.ageMinutes } })
+                failed      = @($f.dbOps.failed | ForEach-Object { @{ name=$_.name; phase=$_.phase; ageMinutes=$_.ageMinutes } })
+                stuck       = @($f.dbOps.stuck | ForEach-Object { @{ name=$_.name; phase=$_.phase; ageMinutes=$_.ageMinutes } })
+            }
+            $out.mapLimits = @{
+                known   = [bool]$f.mapLimits.known
+                entries = @($f.mapLimits.entries | ForEach-Object { @{ map=$_.map; limit=$_.limit; reference=$_.reference } })
+            }
+            $out.images = @{
+                buildCount = [int]$f.images.buildCount
+                totalBytes = [double]$f.images.totalBytes
+            }
+            $out.dnat = @{
+                udpRules = $f.dnat.udpRules
+                missing  = [bool]$f.dnat.missing
+            }
+            $out.node = @{
+                diskPressure   = [bool]$f.node.diskPressure
+                memoryPressure = [bool]$f.node.memoryPressure
+                ready          = [bool]$f.node.ready
+            }
+            $out.swap = @{
+                totalK = $f.mem.swapTotalK
+                active = [bool]$f.mem.swapActive
+            }
+        }
+
+        Write-DuneJson -Response $res -Body $out
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message $_.Exception.Message
+    }
+}
+
+# POST /api/diagnostics/cleanup-old-images - explicit, selective cleanup for
+# unused historical Funcom server images. The helper derives candidates from
+# fresh CRI image/container state and retains the active and prior builds.
+Register-DuneRoute -Method POST -Path '/api/diagnostics/cleanup-old-images' -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        if (-not (Get-Command Remove-DuneOldFuncomImages -ErrorAction SilentlyContinue)) {
+            Write-DuneError -Response $res -Status 503 -Message 'Image cleanup helper not loaded.'
+            return
+        }
+
+        $result = Invoke-WithDuneLock -Name 'funcom-image-cleanup' -Script {
+            Remove-DuneOldFuncomImages
+        }
+        if (-not $result.ok) {
+            $status = if ($result.status) { [int]$result.status } else { 502 }
+            Write-DuneError -Response $res -Status $status -Message $result.message
+            return
+        }
+        Write-DuneJson -Response $res -Body $result
+    } catch {
+        Write-DuneError -Response $res -Status 502 -Message "Image cleanup failed: $($_.Exception.Message)"
+    }
+}
+
+# POST /api/diagnostics/cleanup-failed-database-operations - explicitly remove
+# historical DatabaseOperation records whose current phase is exactly Failed.
+# Backup files, PVCs, Succeeded records, and active operations are untouched.
+Register-DuneRoute -Method POST -Path '/api/diagnostics/cleanup-failed-database-operations' -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        if (-not (Get-Command Remove-DuneFailedDatabaseOperations -ErrorAction SilentlyContinue)) {
+            Write-DuneError -Response $res -Status 503 -Message 'Database operation cleanup helper not loaded.'
+            return
+        }
+        $result = Invoke-WithDuneLock -Name 'failed-database-operation-cleanup' -Script {
+            Remove-DuneFailedDatabaseOperations
+        }
+        if (-not $result.ok) {
+            $status = if ($result.status) { [int]$result.status } else { 502 }
+            Write-DuneError -Response $res -Status $status -Message $result.message
+            return
+        }
+        Write-DuneJson -Response $res -Body $result
+    } catch {
+        Write-DuneError -Response $res -Status 502 -Message "Database operation cleanup failed: $($_.Exception.Message)"
+    }
+}

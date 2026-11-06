@@ -1,0 +1,12 @@
+/* Keep navigation familiar while reserving the viewport for the active task. */
+@media(min-width:768px) {
+  .dst-app-shell .dst-status-bar { height:44px; gap:8px; padding-inline:12px; }
+  .dst-app-shell .dst-status-bar :is(.pill-warning,.pill-success,.pill-danger) { padding:4px 8px; font-size:11px; }
+  .dst-app-shell .dst-sidebar:not([data-collapsed="true"]) { width:208px; }
+  .dst-app-shell .dst-sidebar-brand { padding:12px; gap:9px; }
+  .dst-app-shell .dst-sidebar-brand img { width:30px; height:30px; }
+  .dst-app-shell .dst-sidebar-brand .text-2xl { font-size:20px; }
+  .dst-app-shell .dst-sidebar-brand .text-sm { font-size:12px; }
+  .dst-app-shell .dst-sidebar nav a { min-height:34px; padding-block:6px; font-size:13px; }
+  .dst-app-shell [data-workspace] > nav a,.dst-app-shell [data-gameplay-admin-shell] > nav a { min-height:36px; padding-block:7px; font-size:12px; }
+}

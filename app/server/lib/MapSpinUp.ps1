@@ -1,0 +1,657 @@
+﻿# MapSpinUp — per-map "keep at least one server warm" control.
+#
+# The battlegroup director keeps an INI config embedded in the BG CRD at:
+#   spec.utilities.director.spec.configFiles.files["director.ini"]
+#
+# Each playable map is an INI section ([ MapName ]). Some maps carry a
+#   MinServers=1
+# key — when positive the director keeps that many instances of the map warm
+# at all times (a "spin-up floor"). Most maps use 1; Deep Desert uses the
+# number of configured world partitions so every available DD starts. The format is strict:
+# no spaces around the '=', no quoting.
+#
+# Funcom ships MinServers on a handful of persistent/instanced maps; the
+# rest only have NumExtraServers (on-demand scaling, which we DO NOT touch
+# here).
+#
+# As of director image 1979201-0-shipping (Funcom 2026-06 update), the
+# MinServers floor is ONLY honored when the section also carries
+#   EnableAutomaticInstanceScaling = true
+# Funcom ships that key on Story/DLC sections (Story_ArtOfKanly,
+# Story_ProcesVerbal, DLC_Story_LostHarvest_*) but NOT on DeepDesert_1,
+# SH_Arrakeen, or SH_HarkoVillage — so a bare MinServers=1 on those
+# sections silently no-ops. We therefore set both keys together on spin-up.
+# The flag is left in place on spin-down (idempotent, also allows player
+# travel-to spawn — a deliberate trade-off, not a side effect).
+#
+# This module:
+#   * lists real map sections (NumExtraServers plus explicitly verified Retail
+#     areas whose director sections omit that legacy marker),
+#   * reports its current MinServers value (absent = 0 = off),
+#   * toggles MinServers between 0 and 1 by rewriting director.ini and
+#     patching the CRD (hot-swappable — the operator reconciles it live),
+#   * ensures EnableAutomaticInstanceScaling = true is present on spin-up.
+#
+# Overmap / Survival_1 are always-on and aren't in director.ini at all, so
+# they never appear. Config-only sections ([ Battlegroup ], [ InstancingModes ])
+# have no NumExtraServers key and are excluded unless explicitly cataloged.
+#
+# Pattern (SSH + kubectl patch) cribbed from app/server/lib/Maps.ps1.
+
+# Dot-source the K8s helpers (Get-V6Battlegroup). Db-Postgres.ps1 (Invoke-V6Ssh)
+# is loaded earlier in the server lib load order via Bootstrap.ps1.
+$script:DuneSpinUpK8sPath = $null
+foreach ($candidate in @(
+    (Join-Path $PSScriptRoot '..\..\lib\K8s.ps1'),
+    (Join-Path (Split-Path -Parent $PSScriptRoot) '..\lib\K8s.ps1')
+)) {
+    $full = $null
+    try { $full = (Resolve-Path -LiteralPath $candidate -ErrorAction Stop).Path } catch {}
+    if ($full) { $script:DuneSpinUpK8sPath = $full; break }
+}
+if ($script:DuneSpinUpK8sPath -and -not (Get-Command Get-V6Battlegroup -ErrorAction SilentlyContinue)) {
+    . $script:DuneSpinUpK8sPath
+}
+
+# JSON-pointer path to the director INI inside the BG CRD.
+$script:DuneDirectorIniPath = '/spec/utilities/director/spec/configFiles/files/director.ini'
+
+# Maps Funcom ships with native MinServers support. Used ONLY for grouping
+# (Supported vs Experimental) — kept stable so maps we add MinServers to don't
+# silently migrate from Experimental to Supported on the next load.
+$script:DuneSpinUpNativeMaps = @(
+    'SH_Arrakeen'
+    'SH_HarkoVillage'
+    'DeepDesert_1'
+    'DLC_Story_LostHarvest_EcolabA'
+    'DLC_Story_LostHarvest_EcolabB'
+    'DLC_Story_LostHarvest_ForgottenLab'
+)
+
+# Retail areas that need lifecycle controls even when Funcom's director section
+# does not include NumExtraServers. Keep this explicit so unrelated config
+# sections remain excluded.
+$script:DuneSpinUpRetailMaps = @(
+    'CB_Story_DestroyedZanovar'
+    'CB_Story_OrbitalMonitor'
+    'CB_Arrakis_Story_Paranoid_PrayerRoom'
+    'CB_Arrakis_Story_Glutton_DiningRoom'
+    'CB_Arrakis_Generic_Sietch_Room'
+)
+
+# MaxParties=1 isolates each party into its own dimension. Retail currently
+# ships this override for Zanovar, which prevents separate parties from sharing
+# its single self-hosted dimension. Removing the override restores the
+# director's shared-party default.
+$script:DuneSpinUpPartySharingMaps = @(
+    'CB_Story_DestroyedZanovar'
+)
+
+# Friendly labels for the common maps. Anything not listed falls back to a
+# generic prettifier (strip known prefixes, underscores -> spaces).
+$script:DuneSpinUpLabels = @{
+    'SH_Arrakeen'                        = 'Arrakeen'
+    'SH_HarkoVillage'                    = 'Harko Village'
+    'DeepDesert_1'                       = 'Deep Desert'
+    'DLC_Story_LostHarvest_EcolabA'      = 'Lost Harvest: Ecolab A'
+    'DLC_Story_LostHarvest_EcolabB'      = 'Lost Harvest: Ecolab B'
+    'DLC_Story_LostHarvest_ForgottenLab' = 'Lost Harvest: Forgotten Lab'
+    'CB_Dungeon_Hephaestus'              = 'Dungeon: Hephaestus'
+    'CB_Dungeon_OldCarthag'              = 'Dungeon: Old Carthag'
+    'CB_Dungeon_ThePit'                  = 'Dungeon: The Pit'
+    'CB_Story_BanditFortress01'          = 'Bandit Fortress'
+    'CB_Story_DestroyedZanovar'           = 'Zanovar'
+    'CB_Story_OrbitalMonitor'             = 'Arrakeen Spaceport'
+    'CB_Arrakis_Story_Paranoid_PrayerRoom' = 'Place of Contemplation'
+    'CB_Arrakis_Story_Glutton_DiningRoom' = "The Glutton's Dining Room"
+    'CB_Arrakis_Generic_Sietch_Room'      = 'Sietch Talab'
+    'Story_ArtOfKanly'                   = 'The Art of Kanly'
+    'Story_ProcesVerbal'                 = 'Procès-Verbal'
+    'Story_Faction_Outpost_Atre'         = 'Faction Outpost: Atreides'
+    'Story_Faction_Outpost_Hark'         = 'Faction Outpost: Harkonnen'
+    'Story_HeighlinerDungeon'            = 'Heighliner Dungeon'
+}
+
+function _Get-DuneSpinUpLabel {
+    param([Parameter(Mandatory)][string]$Map)
+    if ($script:DuneSpinUpLabels.ContainsKey($Map)) { return $script:DuneSpinUpLabels[$Map] }
+    $s = $Map
+    foreach ($p in @('CB_Ecolab_', 'CB_Overland_', 'CB_Story_', 'CB_Dungeon_', 'DLC_Story_', 'Story_', 'CB_', 'SH_')) {
+        if ($s.StartsWith($p)) { $s = $s.Substring($p.Length); break }
+    }
+    return ($s -replace '_', ' ').Trim()
+}
+
+function _Get-DuneDirectorIni {
+    # Returns @{ ok; ctx; info; ini } or @{ ok=$false; status; message }.
+    if ($env:DST_HOSTING_BACKEND -eq 'docker') {
+        $reply=Invoke-DuneDockerManager -Request @{action='maps.policy'}
+        if(-not $reply.ok){return @{ok=$false;status=503;message=$reply.error}}
+        $partitions=@(foreach($map in $reply.data.maps){@{map=$map.map;partitions=@(foreach($id in $map.partitions){@{id=$id}})}})
+        $bg=@{spec=@{database=@{template=@{spec=@{deployment=@{spec=@{worldPartitions=$partitions}}}}}}} | ConvertTo-Json -Depth 12 | ConvertFrom-Json
+        return @{ok=$true;ini=[string]$reply.data.ini;installedMaps=@($reply.data.maps | ForEach-Object {$_.map});info=@{Ns='Docker';Name=$reply.data.world;Bg=$bg}}
+    }
+    $ctx = Get-DuneMapsContext
+    if (-not $ctx.ok) { return @{ ok = $false; status = $ctx.status; message = $ctx.message } }
+    try {
+        $info = Get-V6Battlegroup -Ip $ctx.vm.ip
+    } catch {
+        return @{ ok = $false; status = 502; message = "Could not read battlegroup CRD: $($_.Exception.Message)" }
+    }
+    $files = $null
+    try { $files = $info.Bg.spec.utilities.director.spec.configFiles.files } catch {}
+    if (-not $files -or -not $files.PSObject.Properties['director.ini']) {
+        return @{ ok = $false; status = 404; message = 'director.ini not found in the battlegroup CRD.' }
+    }
+    return @{ ok = $true; ctx = $ctx; info = $info; ini = [string]$files.'director.ini' }
+}
+
+function _Get-DuneSpinUpTargetCount {
+    param([Parameter(Mandatory)][string]$Map, [Parameter(Mandatory)]$Bg)
+    if ($Map -ne 'DeepDesert_1') { return 1 }
+    $ids = @{}
+    foreach ($wp in @($Bg.spec.database.template.spec.deployment.spec.worldPartitions)) {
+        if ("$($wp.map)" -ne 'DeepDesert_1') { continue }
+        foreach ($p in @($wp.partitions)) {
+            if ($p.PSObject.Properties['id'] -and [int]$p.id -gt 0) { $ids[[int]$p.id] = $true }
+        }
+    }
+    return [math]::Max(1, $ids.Count)
+}
+
+function _Parse-DuneDirectorIni {
+    # Parses INI text into ordered section objects:
+    #   @{ Name; IsMap; HasMinServers; MinServers; HasEnableAutoScaling; }
+    param([Parameter(Mandatory)][string]$Ini)
+    $sections = New-Object System.Collections.Generic.List[object]
+    $current  = $null
+    foreach ($rawLine in ($Ini -split "`n")) {
+        $line = $rawLine -replace "`r", ''
+        $trim = $line.Trim()
+        if ($trim -match '^\[\s*(.+?)\s*\]$') {
+            if ($current) { $sections.Add($current) }
+            $current = [pscustomobject]@{
+                Name                 = $matches[1]
+                IsMap                = $false
+                HasMinServers        = $false
+                MinServers           = 0
+                HasEnableAutoScaling = $false
+                HasMaxParties         = $false
+                MaxParties            = $null
+            }
+
+            continue
+        }
+        if (-not $current) { continue }
+        if ($trim -match '^NumExtraServers\s*=') { $current.IsMap = $true }
+        if ($trim -match '^MinServers\s*=\s*(-?\d+)') {
+            $current.HasMinServers = $true
+            $current.MinServers    = [int]$matches[1]
+        }
+        if ($trim -match '^EnableAutomaticInstanceScaling\s*=\s*true\s*$') {
+            $current.HasEnableAutoScaling = $true
+        }
+        if ($trim -match '^MaxParties\s*=\s*(\d+)') {
+            $current.HasMaxParties = $true
+            $current.MaxParties = [int]$matches[1]
+        }
+    }
+    if ($current) { $sections.Add($current) }
+    return $sections
+}
+
+function _Test-DuneSpinUpControllableSection {
+    param([Parameter(Mandatory)]$Section)
+    return ($Section.IsMap -or $script:DuneSpinUpRetailMaps -contains $Section.Name)
+}
+
+function _Test-DuneSpinUpKnownMap {
+    # True for the native-MinServers maps - the ones that genuinely need a
+    # director.ini section to exist at all before MinServers can be read or
+    # set (the DeepDesert_1 case this whole feature was built for). A gap
+    # here is a real anomaly: these maps are always expected to have a
+    # section, so its absence can indicate an actual server-side problem.
+    param([Parameter(Mandatory)][string]$Map)
+    return ($script:DuneSpinUpNativeMaps -contains $Map)
+}
+
+function _Test-DuneSpinUpKnownRetailMap {
+    # True for the cataloged Retail areas (DuneSpinUpRetailMaps). Unlike
+    # native maps, these are managed by Funcom's director via its own
+    # internal defaults (queue-fail routing, instance throttling, per-map
+    # caps - all visible live on the battlegroup director's own admin page)
+    # and normally ship with NO director.ini section until the map has been
+    # started at least once. Confirmed directly on a real self-hosted
+    # battlegroup during v15.1.7 testing (2026-09-20): all five were fully
+    # alive with no section, and each gained a real section in director.ini
+    # once it was actually spun up - no separate battlegroup restart needed,
+    # the director reconciles it live (see _Invoke-DuneDirectorIniPatch). So
+    # an absent section here is a normal, low-severity state - not
+    # game-breaking, just "hasn't been started yet" - and gets its own
+    # calmer notice rather than the native-map error treatment.
+    param([Parameter(Mandatory)][string]$Map)
+    return ($script:DuneSpinUpRetailMaps -contains $Map)
+}
+
+function _New-DuneSpinUpMissingSectionResult {
+    # Built when a NATIVE map's [ Map_Name ] header is entirely absent from
+    # director.ini — seen in the wild when a battlegroup's embedded
+    # director.ini was missing DeepDesert_1's whole section, so Deep Desert
+    # just vanished from Lifecycle with nothing pointing at the real cause.
+    # This is the real-error tier: native maps are always expected to have a
+    # section, so its absence can mean something's actually wrong.
+    #
+    # The message deliberately never tells the end user to hand-edit
+    # director.ini or the battlegroup YAML themselves (e.g. DST Commands ->
+    # Edit Director), and never frames this as DST's fault or something DST
+    # promises to fix — it's a neutral pointer to ask in the DST Discord,
+    # with no specific channel named since channels can change over time.
+    # Any real repair of the file is a separate, DST-assisted action.
+    param([Parameter(Mandatory)][string]$Map)
+    $label = _Get-DuneSpinUpLabel -Map $Map
+    return @{
+        ok             = $false
+        status         = 404
+        missingSection = $true
+        map            = $Map
+        label          = $label
+        message        = "$label ([ $Map ]) isn't showing up in this battlegroup's director.ini. If a map goes missing like this, reach out on the DST Discord for help."
+    }
+}
+
+function _New-DuneSpinUpNotStartedResult {
+    # Built when a RETAIL map's section is absent - the low-severity, "just
+    # hasn't been started yet" case (see _Test-DuneSpinUpKnownRetailMap).
+    # Distinct shape from the native-map result (notStarted, not
+    # missingSection) so the webui can render it as a calm info notice
+    # instead of an error, and word it accordingly - never claiming this is
+    # game-breaking, since it isn't.
+    param([Parameter(Mandatory)][string]$Map)
+    $label = _Get-DuneSpinUpLabel -Map $Map
+    return @{
+        ok          = $false
+        status      = 404
+        notStarted  = $true
+        map         = $Map
+        label       = $label
+        message     = "$label ([ $Map ]) hasn't been started yet, so it isn't showing up here - that's normal for this area. Use Start it below to bring it online, or it'll show up on its own once someone plays there. If it still doesn't appear after that, reach out on the DST Discord for help."
+    }
+}
+
+function Get-DuneSpinUpMaps {
+    # Lists every map section with its current MinServers state, grouped into
+    # supported (native MinServers) vs experimental (we'd add MinServers).
+    $r = _Get-DuneDirectorIni
+    if (-not $r.ok) { return $r }
+
+    $sections = _Parse-DuneDirectorIni -Ini $r.ini
+    $sectionNames = @($sections | ForEach-Object { $_.Name })
+    $maps = @()
+    foreach ($s in $sections) {
+        if ($env:DST_HOSTING_BACKEND -eq 'docker' -and $s.Name -in @('Survival_1','Overmap')) { continue }
+        if ($env:DST_HOSTING_BACKEND -eq 'docker' -and $s.Name -notin $r.installedMaps) { continue }
+        if (-not (_Test-DuneSpinUpControllableSection -Section $s)) { continue }
+        $native = $script:DuneSpinUpNativeMaps -contains $s.Name
+        $targetCount = _Get-DuneSpinUpTargetCount -Map $s.Name -Bg $r.info.Bg
+        $maps += [pscustomobject]@{
+            map        = $s.Name
+            label      = _Get-DuneSpinUpLabel -Map $s.Name
+            group      = if ($native) { 'supported' } else { 'experimental' }
+            minServers = [int]$s.MinServers
+            enabled    = ([int]$s.MinServers -ge 1)
+            availablePartitions = $targetCount
+            supportsPartySharing = ($script:DuneSpinUpPartySharingMaps -contains $s.Name)
+            sharedParties = (-not $s.HasMaxParties -or [int]$s.MaxParties -ne 1)
+        }
+    }
+
+    # Native-MinServers maps whose section header is entirely absent from
+    # director.ini (a config gap) rather than merely off. Kept separate from
+    # $maps so the UI can flag them distinctly instead of the map just
+    # silently disappearing with no diagnostic, as happened with a
+    # battlegroup that lost DeepDesert_1's whole section. This is the
+    # real-error tier - see _Test-DuneSpinUpKnownMap.
+    $missingSections = @()
+    foreach ($known in @($script:DuneSpinUpNativeMaps)) {
+        if ($sectionNames -contains $known) { continue }
+        $missingSections += (_New-DuneSpinUpMissingSectionResult -Map $known)
+    }
+
+    # Retail maps whose section is absent because they simply haven't been
+    # started yet - the normal, low-severity state. Kept in its own list so
+    # the UI can render it as a calm info notice, not an error - see
+    # _Test-DuneSpinUpKnownRetailMap.
+    $notStartedSections = @()
+    foreach ($known in @($script:DuneSpinUpRetailMaps)) {
+        if ($sectionNames -contains $known) { continue }
+        $notStartedSections += (_New-DuneSpinUpNotStartedResult -Map $known)
+    }
+
+    return @{
+        ok                  = $true
+        ns                  = $r.info.Ns
+        name                = $r.info.Name
+        maps                = $maps
+        missingSections     = $missingSections
+        notStartedSections  = $notStartedSections
+    }
+}
+
+function _Set-DuneIniMinServers {
+    # Returns a new INI string with $Map's MinServers line set to $Value.
+    # $Value must be zero or a positive warm-instance floor. The
+    # emitted line uses Funcom's strict format: "MinServers=1" — no spaces,
+    # no quoting. Spaces around '=' have been observed to be silently
+    # ignored by the director.
+    #   - replaces an existing MinServers line in the section, or
+    #   - inserts one (after NumExtraServers, or after the header) when
+    #     missing and $Value is positive. When $Value -eq 0 and no line exists,
+    #     leaves the section untouched (absent == 0) to keep the file minimal.
+    param(
+        [Parameter(Mandatory)][string]$Ini,
+        [Parameter(Mandatory)][string]$Map,
+        [Parameter(Mandatory)][ValidateRange(0,64)][int]$Value
+    )
+    $lines = [System.Collections.Generic.List[string]]::new()
+    foreach ($l in ($Ini -split "`n")) { $lines.Add(($l -replace "`r", '')) }
+
+    $secStart = -1
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i].Trim() -match '^\[\s*(.+?)\s*\]$' -and $matches[1] -eq $Map) { $secStart = $i; break }
+    }
+    if ($secStart -lt 0) { return $Ini }  # map not found — no change
+
+    # Find the end of the section (next header or EOF).
+    $secEnd = $lines.Count
+    for ($i = $secStart + 1; $i -lt $lines.Count; $i++) {
+        if ($lines[$i].Trim() -match '^\[\s*.+?\s*\]$') { $secEnd = $i; break }
+    }
+
+    # Look for an existing MinServers line within the section.
+    $msIdx       = -1
+    $numExtraIdx = -1
+    for ($i = $secStart + 1; $i -lt $secEnd; $i++) {
+        $t = $lines[$i].Trim()
+        if ($t -match '^MinServers\s*=')     { $msIdx = $i }
+        if ($t -match '^NumExtraServers\s*=') { $numExtraIdx = $i }
+    }
+
+    if ($msIdx -ge 0) {
+        $lines[$msIdx] = "MinServers=$Value"
+    } elseif ($Value -ge 1) {
+        $insertAt = if ($numExtraIdx -ge 0) { $numExtraIdx + 1 } else { $secStart + 1 }
+        $lines.Insert($insertAt, "MinServers=$Value")
+    }
+    return ($lines -join "`n")
+}
+
+function _Set-DuneIniEnableAutoScaling {
+    # Returns a new INI string with EnableAutomaticInstanceScaling = true
+    # ensured in $Map's section. No-ops if the key is already present.
+    # Insert position: immediately after the section header, mirroring how
+    # Funcom ships it on Story/DLC sections.
+    param(
+        [Parameter(Mandatory)][string]$Ini,
+        [Parameter(Mandatory)][string]$Map
+    )
+    $lines = [System.Collections.Generic.List[string]]::new()
+    foreach ($l in ($Ini -split "`n")) { $lines.Add(($l -replace "`r", '')) }
+
+    $secStart = -1
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i].Trim() -match '^\[\s*(.+?)\s*\]$' -and $matches[1] -eq $Map) { $secStart = $i; break }
+    }
+    if ($secStart -lt 0) { return $Ini }
+
+    $secEnd = $lines.Count
+    for ($i = $secStart + 1; $i -lt $lines.Count; $i++) {
+        if ($lines[$i].Trim() -match '^\[\s*.+?\s*\]$') { $secEnd = $i; break }
+    }
+
+    for ($i = $secStart + 1; $i -lt $secEnd; $i++) {
+        if ($lines[$i].Trim() -match '^EnableAutomaticInstanceScaling\s*=\s*true\s*$') {
+            return $Ini  # already present
+        }
+    }
+
+    $lines.Insert($secStart + 1, 'EnableAutomaticInstanceScaling = true')
+    return ($lines -join "`n")
+}
+
+function _Set-DuneIniPartySharing {
+    param(
+        [Parameter(Mandatory)][string]$Ini,
+        [Parameter(Mandatory)][string]$Map,
+        [Parameter(Mandatory)][bool]$Shared
+    )
+    $lines = [System.Collections.Generic.List[string]]::new()
+    foreach ($l in ($Ini -split "`n")) { $lines.Add(($l -replace "`r", '')) }
+
+    $secStart = -1
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i].Trim() -match '^\[\s*(.+?)\s*\]$' -and $matches[1] -eq $Map) { $secStart = $i; break }
+    }
+    if ($secStart -lt 0) { return $Ini }
+
+    $secEnd = $lines.Count
+    for ($i = $secStart + 1; $i -lt $lines.Count; $i++) {
+        if ($lines[$i].Trim() -match '^\[\s*.+?\s*\]$') { $secEnd = $i; break }
+    }
+
+    $maxPartiesIdx = -1
+    for ($i = $secStart + 1; $i -lt $secEnd; $i++) {
+        if ($lines[$i].Trim() -match '^MaxParties\s*=') { $maxPartiesIdx = $i; break }
+    }
+
+    if ($Shared) {
+        if ($maxPartiesIdx -ge 0) { $lines.RemoveAt($maxPartiesIdx) }
+    } elseif ($maxPartiesIdx -ge 0) {
+        $lines[$maxPartiesIdx] = 'MaxParties=1'
+    } else {
+        $lines.Insert($secStart + 1, 'MaxParties=1')
+    }
+    return ($lines -join "`n")
+}
+
+function _Add-DuneIniRetailSection {
+    # Appends a brand-new [ Map ] section with MinServers=$Value for a Retail
+    # map whose section is entirely absent from director.ini (see
+    # _Test-DuneSpinUpKnownRetailMap). Confirmed safe and immediate on a real
+    # self-hosted battlegroup (2026-09-20): patching in just this section -
+    # no other keys needed - brought the map fully online with no separate
+    # battlegroup restart, the same way Set-DuneSpinUpMap already patches
+    # existing sections.
+    param(
+        [Parameter(Mandatory)][string]$Ini,
+        [Parameter(Mandatory)][string]$Map,
+        [Parameter(Mandatory)][ValidateRange(1,64)][int]$Value
+    )
+    $trimmed = $Ini.TrimEnd("`n", "`r")
+    return "$trimmed`n`n[ $Map ]`nMinServers=$Value`n"
+}
+
+function _Invoke-DuneDirectorIniPatch {
+    param(
+        [Parameter(Mandatory)]$Read,
+        [Parameter(Mandatory)][string]$Ini
+    )
+    $patch = @(@{ op = 'replace'; path = $script:DuneDirectorIniPath; value = $Ini })
+    $patchJson = $patch | ConvertTo-Json -Depth 30 -Compress
+    if ($patchJson -notmatch '^\s*\[') { $patchJson = "[$patchJson]" }
+    $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($patchJson))
+    $remoteFile = "/tmp/dst-mapspinup-$([guid]::NewGuid().ToString('N')).json"
+    $cmd = "echo $b64 | base64 -d > $remoteFile && sudo kubectl patch battlegroup $($Read.info.Name) -n $($Read.info.Ns) --type=json --patch-file $remoteFile 2>&1; rm -f $remoteFile"
+    $out = Invoke-V6Ssh -Ip $Read.ctx.vm.ip -Cmd $cmd -TimeoutSec 60
+    $outText = (($out -join "`n")).Trim()
+    return @{
+        success = ($outText -match 'patched' -and $outText -notmatch 'error|Error|ERROR')
+        raw = $outText
+    }
+}
+
+function Set-DuneSpinUpMap {
+    # Toggles a single map's MinServers floor. $Enabled -> 1, else 0.
+    param(
+        [Parameter(Mandatory)][string]$Map,
+        [Parameter(Mandatory)][bool]$Enabled
+    )
+    if ($env:DST_HOSTING_BACKEND -eq 'docker') {
+        $reply=Invoke-DuneDockerManager -Request @{action='maps.floor';map=$Map;enabled=$Enabled}
+        if(-not $reply.ok){return @{ok=$false;status=409;message=$reply.error}}
+        $result=$reply.data;$result.ok=$true;$result.label=_Get-DuneSpinUpLabel -Map $Map
+        return $result
+    }
+    $r = _Get-DuneDirectorIni
+    if (-not $r.ok) { return $r }
+
+    $sections = _Parse-DuneDirectorIni -Ini $r.ini
+    $target = $sections |
+        Where-Object { (_Test-DuneSpinUpControllableSection -Section $_) -and $_.Name -eq $Map } |
+        Select-Object -First 1
+    if (-not $target) {
+        # Distinguish "the section is entirely missing from director.ini"
+        # (a config gap on a map DST expects to manage) from "this isn't a
+        # map name DST controls at all". Only the former gets the
+        # support-routing diagnostic — see _New-DuneSpinUpMissingSectionResult.
+        $sectionExists = $sections | Where-Object { $_.Name -eq $Map } | Select-Object -First 1
+        if (-not $sectionExists -and (_Test-DuneSpinUpKnownMap -Map $Map)) {
+            return _New-DuneSpinUpMissingSectionResult -Map $Map
+        }
+        if (-not $sectionExists -and (_Test-DuneSpinUpKnownRetailMap -Map $Map)) {
+            if (-not $Enabled) {
+                # Nothing to turn off - the section doesn't exist yet.
+                return _New-DuneSpinUpNotStartedResult -Map $Map
+            }
+            # First-time spin-up: create the section from scratch instead of
+            # merely editing an existing one. See _Add-DuneIniRetailSection.
+            $value = _Get-DuneSpinUpTargetCount -Map $Map -Bg $r.info.Bg
+            $newIni = _Add-DuneIniRetailSection -Ini $r.ini -Map $Map -Value $value
+            $patched = _Invoke-DuneDirectorIniPatch -Read $r -Ini $newIni
+            $label = _Get-DuneSpinUpLabel -Map $Map
+            return @{
+                ok         = $patched.success
+                map        = $Map
+                label      = $label
+                minServers = $value
+                enabled    = $true
+                availablePartitions = $value
+                raw        = $patched.raw
+                firstStart = $true
+                message    = if ($patched.success) {
+                    "$label is starting up for the first time - it'll show up in the map list as soon as the director brings it online."
+                } else {
+                    "kubectl patch may have failed: $($patched.raw)"
+                }
+            }
+        }
+        return @{ ok = $false; status = 404; message = "Map '$Map' is not a controllable map section in director.ini." }
+    }
+
+    $value   = if ($Enabled) { _Get-DuneSpinUpTargetCount -Map $Map -Bg $r.info.Bg } else { 0 }
+    $current = [int]$target.MinServers
+
+    # Spin-up requires BOTH MinServers >= 1 AND EnableAutomaticInstanceScaling = true
+    # (the latter is the gate added in director image 1979201-0-shipping). On
+    # spin-down we only need to drop MinServers; the auto-scaling flag is left
+    # in place so a future spin-up is a one-line change.
+    $needsAutoScaling = ($value -ge 1) -and -not $target.HasEnableAutoScaling
+    $minServersInSync = ($current -eq $value -and ($target.HasMinServers -or $value -eq 0))
+
+    if ($minServersInSync -and -not $needsAutoScaling) {
+        return @{
+            ok         = $true
+            map        = $Map
+            label      = (_Get-DuneSpinUpLabel -Map $Map)
+            minServers = $value
+            enabled    = ($value -ge 1)
+            availablePartitions = (_Get-DuneSpinUpTargetCount -Map $Map -Bg $r.info.Bg)
+            noop       = $true
+            message    = "$(_Get-DuneSpinUpLabel -Map $Map) is already set to MinServers = $value."
+        }
+    }
+
+    $newIni = _Set-DuneIniMinServers -Ini $r.ini -Map $Map -Value $value
+    if ($value -ge 1) {
+        $newIni = _Set-DuneIniEnableAutoScaling -Ini $newIni -Map $Map
+    }
+    if ($newIni -eq $r.ini) {
+        return @{
+            ok = $false; status = 500
+            message = "No change produced for '$Map' (parser/edit mismatch)."
+        }
+    }
+
+    $patched = _Invoke-DuneDirectorIniPatch -Read $r -Ini $newIni
+    $success = $patched.success
+    $outText = $patched.raw
+    $label = _Get-DuneSpinUpLabel -Map $Map
+    return @{
+        ok         = $success
+        map        = $Map
+        label      = $label
+        minServers = $value
+        enabled    = ($value -ge 1)
+        availablePartitions = (_Get-DuneSpinUpTargetCount -Map $Map -Bg $r.info.Bg)
+        raw        = $outText
+        message    = if ($success) {
+            if ($value -ge 1) { "$label will now keep $value server(s) warm (MinServers = $value)." }
+            else              { "$label spin-up floor disabled (MinServers = 0)." }
+        } else {
+            "kubectl patch may have failed: $outText"
+        }
+    }
+}
+
+function Set-DuneSpinUpMapPartySharing {
+    param(
+        [Parameter(Mandatory)][string]$Map,
+        [Parameter(Mandatory)][bool]$Shared
+    )
+    if ($script:DuneSpinUpPartySharingMaps -notcontains $Map) {
+        return @{ ok = $false; status = 400; message = "Party sharing is not supported for map '$Map'." }
+    }
+    if($env:DST_HOSTING_BACKEND -eq 'docker'){
+        $reply=Invoke-DuneDockerManager -Request @{action='maps.party-sharing';map=$Map;shared=$Shared}
+        if(-not $reply.ok){return @{ok=$false;status=503;message=$reply.error}}
+        return @{ok=$true;map=$Map;label=(_Get-DuneSpinUpLabel -Map $Map);sharedParties=$Shared;noop=[bool]$reply.data.noop;message=$(if($Shared){'Zanovar is set to allow separate parties to share its server. The change takes effect within about a minute.'}else{'Zanovar is set to one party per server. The change takes effect within about a minute.'})}
+    }
+
+    $r = _Get-DuneDirectorIni
+    if (-not $r.ok) { return $r }
+    $target = _Parse-DuneDirectorIni -Ini $r.ini |
+        Where-Object { $_.Name -eq $Map } |
+        Select-Object -First 1
+    if (-not $target) {
+        return @{ ok = $false; status = 404; message = "Map '$Map' is not present in director.ini." }
+    }
+
+    $currentlyShared = (-not $target.HasMaxParties -or [int]$target.MaxParties -ne 1)
+    if ($currentlyShared -eq $Shared) {
+        return @{
+            ok = $true; map = $Map; label = (_Get-DuneSpinUpLabel -Map $Map)
+            sharedParties = $Shared; noop = $true
+            message = if ($Shared) { 'Zanovar already allows separate parties to share its server.' }
+                      else { 'Zanovar is already isolated to one party per server.' }
+        }
+    }
+
+    $newIni = _Set-DuneIniPartySharing -Ini $r.ini -Map $Map -Shared:$Shared
+    if ($newIni -eq $r.ini) {
+        return @{ ok = $false; status = 500; message = "No party-sharing change produced for '$Map'." }
+    }
+
+    $patched = _Invoke-DuneDirectorIniPatch -Read $r -Ini $newIni
+    return @{
+        ok = $patched.success
+        map = $Map
+        label = (_Get-DuneSpinUpLabel -Map $Map)
+        sharedParties = $Shared
+        raw = $patched.raw
+        message = if ($patched.success) {
+            if ($Shared) { 'Zanovar now allows separate parties to share its server.' }
+            else { 'Zanovar now keeps one party per server.' }
+        } else {
+            "kubectl patch may have failed: $($patched.raw)"
+        }
+    }
+}

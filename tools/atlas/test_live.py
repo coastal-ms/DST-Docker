@@ -1,0 +1,217 @@
+"""Live intent survives service/bundle recovery; only explicit controls change it."""
+import importlib.util
+import io
+import json
+import os
+import shutil
+import sys
+import tempfile
+import threading
+import time
+import types
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+ROOT = Path(__file__).resolve().parents[2] / 'app/tools/DuneAtlas'
+sys.path.insert(0, str(ROOT))
+import atlas_live
+import atlas_preferences
+
+
+def service(root, settings):
+    root.mkdir(exist_ok=True)
+    shutil.copyfile(ROOT / 'server.py', root / 'server.py')
+    with patch.dict(os.environ, {'DST_ATLAS_APP_ROOT': str(root), 'DST_ATLAS_SNAPSHOT_ROOT': str(root), 'DST_ATLAS_PREFERENCES_ROOT': str(settings)}):
+        spec = importlib.util.spec_from_file_location('live_fixture', root / 'server.py')
+        value = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(value)
+    return value
+
+
+def action(value, path):
+    statuses = []
+    request = types.SimpleNamespace(path=path+'?key='+value.KEY, server=types.SimpleNamespace(server_port=1234),
+        headers={'Host':'127.0.0.1:1234','Content-Type':'application/json','Content-Length':'2'},
+        rfile=io.BytesIO(b'{}'), wfile=io.BytesIO(), send_error=lambda code,*args: statuses.append(code),
+        send_response=lambda code: statuses.append(code), send_header=lambda *args: None, end_headers=lambda: None)
+    with patch.object(value.atlas_process, 'reset'), patch.object(value.atlas_process, 'cancel'), patch.object(value, 'capture_static_files'):
+        value.Handler.do_POST(request)
+    return statuses[0]
+
+
+class LiveIntentTests(unittest.TestCase):
+    def test_selected_map_discovery_runs_before_other_map_on_return(self):
+        with tempfile.TemporaryDirectory() as folder:
+            value=service(Path(folder)/'bundle',Path(folder)/'settings')
+            value.live_enabled=True;value.state['live']=True
+            value.touch_viewer('fixture',{'region':'HaggaBasin','layers':['worms']})
+            starts=[];observed=threading.Event();workers=[]
+            def observe(name):
+                starts.append(name);observed.set()
+            try:
+                for name in ('native','haggaNative'):
+                    worker=threading.Thread(target=value.collection_worker,args=(name,lambda n=name:observe(n)));worker.start();workers.append(worker)
+                self.assertTrue(observed.wait(2))
+                self.assertEqual(starts[0],'haggaNative')
+            finally:
+                value.stop.set()
+                with value.control:value.control.notify_all()
+                for worker in workers:worker.join(3)
+
+    def test_returning_viewer_bypasses_prior_read_cooldown(self):
+        with tempfile.TemporaryDirectory() as folder:
+            value=service(Path(folder)/'bundle',Path(folder)/'settings')
+            value.live_enabled=True;value.state.update(live=True,refreshSeconds=60)
+            first=threading.Event();resumed=threading.Event();calls=[]
+            def observe():
+                calls.append(1)
+                (first if len(calls)==1 else resumed).set()
+            value.touch_viewer('fixture',{'region':'HaggaBasin','layers':['worms']})
+            self.assertEqual(value.waiting_jobs.get('haggaNative'),0)
+            worker=threading.Thread(target=value.collection_worker,args=('haggaPositions',observe));worker.start()
+            try:
+                self.assertTrue(first.wait(2))
+                with value.control:value.viewers.release('fixture')
+                value.touch_viewer('fixture',{'region':'HaggaBasin','layers':['worms']})
+                self.assertTrue(resumed.wait(2),'Re-entry waited for the prior 60-second period')
+            finally:
+                value.stop.set()
+                with value.control:value.control.notify_all()
+                worker.join(3)
+
+    def test_settings_status_reports_inflight_work_without_starting_viewer_demand(self):
+        with tempfile.TemporaryDirectory() as folder:
+            value=service(Path(folder)/'bundle',Path(folder)/'settings')
+            value.state.update(live=False,refreshing=True,stopping=False,activity=['native'],refreshSeconds=3)
+            request=types.SimpleNamespace(path='/collection-status?key='+value.KEY,server=types.SimpleNamespace(server_port=1234),
+                headers={'Host':'127.0.0.1:1234'},wfile=io.BytesIO(),send_error=lambda *args: self.fail(str(args)),
+                send_response=lambda *args: None,send_header=lambda *args: None,end_headers=lambda: None)
+            with patch.object(value,'touch_viewer') as touch:
+                value.Handler.do_GET(request)
+                touch.assert_not_called()
+            result=json.loads(request.wfile.getvalue())
+            self.assertTrue(result['refreshing'])
+            self.assertEqual(result['activity'],['native'])
+
+    def test_live_waits_for_viewer_and_pauses_after_viewer_expires(self):
+        with tempfile.TemporaryDirectory() as folder:
+            value=service(Path(folder)/'bundle',Path(folder)/'settings')
+            value.job_period=lambda name:.01
+            reads=[]; observed=threading.Event()
+            def observe():
+                reads.append(1)
+                with value.control:value.viewers.release('legacy')
+                observed.set()
+            worker=threading.Thread(target=value.collection_worker,args=('db',observe))
+            worker.start()
+            try:
+                self.assertFalse(observed.wait(.4))
+                value.touch_viewer()
+                self.assertTrue(observed.wait(2))
+                time.sleep(.4)
+                self.assertEqual(len(reads),1)
+                self.assertTrue(value.live_enabled)
+                observed.clear();value.touch_viewer()
+                self.assertTrue(observed.wait(2))
+                self.assertEqual(len(reads),2)
+            finally:
+                value.stop.set()
+                with value.control:value.control.notify_all()
+                worker.join(3)
+
+    def test_viewer_release_keeps_peers_and_cancels_only_after_last_viewer(self):
+        with tempfile.TemporaryDirectory() as folder:
+            value=service(Path(folder)/'bundle',Path(folder)/'settings')
+            first='tablet-viewer-0001';second='desktop-viewer-0002'
+            value.touch_viewer('local-host:'+first);value.touch_viewer('local-host:'+second)
+            value.active_jobs.add('db')
+            statuses=[]
+            def release(viewer):
+                request=types.SimpleNamespace(path='/viewer?key='+value.KEY,server=types.SimpleNamespace(server_port=1234),
+                    headers={'Host':'127.0.0.1:1234','Content-Type':'application/json','Content-Length':'16','X-DST-Atlas-Viewer':viewer},
+                    rfile=io.BytesIO(b'{"active":false}'),wfile=io.BytesIO(),send_error=lambda code,*args:statuses.append(code),
+                    send_response=lambda code:statuses.append(code),send_header=lambda *args:None,end_headers=lambda:None)
+                value.Handler.do_POST(request)
+            with patch.object(value.atlas_process,'cancel_job') as cancel:
+                release(first)
+                self.assertEqual(statuses[-1],200);cancel.assert_not_called()
+                release(second)
+                self.assertEqual(statuses[-1],200);cancel.assert_called_once_with('db')
+                self.assertTrue(value.live_enabled)
+                value.touch_viewer(first)
+                self.assertTrue(value.viewers.active())
+
+    def test_live_defaults_on_without_changing_other_preferences(self):
+        with tempfile.TemporaryDirectory() as folder:
+            self.assertTrue(atlas_live.load(folder))
+            prefs={'region':'HaggaBasin','layers':['worms'],'refreshSeconds':10}
+            atlas_preferences.save(folder,prefs)
+            atlas_live.save(folder,False)
+            self.assertEqual(atlas_preferences.load(folder),prefs)
+            atlas_preferences.save(folder,{**prefs,'region':'DeepDesert'})
+            self.assertFalse(atlas_live.load(folder))
+
+    def test_start_and_stop_survive_process_and_installer_bundle_changes(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder); settings=root/'shared-settings'
+            first=service(root/'bundle-one',settings)
+            self.assertTrue(first.live_enabled)
+            self.assertEqual(action(first,'/live/stop'),200)
+            second=service(root/'bundle-two',settings)
+            self.assertFalse(second.live_enabled)
+            self.assertFalse(second.state['live'])
+            self.assertEqual(action(second,'/live/start'),200)
+            second.live_enabled=False  # shutdown/recovery memory state must not clear intent
+            third=service(root/'bundle-three',settings)
+            self.assertTrue(third.live_enabled)
+            self.assertTrue(third.state['live'])
+
+    def test_failed_world_read_retries_without_disabling_live(self):
+        with tempfile.TemporaryDirectory() as folder:
+            value=service(Path(folder)/'bundle',Path(folder)/'settings')
+            value.job_period=lambda name:.01
+            value.touch_viewer()
+            attempts=[]; recovered=threading.Event()
+            def observe():
+                attempts.append(1)
+                if len(attempts)==1: raise ValueError('World restarting')
+                recovered.set()
+            worker=threading.Thread(target=value.collection_worker,args=('db',observe))
+            worker.start()
+            try:
+                self.assertTrue(recovered.wait(3))
+                self.assertTrue(value.live_enabled)
+                self.assertTrue(atlas_live.load(Path(folder)/'settings'))
+            finally:
+                value.stop.set()
+                with value.control:value.control.notify_all()
+                worker.join(3)
+
+    def test_saved_stop_prevents_worker_reads_after_restart(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder); settings=root/'settings'
+            atlas_live.save(settings,False)
+            value=service(root/'bundle',settings)
+            observed=threading.Event()
+            worker=threading.Thread(target=value.collection_worker,args=('db',observed.set))
+            worker.start()
+            try:self.assertFalse(observed.wait(.4))
+            finally:
+                value.stop.set()
+                with value.control:value.control.notify_all()
+                worker.join(3)
+
+    def test_unsaved_stop_is_reported_instead_of_claiming_it_will_survive_restart(self):
+        with tempfile.TemporaryDirectory() as folder:
+            value=service(Path(folder)/'bundle',Path(folder)/'settings')
+            with patch.object(atlas_live,'save',side_effect=OSError('disk full')):
+                self.assertEqual(action(value,'/live/stop'),500)
+            self.assertTrue(value.live_enabled)
+
+    def test_invalid_saved_values_cannot_disable_live(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/'live-v1.json'
+            for raw in ('invalid','null','{"enabled":0}','{"enabled":"false"}'):
+                path.write_text(raw)
+                self.assertTrue(atlas_live.load(folder))

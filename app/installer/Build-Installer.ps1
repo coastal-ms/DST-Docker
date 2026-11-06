@@ -1,0 +1,412 @@
+﻿# Build-Installer.ps1 - Compiles app/installer/DuneServer.iss into DuneServerSetup.exe via Inno Setup.
+#
+# Output: app/installer/output/DuneServerSetup.exe
+#
+# Requirements:
+#   - Inno Setup 6 (install via:  winget install --id JRSoftware.InnoSetup)
+#   - Node.js + npm (build-time only) for `npm run build` in webui/
+#   - Build-Exe.ps1 must have been run first (this script depends on DuneServer.exe)
+
+[CmdletBinding()]
+param(
+    [switch]$SkipExeBuild,
+    [switch]$SkipWebBuild,
+    [switch]$SkipShellBuild,
+    [switch]$SkipSoloBuild,
+    [switch]$SkipRegisBuild,
+    [switch]$SkipPlatformBuild,
+    [switch]$SkipVersionCheck,
+    # Artifact/release-channel identity is independent of stable product stamps.
+    # A product prerelease suffix defaults this on; tagged test builds pass it.
+    [switch]$Prerelease,
+    [string]$BuildCommit = '',
+    [string]$BuildTag = '',
+    [switch]$Open
+)
+
+$ErrorActionPreference = 'Stop'
+
+$appRoot    = Split-Path -Parent $PSScriptRoot                          # ...\app
+$runtimePins = @{
+    'runtime-1140.zip' = 'B954F036B10E9ABB0C0C41599311AB1ACCC53E30515AEED7E48EE22C5B3B1280'
+    'runtime.zip' = '3C72142A383E25E9F9553AC9E4D5677AA572E98CB369CAC57200EFB2E381E603'
+    'configs.zip' = '1B2420B7DEB237CD680D27306EADF26628699D992A322C89A963D80F580C9B78'
+}
+foreach ($name in $runtimePins.Keys) {
+    $archive = Join-Path $appRoot ('resources\solo-mod-runtime\' + $name)
+    if (-not (Test-Path -LiteralPath $archive) -or (Get-FileHash -LiteralPath $archive).Hash -ne $runtimePins[$name]) {
+        throw "Bundled Solo mod runtime archive is missing or has an unexpected checksum: $name"
+    }
+}
+$repoRoot   = Split-Path -Parent $appRoot                               # ...\<repo>
+$webuiDir   = Join-Path $repoRoot 'webui'
+$webuiDist  = Join-Path $webuiDir 'dist'
+$iss        = Join-Path $appRoot 'installer\DuneServer.iss'
+$exePath    = Join-Path $appRoot 'build\output\DuneServer.exe'
+$outDir     = Join-Path $appRoot 'installer\output'
+$installer  = Join-Path $outDir 'DuneServerSetup.exe'
+& (Join-Path $PSScriptRoot 'Prepare-AtlasPython.ps1')
+& (Join-Path $PSScriptRoot 'Test-VmMapHelperPackage.ps1')
+$soloProj   = Join-Path $appRoot 'tools\DuneSoloDb\DuneSoloDb.csproj'
+$soloExe    = Join-Path $appRoot 'tools\DuneSoloDb\bin\Release\net10.0-windows\win-x64\publish\DuneSoloDb.exe'
+$regisProj  = Join-Path $appRoot 'tools\DuneRegisTanks\DuneRegisTanks.csproj'
+$regisExe   = Join-Path $appRoot 'tools\DuneRegisTanks\bin\Release\net10.0-windows\win-x64\publish\DuneRegisTanks.exe'
+$platformProj = Join-Path $appRoot 'tools\DunePlatformStore\DunePlatformStore.csproj'
+$platformExe = Join-Path $appRoot 'tools\DunePlatformStore\bin\Release\net10.0-windows\win-x64\publish\DunePlatformStore.exe'
+$buildHelpers = Join-Path $appRoot 'build\BuildHelpers.ps1'
+
+$null = . $buildHelpers
+$versionFiles = @(
+    @{ Path = Join-Path $repoRoot 'dune-server.ps1';                   Pattern = '\$script:ToolVersion\s*=\s*"([^"]+)"';       Label = '$script:ToolVersion' },
+    @{ Path = Join-Path $appRoot  'DuneServer.ps1';                    Pattern = "\`$script:DuneToolVersion\s*=\s*'([^']+)'"; Label = '$script:DuneToolVersion' },
+    @{ Path = Join-Path $appRoot  'build\Build-Exe.ps1';               Pattern = "\[string\]\`$Version\s*=\s*'([^']+)'";      Label = 'Build-Exe.ps1 default $Version' },
+    @{ Path = Join-Path $appRoot  'installer\DuneServer.iss';          Pattern = '#define\s+MyAppVersion\s+"([^"]+)"';         Label = 'MyAppVersion' },
+    @{ Path = Join-Path $appRoot  'desktop\DuneShell\DuneShell.csproj'; Pattern = '<Version>([^<]+)</Version>';                 Label = 'DuneShell <Version>' }
+)
+$stampReport = foreach ($vf in $versionFiles) {
+    if (-not (Test-Path -LiteralPath $vf.Path)) {
+        throw "Version-stamp file not found: $($vf.Path)"
+    }
+
+    $match = Select-String -Path $vf.Path -Pattern $vf.Pattern -List
+    if (-not $match) {
+        throw "Could not find version stamp in $($vf.Path) using pattern: $($vf.Pattern)"
+    }
+    $version = $match.Matches[0].Groups[1].Value
+    try {
+        $versionInfo = Get-DuneVersionInfo -Version $version
+    } catch {
+        throw "$($vf.Label) has an invalid release version: $($_.Exception.Message)"
+    }
+    [pscustomobject]@{
+        File = $vf.Path.Substring($repoRoot.Length + 1)
+        Label = $vf.Label
+        Version = $versionInfo.Version
+        VersionInfo = $versionInfo
+    }
+}
+$installerVersion = ($stampReport | Where-Object Label -eq 'MyAppVersion').VersionInfo
+$Prerelease = Get-DuneArtifactPrerelease -ProductVersionInfo $installerVersion -Prerelease:$Prerelease
+
+$repoKey = [Convert]::ToHexString(
+    [Security.Cryptography.SHA256]::HashData(
+        [Text.Encoding]::UTF8.GetBytes($repoRoot.ToLowerInvariant()))).Substring(0, 16)
+$buildMutex = [Threading.Mutex]::new($false, "DST-BuildInstaller-$repoKey")
+$buildMutexOwned = $false
+try {
+    try {
+        $buildMutexOwned = $buildMutex.WaitOne(0)
+    } catch [Threading.AbandonedMutexException] {
+        $buildMutexOwned = $true
+    }
+    if (-not $buildMutexOwned) {
+        throw 'Another installer build is already running for this checkout.'
+    }
+
+# Resolve and validate artifact identity before any build work starts.
+$buildCommitSpecified = $PSBoundParameters.ContainsKey('BuildCommit') -and
+    -not [string]::IsNullOrWhiteSpace($BuildCommit)
+$identity = Resolve-DuneBuildIdentity `
+    -RepoRoot $repoRoot `
+    -BuildCommit $BuildCommit `
+    -BuildTag $BuildTag `
+    -Prerelease:$Prerelease `
+    -BuildCommitSpecified:$buildCommitSpecified
+$BuildCommit = $identity.Commit
+$BuildTag = $identity.Tag
+
+if ($BuildTag) {
+    $dirty = @(& git -C $repoRoot status --porcelain --untracked-files=all)
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Could not verify checkout cleanliness for tagged build.'
+    }
+    if ($dirty.Count -gt 0) {
+        throw "Tagged build $BuildTag requires a clean checkout."
+    }
+}
+Write-Host "Build identity: prerelease=$([bool]$Prerelease), tag=$(if ($BuildTag) { $BuildTag } else { '(manual)' }), commit=$BuildCommit" -ForegroundColor Cyan
+Write-Host ''
+
+# Verify the generated Linux helper before compiling the installer. No Python
+# installation is required here; regeneration is a developer build-time action.
+$deckInputs = @('scripts/build-deck-companion.py','app/server/lib/SoloMode.ps1') + @(
+    'deck_helper.py','settings_writer.py','settings_batch.py','deck_mods.py','deck_modlaunch.py','deck_ssh.py','companion.py'
+    | ForEach-Object { 'app/resources/steam-deck/' + $_ }
+)
+$deckCanonical = New-Object Text.StringBuilder
+foreach ($deckInput in $deckInputs) {
+    $deckSource = [IO.File]::ReadAllText((Join-Path $repoRoot $deckInput)).Replace("`r`n","`n").Replace("`r","`n")
+    [void]$deckCanonical.Append($deckInput).Append([char]0).Append($deckSource).Append([char]0)
+}
+$deckHashAlgorithm = [Security.Cryptography.SHA256]::Create()
+try { $deckFingerprint = [BitConverter]::ToString($deckHashAlgorithm.ComputeHash([Text.Encoding]::UTF8.GetBytes($deckCanonical.ToString()))).Replace('-','').ToLowerInvariant() }
+finally { $deckHashAlgorithm.Dispose() }
+$deckArtifact = [IO.File]::ReadAllText((Join-Path $appRoot 'resources/steam-deck/DST-Deck-Companion.sh'))
+if ($deckArtifact -notmatch ('(?m)^# Source SHA256: ' + $deckFingerprint + '$')) {
+    throw 'The Deck companion is stale. Regenerate it with scripts/build-deck-companion.py before building the installer.'
+}
+
+# ---------------------------------------------------------------------------
+# Pre-flight: version-stamp sync check.
+#
+# DST keeps the release version in FIVE files that must all match. Historically
+# this was a manual procedure and at least once (v10.1.12) someone forgot to
+# bump them, so the installer reported the prior version's number and the
+# auto-updater couldn't deliver the release. Catch that before doing any of
+# the long build steps below.
+#
+# If the stamps disagree, abort with a clear listing. To override (e.g. for
+# a deliberate intermediate test build), pass `-SkipVersionCheck`.
+# ---------------------------------------------------------------------------
+if (-not $SkipVersionCheck) {
+    $distinct = @($stampReport.Version | Sort-Object -Unique)
+    Write-Host "Version-stamp check:" -ForegroundColor Cyan
+    foreach ($r in $stampReport) {
+        $marker = if ($distinct.Count -eq 1) { '[x]' } else { '[!]' }
+        Write-Host ("  {0} {1,-32} {2}" -f $marker, $r.Label, $r.Version)
+    }
+    if ($distinct.Count -ne 1) {
+        Write-Host ""
+        throw "Version stamps disagree (found: $($distinct -join ', ')). Bump all 5 files to the same release version before building, or pass -SkipVersionCheck for a deliberate intermediate build."
+    }
+    Write-Host "  All 5 stamps match: $($distinct[0])" -ForegroundColor Green
+    Write-Host ""
+}
+
+# Locate ISCC.exe
+$isccCandidates = @(
+    'C:\Program Files (x86)\Inno Setup 6\ISCC.exe',
+    'C:\Program Files\Inno Setup 6\ISCC.exe',
+    "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe",
+    "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
+)
+$iscc = $isccCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+if (-not $iscc) {
+    throw "ISCC.exe not found. Install Inno Setup 6: winget install --id JRSoftware.InnoSetup"
+}
+
+# ---------------------------------------------------------------------------
+# Pre-flight: Windows PowerShell 5.1 parse-check of every .ps1 the installer
+# will bundle.
+#
+# DuneServer.exe is compiled via PS2EXE, which produces a Windows PowerShell
+# 5.1 host. PS 5.1 reads .ps1 files WITHOUT a UTF-8 BOM as the system ANSI
+# codepage (Windows-1252 on en-US), not UTF-8. If a BOM-less file contains
+# UTF-8 multi-byte characters (em-dash, ellipsis, right-arrow, etc.) the
+# resulting byte stream can confuse PS 5.1's parser and produce bogus
+# "Missing closing '}'" errors at runtime — even though PowerShell 7 (used
+# during development) parses the file cleanly.
+#
+# This bit us in v11.4.0: Autostart.ps1 and ConsoleHost.ps1 shipped without
+# BOMs and contained em-dashes/arrows, and DuneServer.exe failed to boot on
+# every install. Catch it here, before the release ships.
+# ---------------------------------------------------------------------------
+$ps5Exe = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
+if (Test-Path $ps5Exe) {
+    $bundledPs1 = @()
+    foreach ($d in @('server', 'lib', 'data', 'resources')) {
+        $p = Join-Path $appRoot $d
+        if (Test-Path $p) { $bundledPs1 += Get-ChildItem $p -Recurse -Filter '*.ps1' -File }
+    }
+    $bundledPs1 += Get-Item (Join-Path $appRoot 'DuneServer.ps1')
+
+    # Stricter BOM check: any file containing non-ASCII bytes MUST have a
+    # UTF-8 BOM, otherwise PS 5.1 (the runtime PS2EXE targets) decodes it
+    # as Windows-1252 and produces silent mojibake (em-dash becomes â€",
+    # the 0x94 byte terminates string literals early, etc.).
+    #
+    # The Parser::ParseFile check below is BOM-aware and won't catch this.
+    # Only an actual dot-source under PS 5.1 (or this byte-level check)
+    # will. We do the byte check here because it's near-instant.
+    Write-Host "Checking UTF-8 BOM on non-ASCII .ps1 files..." -ForegroundColor Cyan
+    $bomMissing = @()
+    foreach ($f in $bundledPs1) {
+        $bytes = [IO.File]::ReadAllBytes($f.FullName)
+        $hasBom = ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF)
+        if ($hasBom) { continue }
+        $hasNonAscii = $false
+        foreach ($b in $bytes) { if ($b -gt 0x7F) { $hasNonAscii = $true; break } }
+        if ($hasNonAscii) { $bomMissing += $f.FullName }
+    }
+    if ($bomMissing.Count -gt 0) {
+        Write-Host "  BOM missing on these files (PS 5.1 would mojibake them at runtime):" -ForegroundColor Red
+        foreach ($p in $bomMissing) { Write-Host "    $p" -ForegroundColor Red }
+        throw "$($bomMissing.Count) .ps1 file(s) contain non-ASCII bytes without a UTF-8 BOM. Re-save them as UTF-8-with-BOM (in PowerShell: [IO.File]::WriteAllBytes(`$p, ([byte[]](0xEF,0xBB,0xBF)) + [IO.File]::ReadAllBytes(`$p)))."
+    }
+    Write-Host "  All non-ASCII .ps1 files carry a UTF-8 BOM." -ForegroundColor Green
+    Write-Host ""
+
+    $ps5ParseScript = @'
+param([string[]]$Paths)
+$exitCode = 0
+foreach ($p in $Paths) {
+  $errors = $null; $tokens = $null
+  [void][System.Management.Automation.Language.Parser]::ParseFile($p, [ref]$tokens, [ref]$errors)
+  if ($errors -and $errors.Count -gt 0) {
+    $exitCode = 1
+    Write-Host ("FAIL: " + $p)
+    foreach ($e in $errors) {
+      Write-Host ("  L" + $e.Extent.StartLineNumber + " C" + $e.Extent.StartColumnNumber + ": " + $e.Message)
+    }
+  }
+}
+exit $exitCode
+'@
+    $ps5ScriptPath = Join-Path $env:TEMP "dune-ps5-parse-check-$([guid]::NewGuid().ToString('N')).ps1"
+    Set-Content -LiteralPath $ps5ScriptPath -Value $ps5ParseScript -Encoding UTF8
+    try {
+        Write-Host "PS 5.1 parse pre-flight on $($bundledPs1.Count) .ps1 files..." -ForegroundColor Cyan
+        $paths = $bundledPs1 | ForEach-Object { $_.FullName }
+        & $ps5Exe -NoProfile -ExecutionPolicy Bypass -File $ps5ScriptPath -Paths $paths
+        if ($LASTEXITCODE -ne 0) {
+            throw "PS 5.1 parse pre-flight failed. PS2EXE compiles against PS 5.1; files that fail here will break DuneServer.exe at startup. Fix: add a UTF-8 BOM to any BOM-less .ps1 file containing non-ASCII characters."
+        }
+        Write-Host "  All .ps1 files parse under PS 5.1." -ForegroundColor Green
+        Write-Host ""
+    } finally {
+        Remove-Item -LiteralPath $ps5ScriptPath -ErrorAction SilentlyContinue
+    }
+} else {
+    Write-Warning "Windows PowerShell 5.1 not found at $ps5Exe — skipping PS 5.1 parse pre-flight. This is the runtime PS2EXE targets; missing the check means v11.4.0-class encoding bugs could ship undetected."
+}
+
+# Build the React SPA (writes webui/dist) — bundled into installer below.
+if (-not $SkipWebBuild) {
+    if (-not (Test-Path $webuiDir)) { throw "webui/ folder not found at $webuiDir" }
+    $npm = Get-Command npm.cmd -ErrorAction SilentlyContinue
+    if (-not $npm) { $npm = Get-Command npm -ErrorAction SilentlyContinue }
+    if (-not $npm) { throw "npm not found in PATH. Install Node.js to build the web UI." }
+    Write-Host "Building React SPA (npm run build)..." -ForegroundColor Cyan
+    Push-Location $webuiDir
+    try {
+        & $npm.Source run build
+        if ($LASTEXITCODE -ne 0) { throw "npm run build failed (exit $LASTEXITCODE)" }
+    } finally { Pop-Location }
+    Write-Host ""
+}
+if (-not (Test-Path (Join-Path $webuiDist 'index.html'))) {
+    throw "webui/dist/index.html not found - run 'npm run build' in $webuiDir (or omit -SkipWebBuild)"
+}
+
+# Build the .exe (unless skipped)
+if (-not $SkipExeBuild) {
+    Write-Host "Building DuneServer.exe first..." -ForegroundColor Cyan
+    & (Join-Path $appRoot 'build\Build-Exe.ps1') -Quiet -BuildCommit $BuildCommit -BuildTag $BuildTag -Prerelease:$Prerelease
+    Write-Host ""
+}
+
+if (-not (Test-Path $exePath)) {
+    throw "DuneServer.exe not found at $exePath - run Build-Exe.ps1 first (or omit -SkipExeBuild)"
+}
+$builtMetadata = Get-DuneExecutableBuildMetadata -ExecutablePath $exePath
+$null = Assert-DuneBuildMetadataMatches `
+    -Metadata $builtMetadata `
+    -ExpectedTag $BuildTag `
+    -ExpectedCommit $BuildCommit `
+    -ExpectedPrerelease:$Prerelease
+Write-Host "  DuneServer.exe identity verified from embedded resource." -ForegroundColor Green
+Write-Host ""
+
+# Build the standalone WebView2 app window (DuneShell.exe). Self-contained
+# single-file publish; the .iss bundles it beside DuneServer.exe. Requires the
+# .NET SDK (dotnet) on PATH.
+$shellProj = Join-Path $appRoot 'desktop\DuneShell\DuneShell.csproj'
+$shellExe  = Join-Path $appRoot 'desktop\DuneShell\bin\Release\net10.0-windows\win-x64\publish\DuneShell.exe'
+if (-not $SkipShellBuild) {
+    if (-not (Test-Path $shellProj)) { throw "DuneShell.csproj not found at $shellProj" }
+    $dotnet = Get-Command dotnet -ErrorAction SilentlyContinue
+    if (-not $dotnet) { throw "dotnet SDK not found in PATH. Install .NET 10 SDK to build DuneShell." }
+    Write-Host "Publishing DuneShell.exe (WebView2 app window)..." -ForegroundColor Cyan
+    & $dotnet.Source publish $shellProj -c Release -r win-x64 -p:PublishSingleFile=true --self-contained true --nologo
+    if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed for DuneShell (exit $LASTEXITCODE)" }
+    Write-Host ""
+}
+if (-not (Test-Path $shellExe)) {
+    throw "DuneShell.exe not found at $shellExe - run 'dotnet publish' for DuneShell (or omit -SkipShellBuild)"
+}
+
+# Build the wrapped-SQLite helper used by the host-local Solo Mode workspace.
+if (-not $SkipSoloBuild) {
+    if (-not (Test-Path $soloProj)) { throw "DuneSoloDb.csproj not found at $soloProj" }
+    $dotnet = Get-Command dotnet -ErrorAction SilentlyContinue
+    if (-not $dotnet) { throw "dotnet SDK not found in PATH. Install .NET 10 SDK to build DuneSoloDb." }
+    $audit = (& $dotnet.Source list $soloProj package --include-transitive --vulnerable | Out-String)
+    Write-Host $audit
+    if ($audit -match 'has the following vulnerable packages') {
+        throw 'DuneSoloDb dependency audit found a vulnerable package.'
+    }
+    Write-Host "Publishing DuneSoloDb.exe (Solo Mode database helper)..." -ForegroundColor Cyan
+    & $dotnet.Source publish $soloProj -c Release -r win-x64 -p:PublishSingleFile=true --self-contained true --nologo
+    if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed for DuneSoloDb (exit $LASTEXITCODE)" }
+    Write-Host "Running DuneSoloDb self-test..." -ForegroundColor Cyan
+    & $soloExe --command self-test
+    if ($LASTEXITCODE -ne 0) { throw "DuneSoloDb self-test failed (exit $LASTEXITCODE)" }
+    Write-Host ""
+}
+if (-not $SkipRegisBuild) {
+    if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) { throw 'Install .NET 10 SDK to build Regis Tank support.' }
+    & dotnet publish $regisProj -c Release
+    if ($LASTEXITCODE -ne 0) { throw 'Regis Tank helper publish failed.' }
+    & $regisExe --self-test
+    if ($LASTEXITCODE -ne 0) { throw 'Regis Tank helper self-test failed.' }
+}
+if (-not (Test-Path -LiteralPath $regisExe)) { throw 'Regis Tank helper executable is missing.' }
+
+if (-not (Test-Path $soloExe)) {
+    throw "DuneSoloDb.exe not found at $soloExe - run 'dotnet publish' for DuneSoloDb (or omit -SkipSoloBuild)"
+}
+
+# Build the bounded one-shot SQLite helper used by platform derived caches.
+if (-not $SkipPlatformBuild) {
+    if (-not (Test-Path $platformProj)) { throw "DunePlatformStore.csproj not found at $platformProj" }
+    $dotnet = Get-Command dotnet -ErrorAction SilentlyContinue
+    if (-not $dotnet) { throw "dotnet SDK not found in PATH. Install .NET 10 SDK to build DunePlatformStore." }
+    $audit = (& $dotnet.Source list $platformProj package --include-transitive --vulnerable | Out-String)
+    Write-Host $audit
+    if ($audit -match 'has the following vulnerable packages') {
+        throw 'DunePlatformStore dependency audit found a vulnerable package.'
+    }
+    Write-Host "Publishing DunePlatformStore.exe (platform derived cache helper)..." -ForegroundColor Cyan
+    & $dotnet.Source publish $platformProj -c Release -r win-x64 -p:PublishSingleFile=true --self-contained true --nologo
+    if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed for DunePlatformStore (exit $LASTEXITCODE)" }
+    Write-Host "Running DunePlatformStore self-test..." -ForegroundColor Cyan
+    & $platformExe --command self-test
+    if ($LASTEXITCODE -ne 0) { throw "DunePlatformStore self-test failed (exit $LASTEXITCODE)" }
+    Write-Host ""
+}
+if (-not (Test-Path $platformExe)) {
+    throw "DunePlatformStore.exe not found at $platformExe - run 'dotnet publish' for DunePlatformStore (or omit -SkipPlatformBuild)"
+}
+
+# Ensure output dir
+if (-not (Test-Path $outDir)) { New-Item -ItemType Directory -Force -Path $outDir | Out-Null }
+
+Write-Host "Compiling installer via $iscc ..." -ForegroundColor Cyan
+$proc = Start-Process -FilePath $iscc -ArgumentList @("/DMyAppNumericVersion=$($installerVersion.NumericVersion)", "`"$iss`"") -NoNewWindow -Wait -PassThru
+if ($proc.ExitCode -ne 0) {
+    throw "ISCC failed with exit code $($proc.ExitCode)"
+}
+
+if (-not (Test-Path $installer)) {
+    throw "Installer not produced: $installer"
+}
+Assert-DuneInstallerVersion -InstallerPath $installer -ExpectedNumericVersion $installerVersion.NumericVersion
+
+$size = [Math]::Round(((Get-Item $installer).Length / 1MB), 2)
+Write-Host ""
+Write-Host "  Built: $installer ($size MB)" -ForegroundColor Green
+Write-Host ""
+Write-Host "Admin requirements (all 3 layers):" -ForegroundColor Cyan
+Write-Host "  [x] Setup itself: PrivilegesRequired=admin (writes to Program Files)" -ForegroundColor Green
+Write-Host "  [x] DuneServer.exe: self-elevates in-script (after single-instance check)"   -ForegroundColor Green
+Write-Host "  [x] dune-server.ps1: #Requires -RunAsAdministrator"                   -ForegroundColor Green
+
+if ($Open) {
+    Start-Process explorer.exe "/select,`"$installer`""
+}
+} finally {
+    if ($buildMutexOwned) {
+        try { $buildMutex.ReleaseMutex() } catch {}
+    }
+    $buildMutex.Dispose()
+}

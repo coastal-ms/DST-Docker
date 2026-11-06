@@ -1,0 +1,84 @@
+import { describe, expect, it } from 'vitest'
+import { NAV_ITEMS, getVisibleGroupLabel, getVisibleNavItems } from '../src/nav'
+import { resolvePortalAccess } from '../src/auth/portalAccess'
+import { canAccessCommand } from '../src/auth/commandAccess'
+import { LEGACY_ROUTE_MANIFEST } from '../src/platform/routes'
+
+describe('Browser Portal role access', () => {
+  it('gives remote Owners full portal access except host-only Setup', () => {
+    expect(resolvePortalAccess(false, true, 'owner')).toEqual({
+      isPlayer: false,
+      canAccessOwnerSurfaces: true,
+      canAccessServerUpdates: true,
+      canAccessSetup: false,
+    })
+  })
+
+  it('limits remote Admins to delegated operational surfaces', () => {
+    expect(resolvePortalAccess(false, true, 'admin')).toEqual({
+      isPlayer: false,
+      canAccessOwnerSurfaces: false,
+      canAccessServerUpdates: true,
+      canAccessSetup: false,
+    })
+  })
+
+  it('keeps the local host fully trusted regardless of account role', () => {
+    expect(resolvePortalAccess(true, true, 'admin')).toEqual({
+      isPlayer: false,
+      canAccessOwnerSurfaces: true,
+      canAccessServerUpdates: true,
+      canAccessSetup: true,
+    })
+  })
+
+  it('fails closed for remote account-mode launch access without an account role', () => {
+    expect(resolvePortalAccess(false, true, null).canAccessOwnerSurfaces).toBe(false)
+    expect(resolvePortalAccess(false, false, null).canAccessOwnerSurfaces).toBe(true)
+  })
+
+  it('gives Players no server-command access', () => {
+    expect(resolvePortalAccess(false, true, 'player').isPlayer).toBe(true)
+    expect(resolvePortalAccess(false, true, 'player').canAccessOwnerSurfaces).toBe(false)
+    for (const command of ['start', 'restart', 'startup', 'apply-inis', 'update', 'update-with-tanks', 'reboot']) {
+      expect(canAccessCommand(command, false, 'player')).toBe(false)
+    }
+  })
+
+  it('marks sensitive pages Owner-only and Setup host-only', () => {
+    for (const path of ['/server-settings', '/experimental', '/database', '/sietches', '/settings']) {
+      expect(NAV_ITEMS.find(item => item.to === path)?.ownerOnly).toBe(true)
+    }
+    expect(NAV_ITEMS.find(item => item.to === '/setup')?.localOnly).toBe(true)
+    for (const path of ['/server-settings', '/gameconfig']) expect(LEGACY_ROUTE_MANIFEST.find(route => route.path === path)?.access).toBe('owner')
+  })
+
+  it('labels server and gameplay domains explicitly', () => {
+    expect(getVisibleGroupLabel('overview')).toBe('Server Management')
+    expect(getVisibleGroupLabel('workspaces')).toBe('Gameplay Administration')
+  })
+
+  it('adds Funcom server Update only for authenticated remote Owners and Admins', () => {
+    expect(canAccessCommand('update', false, 'owner')).toBe(true)
+    expect(canAccessCommand('update', false, 'admin')).toBe(true)
+    expect(canAccessCommand('update', false, null)).toBe(false)
+    expect(canAccessCommand('update-with-tanks', false, 'owner')).toBe(true)
+    expect(canAccessCommand('update-with-tanks', false, 'admin')).toBe(true)
+    expect(canAccessCommand('update-with-tanks', false, null)).toBe(false)
+    expect(canAccessCommand('restart', false, 'admin')).toBe(true)
+  })
+})
+
+
+describe('Server updates navigation access', () => {
+ it.each(['owner', 'admin', 'player', null] as const)('filters every shared navigation surface for remote role %s', role => {
+  const access = resolvePortalAccess(false, true, role)
+  const visible = getVisibleNavItems({ local: false, windows: false, ...access })
+  expect(visible.some(item => item.to === '/commands?task=updates')).toBe(role === 'owner' || role === 'admin')
+  if (role === 'admin') expect(visible.some(item => item.to === '/server-settings')).toBe(false)
+ })
+ it('retains host access and excludes remote sessions without an account', () => {
+  expect(resolvePortalAccess(true, false, null).canAccessServerUpdates).toBe(true)
+  expect(resolvePortalAccess(false, false, null).canAccessServerUpdates).toBe(false)
+ })
+})

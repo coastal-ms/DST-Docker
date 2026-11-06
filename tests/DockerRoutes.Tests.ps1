@@ -1,0 +1,49 @@
+BeforeAll {
+    . (Join-Path $PSScriptRoot '_TestHelpers.ps1')
+    Import-DstLib 'DockerRoutes.ps1'
+}
+Describe 'Docker adapter routing boundary' {
+    It 'keeps native reads and typed mutations available' -TestCases @(
+        @{Method='GET';Path='/api/status'},
+        @{Method='GET';Path='/api/links'},
+        @{Method='GET';Path='/api/gameplay/item-packages'},
+        @{Method='PUT';Path='/api/gameplay/item-packages'},
+        @{Method='DELETE';Path='/api/gameplay/item-packages'},
+        @{Method='POST';Path='/api/gameplay/players/journey/reset'},
+        @{Method='POST';Path='/api/restart-schedule/check-update'},
+        @{Method='POST';Path='/api/gameplay/players/set-item-water'},
+        @{Method='POST';Path='/api/gameplay/players/reset-all-specs'},
+        @{Method='POST';Path='/api/gameplay/players/set-weapon-ammo'},
+        @{Method='POST';Path='/api/maps/deepdesert/start'},
+        @{Method='POST';Path='/api/map-spinup/SH_HarkoVillage'}
+        @{Method='POST';Path='/api/map-spinup/CB_Story_DestroyedZanovar/party-sharing'},
+        @{Method='POST';Path='/api/maps/restart-pods'}
+        @{Method='GET';Path='/api/gameconfig/time-of-day'},
+        @{Method='POST';Path='/api/gameconfig/time-of-day/stage'},
+        @{Method='POST';Path='/api/gameconfig/time-of-day/restore'},
+        @{Method='GET';Path='/api/gameconfig/deep-desert-pvp'},
+        @{Method='PUT';Path='/api/gameconfig/deep-desert-pvp'},
+        @{Method='GET';Path='/api/gameconfig/base-backup-guard'},
+        @{Method='PUT';Path='/api/gameconfig/base-backup-guard'}
+        @{Method='GET';Path='/api/restart-schedule'},
+        @{Method='PUT';Path='/api/restart-schedule'}
+        @{Method='POST';Path='/api/restart-schedule/test-discord'}
+    ) {
+        param($Method,$Path)
+        Test-DuneDockerRouteQualified -Method $Method -Path $Path | Should -BeTrue
+    }
+    It 'does not open unported methods, arbitrary maps or path suffixes' -TestCases @(
+        @{Method='DELETE';Path='/api/gameplay/players'},
+        @{Method='POST';Path='/api/gameplay/item-packages'},
+        @{Method='PATCH';Path='/api/commands/layout'},
+        @{Method='POST';Path='/api/maps/other/start'},
+        @{Method='POST';Path='/api/maps/deepdesert/start/extra'},
+        @{Method='GET';Path='/api/maps/deepdesert/start'},
+        @{Method='POST';Path='/api/map-spinup/../other'},
+        @{Method='POST';Path='/api/map-spinup/SH_HarkoVillage/party-sharing'},
+        @{Method='POST';Path='/api/system/reveal-config'}
+    ) {
+        param($Method,$Path)
+        Test-DuneDockerRouteQualified -Method $Method -Path $Path | Should -BeFalse
+    }
+}

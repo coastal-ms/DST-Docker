@@ -1,0 +1,1093 @@
+﻿BeforeAll {
+    . (Join-Path $PSScriptRoot '_TestHelpers.ps1')
+    Import-DstLib 'Config.ps1'
+    Import-DstLib 'PublicIp.ps1'
+    Import-DstLib 'Ports.ps1'
+}
+
+Describe 'Public IP validation' {
+    BeforeEach {
+        function global:Read-DuneConfig { @{ LastAppliedPublicIp = '' } }
+    }
+
+    It 'accepts a public IPv4 literal' {
+        $r = Assert-DuneManualPublicIp -PublicIp '8.8.8.8'
+        $r.ok | Should -BeTrue
+        $r.publicIp | Should -Be '8.8.8.8'
+    }
+
+    It 'rejects malformed IPv4' {
+        $r = Assert-DuneManualPublicIp -PublicIp '999.1.1.1'
+        $r.ok | Should -BeFalse
+        $r.status | Should -Be 400
+    }
+
+    It 'rejects private IPv4' {
+        $r = Assert-DuneManualPublicIp -PublicIp '192.168.1.50'
+        $r.ok | Should -BeFalse
+        $r.message | Should -Match 'private'
+    }
+
+    It 'rejects loopback and link-local IPv4' {
+        (Assert-DuneManualPublicIp -PublicIp '127.0.0.1').ok | Should -BeFalse
+        (Assert-DuneManualPublicIp -PublicIp '169.254.1.2').ok | Should -BeFalse
+    }
+
+    It 'rejects unchanged last-applied IP' {
+        function global:Read-DuneConfig { @{ LastAppliedPublicIp = '8.8.8.8' } }
+        $r = Assert-DuneManualPublicIp -PublicIp '8.8.8.8'
+        $r.ok | Should -BeFalse
+        $r.status | Should -Be 409
+    }
+}
+
+Describe 'Settings IP update forwarding preparation' {
+    It 'updates a changed IP through Settings with automatic forwarding refresh (<Mode>)' -ForEach @(
+        @{ Mode = 'manual'; Verdict = 'open'; VerifyStatus = 'done' }
+        @{ Mode = 'ddns'; Verdict = 'open'; VerifyStatus = 'done' }
+        @{ Mode = 'manual'; Verdict = 'closed'; VerifyStatus = 'warning' }
+        @{ Mode = 'manual'; Verdict = 'unknown'; VerifyStatus = 'warning' }
+    ) {
+        function global:Get-DuneVmStatus { @{ exists=$true; running=$true; ip='192.168.1.20' } }
+        function global:Invoke-DuneSshHidden { @{ Exit=0; Stdout='DST_SSH_OK' } }
+        function global:Invoke-V6Ssh { '0|Healthy' }
+        Mock Read-DuneConfig { @{ SshKey = $PSCommandPath; LastAppliedPublicIp = '8.8.8.8' } }
+        Mock Test-Path { $true }
+        Mock Save-DunePublicIpApplyState {}
+        Mock Get-DunePublicIpHostRouteEnabled { $true }
+        Mock Invoke-DunePublicIpHostRoute { $script:applyOrder.Add('host-route') }
+        $script:portVerdict = $Verdict
+        Mock Test-DunePortBuiltin { $script:portVerdict }
+        Mock Save-DuneConfig {}
+        $script:applyOrder = [Collections.Generic.List[string]]::new()
+        Mock Invoke-DunePublicIpRemoteScript {
+            param($Ip, $Script, $Arguments)
+            if ($Script -match 'DST_DNAT_INSTALLER') {
+                $script:applyOrder.Add('forwarding')
+                return 'DUNE_DNAT_WATCH_OK'
+            }
+            $Arguments[0] | Should -Be '8.8.4.4'
+            $Arguments[1] | Should -Be '192.168.1.20'
+            if ($Script -match 'NETWORK_DONE') {
+                $script:applyOrder.Add('network')
+                return 'NETWORK_DONE'
+            }
+            if ($Script -match 'BGIP_MUTATE_DONE') {
+                $script:applyOrder.Add('battlegroup')
+                return "BG_NS=funcom-test`nBG_NAME=test`nBGIP_MUTATE_DONE"
+            }
+            if ($Script -match 'BGIP_VERIFY_DONE') {
+                $script:applyOrder.Add('verify')
+                return "EXTERNALIP=8.8.4.4`nALIAS_OK=yes`nBG_PHASE=Healthy"
+            }
+            throw 'Unexpected remote apply operation'
+        }
+        $result = Invoke-DunePublicIpApply -PublicIp '8.8.4.4' -Mode $Mode -Hostname 'server.example.com'
+        $result.ok | Should -BeTrue -Because $result.error
+        ($result.steps | Where-Object id -EQ 'verify').status | Should -Be $VerifyStatus
+        Should -Invoke Test-DunePortBuiltin -Times 1 -Exactly -ParameterFilter { $PublicIp -eq '8.8.4.4' -and $Port -eq 31982 -and $Protocol -eq 'TCP' }
+        @($script:applyOrder) | Should -Be @('forwarding','host-route','network','battlegroup','verify')
+        Should -Invoke Save-DuneConfig -Times 1 -ParameterFilter {
+            $Config.LastAppliedPublicIp -eq '8.8.4.4' -and $Config.PublicIpMode -eq $Mode
+        }
+    }
+
+    It 'reports the final IP audit after restart (<FinalMismatch>)' -ForEach @(
+        @{ FinalMismatch = $false; ExpectedStatus = 'done' }
+        @{ FinalMismatch = $true; ExpectedStatus = 'warning' }
+    ) {
+        function global:Get-DuneVmStatus { @{ exists=$true; running=$true; ip='192.168.1.20' } }
+        function global:Invoke-DuneSshHidden { @{ Exit=0; Stdout='DST_SSH_OK' } }
+        function global:Invoke-V6Ssh { '0|Healthy' }
+        Mock Read-DuneConfig { @{ SshKey = $PSCommandPath; LastAppliedPublicIp = '8.8.8.8' } }
+        Mock Test-Path { $true }
+        Mock Save-DunePublicIpApplyState {}
+        Mock Invoke-DunePublicIpWatchdogRefresh { 'DUNE_DNAT_WATCH_OK' }
+        Mock Get-DunePublicIpHostRouteEnabled { $true }
+        Mock Invoke-DunePublicIpHostRoute {}
+        Mock Test-DunePortBuiltin { 'open' }
+        Mock Save-DuneConfig {}
+        $script:finalMismatch = $FinalMismatch
+        Mock Invoke-DunePublicIpRemoteScript {
+            param($Ip, $Script, $Arguments)
+            if ($Script -match 'NETWORK_DONE') { return 'NETWORK_DONE' }
+            if ($Script -match 'BGIP_MUTATE_DONE') {
+                # Status still advertises the old WAN address during mutation.
+                $Script | Should -Not -Match 'AUDIT_MISMATCH'
+                return "BG_NS=funcom-test`nBG_NAME=test`nBGIP_MUTATE_DONE"
+            }
+            if ($Script -match 'BGIP_VERIFY_DONE') {
+                $Script | Should -Match 'messageQueues.statuses'
+                $audit = if ($script:finalMismatch) { 'AUDIT_MISMATCH count=2' } else { 'AUDIT_OK all IP surfaces match 8.8.4.4' }
+                return "EXTERNALIP=8.8.4.4`nALIAS_OK=yes`nBG_PHASE=Healthy`n$audit"
+            }
+            throw 'Unexpected remote apply operation'
+        }
+        $result = Invoke-DunePublicIpApply -PublicIp '8.8.4.4'
+        $result.ok | Should -BeTrue -Because $result.error
+        $step = $result.steps | Where-Object id -EQ 'bg-ip'
+        $step.status | Should -Be $ExpectedStatus
+        if ($FinalMismatch) { $step.detail | Should -Match '2 IP-surface mismatch' }
+        else { $step.detail | Should -Not -Match 'mismatch' }
+    }
+
+    It 'refreshes the shipped installer with privilege and verified completion' {
+        Mock Invoke-DunePublicIpRemoteScript { 'DUNE_DNAT_WATCH_OK' }
+        Invoke-DunePublicIpWatchdogRefresh -Ip '192.168.1.20' | Should -Be 'DUNE_DNAT_WATCH_OK'
+        Should -Invoke Invoke-DunePublicIpRemoteScript -Times 1 -Exactly -ParameterFilter {
+            $Ip -eq '192.168.1.20' -and $TimeoutSec -eq 45 -and
+            $Script -match "sudo -n sh -s <<'DST_DNAT_INSTALLER'" -and
+            $Script -match 'ip -4 route get 1.1.1.1'
+        }
+    }
+
+    It 'rejects success-shaped output without the verified completion marker' {
+        Mock Invoke-DunePublicIpRemoteScript { 'service started' }
+        { Invoke-DunePublicIpWatchdogRefresh -Ip '192.168.1.20' } | Should -Throw '*did not verify healthy*'
+    }
+
+    It 'stops the Settings apply before IP mutations when forwarding refresh fails' {
+        function global:Get-DuneVmStatus { @{ exists=$true; running=$true; ip='192.168.1.20' } }
+        function global:Invoke-DuneSshHidden { @{ Exit=0; Stdout='DST_SSH_OK' } }
+        Mock Read-DuneConfig { @{ SshKey = $PSCommandPath; LastAppliedPublicIp = '' } }
+        Mock Test-Path { $true }
+        Mock Save-DunePublicIpApplyState {}
+        Mock Invoke-DunePublicIpWatchdogRefresh { throw 'forwarding refresh failed' }
+        Mock Invoke-DunePublicIpHostRoute {}
+        Mock Invoke-DunePublicIpRemoteScript {}
+        $result = Invoke-DunePublicIpApply -PublicIp '8.8.8.8'
+        $result.ok | Should -BeFalse
+        $result.error | Should -Be 'forwarding refresh failed'
+        ($result.steps | Select-Object -Last 1).id | Should -Be 'forwarding'
+        ($result.steps | Select-Object -Last 1).status | Should -Be 'failed'
+        Should -Invoke Invoke-DunePublicIpWatchdogRefresh -Times 1 -Exactly
+        Should -Invoke Invoke-DunePublicIpHostRoute -Times 0
+        Should -Invoke Invoke-DunePublicIpRemoteScript -Times 0
+    }
+}
+
+Describe 'DDNS hostname validation' {
+    It 'normalizes a valid hostname' {
+        $r = Test-DuneDdnsHostname -Hostname 'Your-Server.DDNS.net'
+        $r.ok | Should -BeTrue
+        $r.hostname | Should -Be 'your-server.ddns.net'
+    }
+
+    It 'rejects invalid hostname labels' {
+        (Test-DuneDdnsHostname -Hostname '-bad.example.com').ok | Should -BeFalse
+    }
+
+    It 'saves a normalized hostname without resolving it' {
+        $script:savedPublicIpConfig = $null
+        function Save-DuneConfig {
+            param([hashtable]$Config)
+            $script:savedPublicIpConfig = $Config
+            return $Config
+        }
+
+        $r = Save-DunePublicIpHostname -Hostname 'Your-Server.DDNS.net'
+
+        $r.ok | Should -BeTrue
+        $r.hostname | Should -Be 'your-server.ddns.net'
+        $script:savedPublicIpConfig.PublicIpMode | Should -Be 'ddns'
+        $script:savedPublicIpConfig.DdnsHostname | Should -Be 'your-server.ddns.net'
+    }
+}
+
+Describe 'DDNS hostname resolution resilience' {
+    It 'retries when the first lookup returns nothing (transient negative cache)' {
+        $script:resolveCalls = 0
+        Mock -CommandName Get-DuneHostnameIPv4Records -MockWith {
+            $script:resolveCalls++
+            if ($script:resolveCalls -lt 2) { return @() }
+            return @('50.123.76.96')
+        }
+        $r = Resolve-DunePublicIpHostname -Hostname 'dunecoastal.myvnc.com'
+        $r.ok | Should -BeTrue
+        $r.publicIp | Should -Be '50.123.76.96'
+        $script:resolveCalls | Should -BeGreaterThan 1
+    }
+
+    It 'fails cleanly after exhausting retries when nothing resolves' {
+        Mock -CommandName Get-DuneHostnameIPv4Records -MockWith { @() }
+        $r = Resolve-DunePublicIpHostname -Hostname 'dunecoastal.myvnc.com'
+        $r.ok | Should -BeFalse
+        $r.status | Should -Be 400
+        $r.message | Should -Match 'Could not resolve'
+    }
+
+    It 'ignores private answers and reports no usable public IP' {
+        Mock -CommandName Get-DuneHostnameIPv4Records -MockWith { @('192.168.1.219') }
+        $r = Resolve-DunePublicIpHostname -Hostname 'dunecoastal.myvnc.com'
+        $r.ok | Should -BeFalse
+        $r.message | Should -Match 'usable public IPv4'
+    }
+}
+
+Describe 'settings.conf renderer' {
+    It 'renders exactly four lines' {
+        $text = New-DuneSettingsConfText -Battlegroup 'sh-test' -Image 'registry.funcom.com/funcom/self-hosting/seabass-server:1988751-0-shipping' -VmIp '192.168.1.50' -PublicIp '8.8.8.8'
+        $lines = $text -split "`n"
+        $lines.Count | Should -Be 5
+        $lines[0] | Should -Be 'sh-test'
+        $lines[1] | Should -Be 'registry.funcom.com/funcom/self-hosting/seabass-server:1988751-0-shipping'
+        $lines[2] | Should -Be '192.168.1.50'
+        $lines[3] | Should -Be '8.8.8.8'
+        $lines[4] | Should -Be ''
+    }
+
+    It 'rejects embedded JSON image lines' {
+        { New-DuneSettingsConfText -Battlegroup 'sh-test' -Image '{"image":"bad"}' -VmIp '192.168.1.50' -PublicIp '8.8.8.8' } | Should -Throw
+    }
+}
+
+Describe 'Public IP Windows host route setting' {
+    It 'defaults to enabled and persists an explicit opt-out' {
+        Mock Read-DuneConfigRaw { [ordered]@{ PublicIpHostRouteEnabled = '' } }
+        Get-DunePublicIpHostRouteEnabled | Should -BeTrue
+
+        Mock Save-DuneConfig { param([hashtable]$Config) $script:savedHostRouteConfig = $Config }
+        Mock Read-DuneConfigRaw { [ordered]@{ PublicIpHostRouteEnabled = 'false' } }
+        Set-DunePublicIpHostRouteEnabled -Enabled $false | Should -BeFalse
+        $script:savedHostRouteConfig.PublicIpHostRouteEnabled | Should -Be 'false'
+    }
+
+    It 'removes only the exact public-IP route through the Dune VM interface' {
+        Mock Test-DuneAdminElevated { $true }
+        Mock Find-NetRoute { [pscustomobject]@{ InterfaceIndex = 42 } }
+        $exact = [pscustomobject]@{ DestinationPrefix = '203.0.113.10/32'; NextHop = '192.168.1.20'; InterfaceIndex = 42 }
+        $otherHop = [pscustomobject]@{ DestinationPrefix = '203.0.113.10/32'; NextHop = '192.168.1.1'; InterfaceIndex = 42 }
+        $otherInterface = [pscustomobject]@{ DestinationPrefix = '203.0.113.10/32'; NextHop = '192.168.1.20'; InterfaceIndex = 7 }
+        Mock Get-NetRoute { @($exact, $otherHop, $otherInterface) }
+        Mock Remove-NetRoute {}
+
+        $message = Remove-DunePublicIpHostRoute -PublicIp '203.0.113.10' -VmIp '192.168.1.20'
+
+        $message | Should -Match '^Removed route'
+        Should -Invoke Remove-NetRoute -Times 1 -Exactly -ParameterFilter {
+            $DestinationPrefix -eq '203.0.113.10/32' -and
+            $NextHop -eq '192.168.1.20' -and
+            $InterfaceIndex -eq 42
+        }
+    }
+
+    It 'leaves unrelated routes unchanged when no exact VM route exists' {
+        Mock Test-DuneAdminElevated { $true }
+        Mock Find-NetRoute { [pscustomobject]@{ InterfaceIndex = 42 } }
+        Mock Get-NetRoute {
+            [pscustomobject]@{ DestinationPrefix = '203.0.113.10/32'; NextHop = '192.168.1.1'; InterfaceIndex = 42 }
+        }
+        Mock Remove-NetRoute {}
+
+        $message = Remove-DunePublicIpHostRoute -PublicIp '203.0.113.10' -VmIp '192.168.1.20'
+
+        $message | Should -Match 'unrelated routes were left unchanged'
+        Should -Invoke Remove-NetRoute -Times 0 -Exactly
+    }
+}
+
+Describe 'Public IP diagnostic target selection' {
+    It 'checks a saved manual IP against the detected current WAN address' {
+        $target = Resolve-DunePublicIpDiagnosticTarget -Config @{
+            PublicIpMode = 'manual'
+            ManualPublicIp = '8.8.8.8'
+            LastAppliedPublicIp = '8.8.8.8'
+        } -VmDetectedIp '1.1.1.1' -HostDetectedIp '1.1.1.1'
+
+        $target.ip | Should -Be '1.1.1.1'
+        $target.source | Should -Be 'vm'
+    }
+
+    It 'uses detected WAN IP for non-manual configurations' {
+        $target = Resolve-DunePublicIpDiagnosticTarget -Config @{
+            PublicIpMode = 'ddns'
+            LastAppliedPublicIp = '8.8.8.8'
+        } -VmDetectedIp '1.1.1.1'
+
+        $target.ip | Should -Be '1.1.1.1'
+        $target.source | Should -Be 'vm'
+    }
+
+    It 'keeps the K3s internal address separate from the applied public address' {
+        $source = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\app\server\lib\PublicIp.ps1') -Raw
+        $source | Should -Match 'target="dynamic_ip=\$VM_IP"'
+        $source | Should -Match 'external_target="external_ip=\$NEW_IP # DST_MANAGED_EXTERNAL_IP"'
+        $source | Should -Match '(?s)/# DST_MANAGED_EXTERNAL_IP\$/ \{ next \}.*?print external_target.*?exec_done=1'
+        $source | Should -Not -Match "target='dynamic_ip=\$\(/sbin/ip addr show eth0"
+    }
+
+    It 'overrides a stale settings.conf external IP immediately before K3s starts' {
+        $awk = Get-Command awk -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $awk) {
+            $gitAwk = Join-Path $env:ProgramFiles 'Git\usr\bin\awk.exe'
+            if (Test-Path -LiteralPath $gitAwk) { $awk = Get-Item -LiteralPath $gitAwk }
+        }
+        if (-not $awk) {
+            Set-ItResult -Skipped -Because 'awk is unavailable on this test host'
+            return
+        }
+
+        $source = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\app\server\lib\PublicIp.ps1') -Raw
+        $match = [regex]::Match(
+            $source,
+            "(?s)# DST_K3S_RUNNER_AWK_BEGIN\s+awk -v target=`"\`$target`" -v external_target=`"\`$external_target`" '(?<program>.*?)'\s+`"\`$runner`" > /tmp/dst-runner\s+# DST_K3S_RUNNER_AWK_END"
+        )
+        $match.Success | Should -BeTrue
+
+        $programPath = Join-Path $TestDrive 'pin-runner.awk'
+        $runnerPath = Join-Path $TestDrive 'k3s-custom-runner.sh'
+        Set-Content -LiteralPath $programPath -Value $match.Groups['program'].Value -NoNewline
+        @'
+#!/bin/sh
+{ read -r bg_name; read -r image; read -r internal_ip; read -r external_ip; } < /home/dune/.dune/settings.conf
+dynamic_ip=203.0.113.9
+if [[ "$internal_ip" == "$external_ip" ]]; then
+  external_ip=$dynamic_ip
+fi
+exec /usr/local/bin/k3s server --node-ip=${dynamic_ip} --node-external-ip=${external_ip} --advertise-address=${dynamic_ip}
+'@ | Set-Content -LiteralPath $runnerPath -NoNewline
+
+        $awkPath = if ($awk.Source) { $awk.Source } else { $awk.FullName }
+        $result = & $awkPath -v 'target=dynamic_ip=192.0.2.20' -v 'external_target=external_ip=198.51.100.44 # DST_MANAGED_EXTERNAL_IP' -f $programPath $runnerPath
+        $LASTEXITCODE | Should -Be 0
+        $result | Should -Contain 'dynamic_ip=192.0.2.20'
+        $result | Should -Contain 'external_ip=198.51.100.44 # DST_MANAGED_EXTERNAL_IP'
+        [array]::IndexOf([string[]]$result, 'external_ip=198.51.100.44 # DST_MANAGED_EXTERNAL_IP') |
+            Should -BeLessThan ([array]::IndexOf([string[]]$result, 'exec /usr/local/bin/k3s server --node-ip=${dynamic_ip} --node-external-ip=${external_ip} --advertise-address=${dynamic_ip}'))
+        @($result | Where-Object { $_ -eq 'external_ip=198.51.100.44 # DST_MANAGED_EXTERNAL_IP' }).Count | Should -Be 1
+
+        $result | Set-Content -LiteralPath $runnerPath
+        $secondResult = & $awkPath -v 'target=dynamic_ip=192.0.2.20' -v 'external_target=external_ip=198.51.100.44 # DST_MANAGED_EXTERNAL_IP' -f $programPath $runnerPath
+        $LASTEXITCODE | Should -Be 0
+        @($secondResult | Where-Object { $_ -eq 'external_ip=198.51.100.44 # DST_MANAGED_EXTERNAL_IP' }).Count | Should -Be 1
+
+        # Execute the rewritten runner with stale legacy settings and a stand-in
+        # for K3s. Verify the arguments the process receives, not just its text.
+        $bashPath = Join-Path $env:ProgramFiles 'Git\bin\bash.exe'
+        if (Test-Path -LiteralPath $bashPath) {
+            $fixture = ($secondResult -join "`n") -replace '(?m)^\{ read .*settings.conf$', 'internal_ip=192.0.2.20; external_ip=203.0.113.9'
+            $fixture = $fixture.Replace('exec /usr/local/bin/k3s server ', "printf '%s\n' ")
+            $actualArgs = & $bashPath -c $fixture
+            $LASTEXITCODE | Should -Be 0
+            $actualArgs | Should -Contain '--node-ip=192.0.2.20'
+            $actualArgs | Should -Contain '--advertise-address=192.0.2.20'
+            $actualArgs | Should -Contain '--node-external-ip=198.51.100.44'
+        }
+    }
+}
+
+Describe 'Public IP apply state file' {
+    BeforeAll {
+        $script:tmpState = Join-Path ([System.IO.Path]::GetTempPath()) ("dst-apply-state-{0}.json" -f ([guid]::NewGuid()))
+        function global:Get-DunePublicIpApplyStatePath { $script:tmpState }
+    }
+    AfterAll {
+        Remove-Item -LiteralPath $script:tmpState -Force -ErrorAction SilentlyContinue
+        Remove-Item Function:\Get-DunePublicIpApplyStatePath -Force -ErrorAction SilentlyContinue
+    }
+    BeforeEach {
+        Remove-Item -LiteralPath $script:tmpState -Force -ErrorAction SilentlyContinue
+    }
+
+    It 'returns an idle state when no file exists' {
+        $st = Read-DunePublicIpApplyState
+        $st.phase | Should -Be 'idle'
+        $st.running | Should -BeFalse
+    }
+
+    It 'round-trips a saved state' {
+        Save-DunePublicIpApplyState -State @{ phase='running'; running=$true; publicIp='8.8.8.8'; steps=@(@{ id='a'; label='A'; status='done' }) }
+        $st = Read-DunePublicIpApplyState
+        $st.phase | Should -Be 'running'
+        $st.publicIp | Should -Be '8.8.8.8'
+        @($st.steps).Count | Should -Be 1
+    }
+
+    It 'self-heals a stale running flag (no progress for >15 min)' {
+        $old = (Get-Date).ToUniversalTime().AddMinutes(-20).ToString('o')
+        Save-DunePublicIpApplyState -State @{ phase='running'; running=$true; publicIp='8.8.8.8'; steps=@(); updated=$old }
+        $st = Get-DunePublicIpApplyStatus
+        $st.running | Should -BeFalse
+        $st.phase | Should -Be 'error'
+    }
+
+    It 'leaves a fresh running state alone' {
+        $fresh = (Get-Date).ToUniversalTime().ToString('o')
+        Save-DunePublicIpApplyState -State @{ phase='running'; running=$true; publicIp='8.8.8.8'; steps=@(); updated=$fresh }
+        $st = Get-DunePublicIpApplyStatus
+        $st.running | Should -BeTrue
+    }
+}
+
+Describe 'Mixed-bind game UDP bridge' {
+    BeforeAll {
+        $script:dnatWatchPath = Join-Path $PSScriptRoot '..\app\resources\remote-scripts\dune-dnat-watch-install.sh'
+        $script:dnatWatchSource = Get-Content -LiteralPath $script:dnatWatchPath -Raw
+        $script:publicIpSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\app\server\lib\PublicIp.ps1') -Raw
+        $script:launcherSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\dune-server.ps1') -Raw
+
+        # Get-Command sh can resolve to a non-Application command (alias/function)
+        # or multiple matches (array) on windows-latest runners, which makes
+        # `.FullName` invalid below. Resolve a single Application explicitly and
+        # re-wrap it with Get-Item so `.FullName` is always a real file path.
+        $shCommand = Get-Command sh -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($shCommand) {
+            $script:posixShell = Get-Item -LiteralPath $shCommand.Source
+        } else {
+            $gitShell = Join-Path $env:ProgramFiles 'Git\bin\sh.exe'
+            if (Test-Path -LiteralPath $gitShell) {
+                $script:posixShell = Get-Item -LiteralPath $gitShell
+            }
+        }
+    }
+
+    It 'uses the routed source when Kubernetes InternalIP is the public alias (<RouteSource>)' -ForEach @(
+        @{ RouteSource = '192.168.1.20'; Expected = '203.0.113.10 192.168.1.20' }
+        @{ RouteSource = ''; Expected = 'PRESERVED' }
+        @{ RouteSource = '999.1.1.1'; Expected = 'PRESERVED' }
+        @{ RouteSource = '203.0.113.10'; Expected = 'PRESERVED' }
+        @{ RouteSource = '192.168.1.20'; NodePublic = '198.51.100.11'; Expected = '198.51.100.11 192.168.1.20' }
+    ) {
+        if (-not $script:posixShell) {
+            Set-ItResult -Skipped -Because 'A POSIX shell is not installed.'
+            return
+        }
+        $watchMatch = [regex]::Match($script:dnatWatchSource,
+            '(?ms)^if ! cat > "\$WATCH_STAGE" <<''WATCHEOF''\r?\n(.*?)\r?\nWATCHEOF$')
+        $watchMatch.Success | Should -BeTrue
+        # Execute the installed worker's functions without starting its daemon.
+        $definitions = ($watchMatch.Groups[1].Value -split '(?m)^case "\$\{1:-\}" in')[0]
+        $harness = $definitions + "`n" + @'
+kube() {
+    case "$*" in
+        *'get nodes'*) printf 'ExternalIP=%s\nInternalIP=%s\n' "${HARNESS_NODE_PUBLIC:-203.0.113.10}" "${HARNESS_NODE_PUBLIC:-203.0.113.10}" ;;
+        *'get endpoints'*) return 1 ;;
+        *) return 1 ;;
+    esac
+}
+ip() {
+    [ "$*" = '-4 route get 1.1.1.1' ] || exit 2
+    [ -n "$HARNESS_ROUTE_SOURCE" ] || return 1
+    printf '1.1.1.1 via 192.168.1.1 dev eth0 src %s uid 0\n' "$HARNESS_ROUTE_SOURCE"
+}
+worker_owned() { [ "$1" = test-owner ]; }
+write_cluster_state() { printf '%s %s\n' "$1" "$2"; written=1; }
+log() { :; }
+_last_cluster_problem=''
+_last_rabbit_problem=''
+written=0
+run_cluster_pass test-owner
+[ "$written" = 1 ] || echo PRESERVED
+'@
+        $tempScript = Join-Path ([System.IO.Path]::GetTempPath()) ("dst-dnat-route-{0}.sh" -f [guid]::NewGuid())
+        $priorSource = $env:HARNESS_ROUTE_SOURCE
+        $priorPublic = $env:HARNESS_NODE_PUBLIC
+        try {
+            $env:HARNESS_ROUTE_SOURCE = $RouteSource
+            $env:HARNESS_NODE_PUBLIC = $NodePublic
+            [System.IO.File]::WriteAllText($tempScript, $harness, [System.Text.UTF8Encoding]::new($false))
+            $actual = @(& $script:posixShell.FullName $tempScript)
+            $LASTEXITCODE | Should -Be 0
+            $actual | Should -Be @($Expected)
+        } finally {
+            $env:HARNESS_ROUTE_SOURCE = $priorSource
+            $env:HARNESS_NODE_PUBLIC = $priorPublic
+            Remove-Item -LiteralPath $tempScript -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'rejects the obsolete public/public cache while retaining a valid bridge (<CachedVm>)' -ForEach @(
+        @{ CachedVm = '192.168.1.20'; Expected = 'ACCEPTED' }
+        @{ CachedVm = '203.0.113.10'; Expected = 'REJECTED' }
+        @{ CachedVm = '999.1.1.1'; Expected = 'REJECTED' }
+    ) {
+        if (-not $script:posixShell) {
+            Set-ItResult -Skipped -Because 'A POSIX shell is not installed.'
+            return
+        }
+        $definitions = foreach ($name in 'is_ipv4','load_cluster_state') {
+            $match = [regex]::Match($script:dnatWatchSource, "(?ms)^$name\(\) \{.*?^\}")
+            $match.Success | Should -BeTrue
+            $match.Value
+        }
+        $harness = ($definitions -join "`n") + "`n" + @'
+CLUSTER_STATE=$(mktemp) || exit 1
+trap 'rm -f "$CLUSTER_STATE"' EXIT
+printf '203.0.113.10\n%s\n' "$HARNESS_CACHED_VM" > "$CLUSTER_STATE"
+if load_cluster_state; then echo ACCEPTED; else echo REJECTED; fi
+'@
+        $tempScript = Join-Path ([System.IO.Path]::GetTempPath()) ("dst-dnat-cache-{0}.sh" -f [guid]::NewGuid())
+        $prior = $env:HARNESS_CACHED_VM
+        try {
+            $env:HARNESS_CACHED_VM = $CachedVm
+            [System.IO.File]::WriteAllText($tempScript, $harness, [System.Text.UTF8Encoding]::new($false))
+            $actual = @(& $script:posixShell.FullName $tempScript)
+            $LASTEXITCODE | Should -Be 0
+            $actual | Should -Be @($Expected)
+        } finally {
+            $env:HARNESS_CACHED_VM = $prior
+            Remove-Item -LiteralPath $tempScript -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'classifies each active port independently from one listener snapshot' {
+        if (-not $script:posixShell) {
+            Set-ItResult -Skipped -Because 'A POSIX shell is not installed.'
+            return
+        }
+
+        $functionMatch = [regex]::Match(
+            $script:dnatWatchSource,
+            '(?ms)^game_port_state\(\) \{\r?\n.*?^\}'
+        )
+        $functionMatch.Success | Should -BeTrue
+
+        $harness = @'
+PUB=203.0.113.10
+VM_IP=192.168.1.20
+_udp_snapshot='203.0.113.10:7777
+203.0.113.10:7779
+0.0.0.0:7779
+192.168.1.20:7780'
+'@ + "`n" + $functionMatch.Value + "`n" + @'
+game_port_state 7777
+game_port_state 7779
+game_port_state 7780
+game_port_state 7781
+'@
+
+        $tempScript = Join-Path ([System.IO.Path]::GetTempPath()) ("dst-dnat-state-{0}.sh" -f [guid]::NewGuid())
+        try {
+            [System.IO.File]::WriteAllText(
+                $tempScript,
+                $harness,
+                [System.Text.UTF8Encoding]::new($false)
+            )
+            $actual = @(& $script:posixShell.FullName $tempScript)
+            $LASTEXITCODE | Should -Be 0
+            $actual | Should -Be @('pub', 'pub', 'lan', 'none')
+        } finally {
+            Remove-Item -LiteralPath $tempScript -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'prefers the public listener when different processes dual-bind one port' {
+        $script:dnatWatchSource | Should -Match 'if \[ "\$_pub" = 1 \]; then'
+        $script:publicIpSource | Should -Match 'if \[ "\$_pub" = 1 \]; then echo pub; elif \[ "\$_lanwild" = 1 \]'
+        $script:publicIpSource | Should -Match 'if \[ "\$gb_pub" = 1 \]; then echo pub; elif \[ "\$gb_lanwild" = 1 \]'
+    }
+
+    It 'scopes watchdog cleanup to UDP DNAT rules for the Dune VM' {
+        $script:dnatWatchSource | Should -Match 'game_bridge_rules\(\)'
+        $script:dnatWatchSource | Should -Match 'grep -F -- "-d \$\{VM_IP\}/32"'
+        $script:dnatWatchSource | Should -Match "grep -F -- '-p udp'"
+        $script:dnatWatchSource | Should -Not -Match '(?m)iptables .* -I PREROUTING .*--dport "\$GAME_PORTS"'
+    }
+
+    It 'preserves the legacy bridge while listener state is fully indeterminate' {
+        $script:dnatWatchSource | Should -Match '\[ "\$_state" != none \] && \[ "\$_legacy_reconciled" = 0 \]'
+        $script:publicIpSource | Should -Match '\[ "\$_state" != none \] && \[ "\$_legacy_reconciled" = 0 \]'
+        $script:publicIpSource | Should -Match '\[ "\$gb_state" != none \] && \[ "\$gb_legacy_reconciled" = 0 \]'
+    }
+
+    It 'uses per-port reconciliation in both embedded Public IP apply paths' {
+        $script:publicIpSource | Should -Match 'game_port_state\(\)'
+        $script:publicIpSource | Should -Match 'gb_port_state\(\)'
+        $script:publicIpSource | Should -Match '_udp_snapshot=\$\(udp_listeners\)'
+        $script:publicIpSource | Should -Match 'gb_udp_snapshot=\$\(gb_listeners\)'
+        $script:publicIpSource | Should -Not -Match '(?m)iptables .* -I PREROUTING .*--dport "\$GAME_PORTS"'
+        $script:publicIpSource | Should -Not -Match '(?m)iptables .* -I PREROUTING .*--dport "\$GBPORTS"'
+    }
+
+    It 'polls one listener snapshot per pass at one-second cadence' {
+        $script:dnatWatchSource | Should -Match '(?m)^LOOP_SLEEP="\$\{DUNE_DNAT_LOOP_SLEEP:-1\}"$'
+        $script:dnatWatchSource | Should -Match '(?ms)^run_loop\(\) \{.*?reconcile_game_udp.*?sleep "\$LOOP_SLEEP".*?^\}'
+        $script:dnatWatchSource | Should -Match '(?ms)^reconcile_game_udp\(\) \{.*?_udp_snapshot=\$\(udp_listeners\).*?^\}'
+        ([regex]::Matches(
+            ([regex]::Match($script:dnatWatchSource, '(?ms)^reconcile_game_udp\(\) \{.*?^\}').Value),
+            '_udp_snapshot=\$\(udp_listeners\)'
+        )).Count | Should -Be 1
+    }
+
+    It 'bounds kubectl and isolates cluster refresh from the listener loop' {
+        $script:dnatWatchSource | Should -Match 'kube\(\) \{ timeout 3 "\$K3S" kubectl --request-timeout=2s'
+        $script:dnatWatchSource | Should -Match '(?ms)^run_cluster_pass\(\) \{.*?kube get nodes.*?kube get endpoints.*?^\}'
+        $script:dnatWatchSource | Should -Match '(?ms)^run_cluster_worker\(\) \{.*?run_cluster_pass.*?^\}'
+        $script:dnatWatchSource | Should -Match '(?ms)^run_loop\(\) \{.*?start_cluster_worker.*?while :; do.*?reconcile_game_udp.*?ensure_cluster_worker'
+        ([regex]::Match($script:dnatWatchSource, '(?ms)^run_loop\(\) \{.*?^\}').Value) |
+            Should -Not -Match '\bkube\b'
+    }
+
+    It 'installs supervised lifecycle and heartbeat health recovery' {
+        $script:dnatWatchSource | Should -Match '(?m)^supervisor=supervise-daemon$'
+        $script:dnatWatchSource | Should -Match '(?m)^command_args="--loop"$'
+        $script:dnatWatchSource | Should -Match '(?m)^respawn_delay=2$'
+        $script:dnatWatchSource | Should -Match '(?m)^respawn_max=0$'
+        $script:dnatWatchSource | Should -Match '(?m)^healthcheck_timer=5$'
+        $script:dnatWatchSource | Should -Match '(?ms)^healthcheck\(\) \{.*?--healthcheck.*?^\}'
+        $script:dnatWatchSource | Should -Match 'rc-update add dune-dnat-watch default'
+        $script:dnatWatchSource | Should -Match 'rc-service dune-dnat-watch restart'
+        $script:dnatWatchSource | Should -Match 'rc-service dune-dnat-watch status'
+    }
+
+    It 'uses cron only to recover the supervisor and never to overlap reconciliation' {
+        $script:dnatWatchSource | Should -Match 'CRON_LINE="\* \* \* \* \* \$WATCH --healthcheck .* \|\| \$SERVICE restart'
+        $script:dnatWatchSource | Should -Not -Match '(?m)^\(.*echo "\* \* \* \* \* \$WATCH"'
+    }
+
+    It 'uses kernel-released mutation serialization instead of a stale lock gate' {
+        $script:dnatWatchSource | Should -Match '(?m)^MUTATION_LOCK='
+        $script:dnatWatchSource | Should -Match 'flock -x 9'
+        $script:dnatWatchSource | Should -Match '(?ms)^worker_owned\(\) \{.*?OWNER_FILE.*?^\}'
+        $script:dnatWatchSource | Should -Match 'Ownership is checked after acquiring the kernel-released mutation lock'
+        $script:dnatWatchSource | Should -Match 'old listener exits before it can overlap'
+        $script:dnatWatchSource | Should -Match '(?m)^\s*trap cleanup_loop EXIT$'
+        $script:dnatWatchSource | Should -Match '(?ms)^write_cluster_state\(\) \{.*?flock -x 9.*?worker_owned.*?mv -f.*?CLUSTER_STATE.*?^\}'
+        $script:dnatWatchSource | Should -Match '(?ms)^write_listener_heartbeat\(\) \{.*?flock -x 9.*?worker_owned.*?mv -f.*?LISTENER_HEARTBEAT.*?^\}'
+        $script:dnatWatchSource | Should -Match '(?ms)^clear_owner\(\) \{.*?flock -x 9.*?worker_owned.*?rm -f "\$OWNER_FILE".*?^\}'
+    }
+
+    It 'fails installation unless generated files, runlevel, cron, and heartbeat are canonical' {
+        $script:dnatWatchSource | Should -Match 'chmod 0755 "\$WATCH_STAGE".*\|\| fail'
+        $script:dnatWatchSource | Should -Match 'sh -n "\$WATCH_STAGE".*\|\| fail'
+        $script:dnatWatchSource | Should -Match 'rc-update show default'
+        $script:dnatWatchSource | Should -Match 'grep -Fxc "\$CRON_LINE"'
+        $script:dnatWatchSource | Should -Match 'non-canonical dune-dnat-watch cron entry remains'
+        $script:dnatWatchSource | Should -Match 'replacement dune-dnat-watch did not publish a fresh owner and heartbeat'
+        $script:dnatWatchSource | Should -Match '(?ms)^replacement_healthy\(\) \{.*?PRE_CUTOVER_OWNER.*?LISTENER_HEARTBEAT.*?-nt "\$CUTOVER_MARKER".*?^\}'
+    }
+
+    It 'stages atomically, supports legacy no-arg cron, and rolls migration back' {
+        $script:dnatWatchSource | Should -Match 'WATCH_STAGE="\$\{WATCH\}\.new\.\$\{TXN\}"'
+        $script:dnatWatchSource | Should -Match 'mv -f "\$WATCH_STAGE" "\$WATCH"'
+        $script:dnatWatchSource | Should -Match "(?m)^\s*--once\|''\) run_once ;;\s*$"
+        $script:dnatWatchSource | Should -Match '(?ms)^restore_prior_state\(\) \{.*?WATCH_BACKUP.*?SERVICE_BACKUP.*?CRON_BACKUP.*?PRIOR_SERVICE_RUNNING.*?^\}'
+        $script:dnatWatchSource | Should -Match 'stop_watch_processes \|\| fail "prior DNAT watchdog processes did not fully exit"'
+        $script:dnatWatchSource | Should -Match '(?ms)^MIGRATION_STARTED=0.*?retired legacy /usr/local/sbin/dune-mq-dnat-sync.sh'
+    }
+
+    It 'rejects a fresh stale pre-cutover heartbeat and accepts only a different new token' {
+        if (-not $script:posixShell) {
+            Set-ItResult -Skipped -Because 'A POSIX shell is not installed.'
+            return
+        }
+
+        $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("dst-dnat-rollback-{0}" -f [guid]::NewGuid())
+        $bin = Join-Path $tempRoot 'bin'
+        $live = Join-Path $tempRoot 'live'
+        $state = Join-Path $tempRoot 'state'
+        New-Item -ItemType Directory -Path $bin,$live,$state -Force | Out-Null
+        $escapedRoot = $tempRoot.Replace("'", "'\''")
+        $posixRoot = (& $script:posixShell.FullName -lc "cygpath -u '$escapedRoot'").Trim()
+
+        $installerPath = Join-Path $tempRoot 'install.sh'
+        $watchPath = Join-Path $live 'watch.sh'
+        $servicePath = Join-Path $live 'service'
+        $cronPath = Join-Path $tempRoot 'crontab'
+        $oldWatch = "#!/bin/sh`necho OLD_WATCH`n"
+        $oldService = "#!/bin/sh`necho OLD_SERVICE`n"
+        $oldCron = "7 * * * * $posixRoot/live/watch.sh`n13 * * * * echo unrelated`n"
+        $process = $null
+        $successProcess = $null
+
+        try {
+            [System.IO.File]::WriteAllText($installerPath, $script:dnatWatchSource, [System.Text.UTF8Encoding]::new($false))
+            [System.IO.File]::WriteAllText($watchPath, $oldWatch, [System.Text.UTF8Encoding]::new($false))
+            [System.IO.File]::WriteAllText($servicePath, $oldService, [System.Text.UTF8Encoding]::new($false))
+            [System.IO.File]::WriteAllText($cronPath, $oldCron, [System.Text.UTF8Encoding]::new($false))
+            [System.IO.File]::WriteAllText((Join-Path $tempRoot 'service-state'), "running`n", [System.Text.UTF8Encoding]::new($false))
+            [System.IO.File]::WriteAllText((Join-Path $tempRoot 'runlevel-state'), "default`n", [System.Text.UTF8Encoding]::new($false))
+            [System.IO.File]::WriteAllText((Join-Path $tempRoot 'crontab-writes'), "0`n", [System.Text.UTF8Encoding]::new($false))
+            [System.IO.File]::WriteAllText((Join-Path $state 'owner'), "old-owner`n", [System.Text.UTF8Encoding]::new($false))
+            [System.IO.File]::WriteAllText((Join-Path $state 'listener.heartbeat'), "old-owner`n", [System.Text.UTF8Encoding]::new($false))
+
+            [System.IO.File]::WriteAllText((Join-Path $bin 'crontab'), @'
+#!/bin/sh
+case "${1:-}" in
+  -l) [ -f "$FAKE_CRON_FILE" ] && cat "$FAKE_CRON_FILE" && exit 0; exit 1 ;;
+  -r) rm -f "$FAKE_CRON_FILE"; exit 0 ;;
+esac
+_n=$(cat "$FAKE_CRON_WRITES")
+_n=$((_n + 1))
+printf '%s\n' "$_n" > "$FAKE_CRON_WRITES"
+if [ "$1" = - ]; then
+  cat > "$FAKE_CRON_FILE"
+else
+  cp "$1" "$FAKE_CRON_FILE"
+fi
+'@, [System.Text.UTF8Encoding]::new($false))
+            [System.IO.File]::WriteAllText((Join-Path $bin 'rc-service'), @'
+#!/bin/sh
+case "$2" in
+  status) grep -qx running "$FAKE_SERVICE_STATE" ;;
+  stop) echo stopped > "$FAKE_SERVICE_STATE" ;;
+  start) echo running > "$FAKE_SERVICE_STATE" ;;
+  restart)
+    echo running > "$FAKE_SERVICE_STATE"
+    if [ "${FAKE_CREATE_HEARTBEAT:-no}" = yes ]; then
+      printf '%s\n' new-owner > "$FAKE_STATE_DIR/owner"
+      printf '%s\n' new-owner > "$FAKE_STATE_DIR/listener.heartbeat"
+    fi
+    ;;
+  *) exit 1 ;;
+esac
+'@, [System.Text.UTF8Encoding]::new($false))
+            [System.IO.File]::WriteAllText((Join-Path $bin 'rc-update'), @'
+#!/bin/sh
+case "$1" in
+  show) grep -qx default "$FAKE_RUNLEVEL_STATE" && echo "dune-dnat-watch | default" ;;
+  add) echo default > "$FAKE_RUNLEVEL_STATE" ;;
+  del) echo absent > "$FAKE_RUNLEVEL_STATE" ;;
+  *) exit 1 ;;
+esac
+'@, [System.Text.UTF8Encoding]::new($false))
+            foreach ($name in 'supervise-daemon','timeout','flock') {
+                [System.IO.File]::WriteAllText((Join-Path $bin $name), "#!/bin/sh`nexit 0`n", [System.Text.UTF8Encoding]::new($false))
+            }
+            [System.IO.File]::WriteAllText((Join-Path $bin 'stat'), "#!/bin/sh`ndate +%s`n", [System.Text.UTF8Encoding]::new($false))
+            [System.IO.File]::WriteAllText((Join-Path $bin 'pgrep'), "#!/bin/sh`nexit 1`n", [System.Text.UTF8Encoding]::new($false))
+            [System.IO.File]::WriteAllText((Join-Path $bin 'k3s'), "#!/bin/sh`nexit 0`n", [System.Text.UTF8Encoding]::new($false))
+
+            & $script:posixShell.FullName -lc "chmod +x '$posixRoot/install.sh' '$posixRoot/live/watch.sh' '$posixRoot/live/service' '$posixRoot/bin/'*"
+            $LASTEXITCODE | Should -Be 0
+
+            $psi = [System.Diagnostics.ProcessStartInfo]::new()
+            $psi.FileName = $script:posixShell.FullName
+            $psi.ArgumentList.Add("$posixRoot/install.sh")
+            $psi.UseShellExecute = $false
+            $psi.RedirectStandardOutput = $true
+            $psi.RedirectStandardError = $true
+            $psi.Environment['DUNE_DNAT_PATH_PREFIX'] = "$posixRoot/bin"
+            $psi.Environment['DUNE_DNAT_INSTALL_WATCH'] = "$posixRoot/live/watch.sh"
+            $psi.Environment['DUNE_DNAT_INSTALL_SERVICE'] = "$posixRoot/live/service"
+            $psi.Environment['DUNE_DNAT_INSTALL_LOG'] = "$posixRoot/install.log"
+            $psi.Environment['DUNE_DNAT_K3S'] = "$posixRoot/bin/k3s"
+            $psi.Environment['DUNE_DNAT_STATE_DIR'] = "$posixRoot/state"
+            $psi.Environment['FAKE_CRON_FILE'] = "$posixRoot/crontab"
+            $psi.Environment['FAKE_CRON_WRITES'] = "$posixRoot/crontab-writes"
+            $psi.Environment['FAKE_SERVICE_STATE'] = "$posixRoot/service-state"
+            $psi.Environment['FAKE_RUNLEVEL_STATE'] = "$posixRoot/runlevel-state"
+            $psi.Environment['FAKE_STATE_DIR'] = "$posixRoot/state"
+            $psi.Environment['FAKE_CREATE_HEARTBEAT'] = 'no'
+
+            $process = [System.Diagnostics.Process]::new()
+            $process.StartInfo = $psi
+            $process.Start() | Should -BeTrue
+            $process.WaitForExit(15000) | Should -BeTrue
+            $process.ExitCode | Should -Be 1
+            $failureOutput = $process.StandardOutput.ReadToEnd()
+            $failureOutput | Should -Match 'DUNE_DNAT_WATCH_FAILED'
+            $failureOutput | Should -Not -Match 'DUNE_DNAT_WATCH_OK'
+
+            (Get-Content -LiteralPath $watchPath -Raw) | Should -Be $oldWatch
+            (Get-Content -LiteralPath $servicePath -Raw) | Should -Be $oldService
+            (Get-Content -LiteralPath $cronPath -Raw) | Should -Be $oldCron
+            (Get-Content -LiteralPath (Join-Path $tempRoot 'service-state') -Raw).Trim() | Should -Be 'running'
+            (Get-Content -LiteralPath (Join-Path $tempRoot 'runlevel-state') -Raw).Trim() | Should -Be 'default'
+            Test-Path -LiteralPath (Join-Path $state 'owner') | Should -BeFalse
+            Test-Path -LiteralPath (Join-Path $state 'listener.heartbeat') | Should -BeFalse
+            @(Get-ChildItem -LiteralPath $live -Filter '*.new.*').Count | Should -Be 0
+            @(Get-ChildItem -LiteralPath $live -Filter '*.previous.*').Count | Should -Be 0
+
+            [System.IO.File]::WriteAllText((Join-Path $state 'owner'), "old-owner`n", [System.Text.UTF8Encoding]::new($false))
+            [System.IO.File]::WriteAllText((Join-Path $state 'listener.heartbeat'), "old-owner`n", [System.Text.UTF8Encoding]::new($false))
+            $psi.Environment['FAKE_CREATE_HEARTBEAT'] = 'yes'
+            $successProcess = [System.Diagnostics.Process]::new()
+            $successProcess.StartInfo = $psi
+            $successProcess.Start() | Should -BeTrue
+            $successProcess.WaitForExit(15000) | Should -BeTrue
+            $successOutput = $successProcess.StandardOutput.ReadToEnd()
+            $successError = $successProcess.StandardError.ReadToEnd()
+            $successProcess.ExitCode | Should -Be 0 -Because "stdout: $successOutput stderr: $successError"
+            $successOutput | Should -Match 'DUNE_DNAT_WATCH_OK'
+            (Get-Content -LiteralPath (Join-Path $state 'owner') -Raw).Trim() | Should -Be 'new-owner'
+            (Get-Content -LiteralPath (Join-Path $state 'listener.heartbeat') -Raw).Trim() | Should -Be 'new-owner'
+        } finally {
+            if ($successProcess -and -not $successProcess.HasExited) { $successProcess.Kill($true) }
+            if ($process -and -not $process.HasExited) { $process.Kill($true) }
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'rate-limits persistent iptables insertion failures' {
+        $script:dnatWatchSource | Should -Match '(?ms)^log_reconcile_failure\(\) \{.*?-ge 60.*?^\}'
+        $script:dnatWatchSource | Should -Match 'log_reconcile_failure "failed to install game-UDP bridge'
+        $script:dnatWatchSource | Should -Match 'log_reconcile_failure "failed to install rabbitmq DNAT'
+    }
+
+    It 'refreshes supervision before every battlegroup start or restart path' {
+        $script:launcherSource | Should -Match "Invoke-DuneDnatWatchdogInstall -Ip \`$ip -Phase 'pre-startup'"
+        $script:launcherSource | Should -Match "Invoke-DuneDnatWatchdogInstall -Ip \`$ip -Phase 'pre-reboot-start'"
+        $script:launcherSource | Should -Match 'Invoke-DuneDnatWatchdogInstall -Ip \$ip -Phase "pre-\$cmdName"'
+        $script:launcherSource | Should -Not -Match 'Invoke-DuneDnatWatchdogInstall -Ip \$ip -Phase "post-\$cmdName"'
+    }
+
+    It 'keeps legacy no-argument cron functional with one safe reconciliation pass' {
+        if (-not $script:posixShell) {
+            Set-ItResult -Skipped -Because 'A POSIX shell is not installed.'
+            return
+        }
+
+        $watchMatch = [regex]::Match(
+            $script:dnatWatchSource,
+            '(?ms)^if ! cat > "\$WATCH_STAGE" <<''WATCHEOF''\r?\n(.*?)\r?\nWATCHEOF$'
+        )
+        $watchMatch.Success | Should -BeTrue
+
+        $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("dst-dnat-once-{0}" -f [guid]::NewGuid())
+        $bin = Join-Path $tempRoot 'bin'
+        $state = Join-Path $tempRoot 'state'
+        New-Item -ItemType Directory -Path $bin,$state -Force | Out-Null
+        $escapedRoot = $tempRoot.Replace("'", "'\''")
+        $posixRoot = (& $script:posixShell.FullName -lc "cygpath -u '$escapedRoot'").Trim()
+        $watchPath = Join-Path $tempRoot 'watch.sh'
+        $iptablesLog = Join-Path $tempRoot 'iptables.log'
+        $process = $null
+
+        try {
+            [System.IO.File]::WriteAllText($watchPath, $watchMatch.Groups[1].Value, [System.Text.UTF8Encoding]::new($false))
+            [System.IO.File]::WriteAllText((Join-Path $state 'cluster.state'), "203.0.113.10`n192.168.1.20`n", [System.Text.UTF8Encoding]::new($false))
+            [System.IO.File]::WriteAllText((Join-Path $bin 'ss'), @'
+#!/bin/sh
+echo "UNCONN 0 0 203.0.113.10:7782 0.0.0.0:*"
+'@, [System.Text.UTF8Encoding]::new($false))
+            [System.IO.File]::WriteAllText((Join-Path $bin 'iptables'), @'
+#!/bin/sh
+case " $* " in
+  *" -C "*) exit 1 ;;
+  *" -I "*) echo "$*" >> "$HARNESS_IPTABLES_LOG"; exit 0 ;;
+  *) exit 0 ;;
+esac
+'@, [System.Text.UTF8Encoding]::new($false))
+            foreach ($name in 'flock','k3s') {
+                [System.IO.File]::WriteAllText((Join-Path $bin $name), "#!/bin/sh`nexit 0`n", [System.Text.UTF8Encoding]::new($false))
+            }
+
+            & $script:posixShell.FullName -lc "chmod +x '$posixRoot/watch.sh' '$posixRoot/bin/'*"
+            $LASTEXITCODE | Should -Be 0
+
+            $psi = [System.Diagnostics.ProcessStartInfo]::new()
+            $psi.FileName = $script:posixShell.FullName
+            $psi.ArgumentList.Add("$posixRoot/watch.sh")
+            $psi.UseShellExecute = $false
+            $psi.RedirectStandardOutput = $true
+            $psi.RedirectStandardError = $true
+            $psi.Environment['DUNE_DNAT_PATH_PREFIX'] = "$posixRoot/bin"
+            $psi.Environment['DUNE_DNAT_K3S'] = "$posixRoot/bin/k3s"
+            $psi.Environment['DUNE_DNAT_STATE_DIR'] = "$posixRoot/state"
+            $psi.Environment['DUNE_DNAT_LOG'] = "$posixRoot/watch.log"
+            $psi.Environment['HARNESS_IPTABLES_LOG'] = "$posixRoot/iptables.log"
+
+            $process = [System.Diagnostics.Process]::new()
+            $process.StartInfo = $psi
+            $process.Start() | Should -BeTrue
+            $process.WaitForExit(10000) | Should -BeTrue
+            $process.ExitCode | Should -Be 0
+
+            Get-Content -LiteralPath $iptablesLog -Raw | Should -Match '-I PREROUTING 1 -d 192\.168\.1\.20 -p udp --dport 7782 -j DNAT --to-destination 203\.0\.113\.10'
+            Test-Path -LiteralPath (Join-Path $state 'owner') | Should -BeFalse
+        } finally {
+            if ($process -and -not $process.HasExited) { $process.Kill($true) }
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'keeps listener passes running while the bounded cluster worker stalls' {
+        if (-not $script:posixShell) {
+            Set-ItResult -Skipped -Because 'A POSIX shell is not installed.'
+            return
+        }
+
+        $watchMatch = [regex]::Match(
+            $script:dnatWatchSource,
+            '(?ms)^if ! cat > "\$WATCH_STAGE" <<''WATCHEOF''\r?\n(.*?)\r?\nWATCHEOF$'
+        )
+        $watchMatch.Success | Should -BeTrue
+
+        $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("dst-dnat-loop-{0}" -f [guid]::NewGuid())
+        $bin = Join-Path $tempRoot 'bin'
+        $state = Join-Path $tempRoot 'state'
+        New-Item -ItemType Directory -Path $bin,$state -Force | Out-Null
+
+        $escapedRoot = $tempRoot.Replace("'", "'\''")
+        $posixRoot = (& $script:posixShell.FullName -lc "cygpath -u '$escapedRoot'").Trim()
+        $watchPath = Join-Path $tempRoot 'watch.sh'
+        $ssCount = Join-Path $tempRoot 'ss-count'
+        $iptablesLog = Join-Path $tempRoot 'iptables.log'
+        $ruleState = Join-Path $tempRoot 'rule-state'
+        $k3sStarted = Join-Path $tempRoot 'k3s-started'
+        $process = $null
+        $replacement = $null
+
+        try {
+            [System.IO.File]::WriteAllText($watchPath, $watchMatch.Groups[1].Value, [System.Text.UTF8Encoding]::new($false))
+            [System.IO.File]::WriteAllText((Join-Path $state 'cluster.state'), "203.0.113.10`n192.168.1.20`n", [System.Text.UTF8Encoding]::new($false))
+            [System.IO.File]::WriteAllText((Join-Path $bin 'ss'), @'
+#!/bin/sh
+_n=0
+[ ! -r "$HARNESS_SS_COUNT" ] || _n=$(cat "$HARNESS_SS_COUNT")
+_n=$((_n + 1))
+printf '%s\n' "$_n" > "$HARNESS_SS_COUNT"
+echo "UNCONN 0 0 203.0.113.10:7782 0.0.0.0:*"
+'@, [System.Text.UTF8Encoding]::new($false))
+            [System.IO.File]::WriteAllText((Join-Path $bin 'iptables'), @'
+#!/bin/sh
+echo "$HARNESS_ID $*" >> "$HARNESS_IPTABLES_LOG"
+case " $* " in
+  *" -C "*) [ -f "$HARNESS_RULE_STATE" ] && exit 0 || exit 1 ;;
+  *" -I "*) : > "$HARNESS_RULE_STATE"; exit 0 ;;
+  *) exit 0 ;;
+esac
+'@, [System.Text.UTF8Encoding]::new($false))
+            [System.IO.File]::WriteAllText((Join-Path $bin 'k3s'), @'
+#!/bin/sh
+: > "$HARNESS_K3S_STARTED"
+sleep 2
+exit 1
+'@, [System.Text.UTF8Encoding]::new($false))
+            [System.IO.File]::WriteAllText((Join-Path $bin 'flock'), @'
+#!/bin/sh
+exit 0
+'@, [System.Text.UTF8Encoding]::new($false))
+
+            & $script:posixShell.FullName -lc "chmod +x '$posixRoot/watch.sh' '$posixRoot/bin/ss' '$posixRoot/bin/iptables' '$posixRoot/bin/k3s' '$posixRoot/bin/flock'"
+            $LASTEXITCODE | Should -Be 0
+
+            function Start-DnatHarness([string] $Id, [int] $MaxPasses) {
+                $psi = [System.Diagnostics.ProcessStartInfo]::new()
+                $psi.FileName = $script:posixShell.FullName
+                $psi.ArgumentList.Add("$posixRoot/watch.sh")
+                $psi.ArgumentList.Add('--loop')
+                $psi.UseShellExecute = $false
+                $psi.RedirectStandardOutput = $true
+                $psi.RedirectStandardError = $true
+                $psi.Environment['DUNE_DNAT_PATH_PREFIX'] = "$posixRoot/bin"
+                $psi.Environment['DUNE_DNAT_K3S'] = "$posixRoot/bin/k3s"
+                $psi.Environment['DUNE_DNAT_STATE_DIR'] = "$posixRoot/state"
+                $psi.Environment['DUNE_DNAT_LOG'] = "$posixRoot/watch.log"
+                $psi.Environment['DUNE_DNAT_LOOP_SLEEP'] = '0.1'
+                $psi.Environment['DUNE_DNAT_CLUSTER_SLEEP'] = '5'
+                $psi.Environment['DUNE_DNAT_MAX_PASSES'] = "$MaxPasses"
+                $psi.Environment['HARNESS_ID'] = $Id
+                $psi.Environment['HARNESS_SS_COUNT'] = "$posixRoot/ss-count"
+                $psi.Environment['HARNESS_IPTABLES_LOG'] = "$posixRoot/iptables.log"
+                $psi.Environment['HARNESS_RULE_STATE'] = "$posixRoot/rule-state"
+                $psi.Environment['HARNESS_K3S_STARTED'] = "$posixRoot/k3s-started"
+                $p = [System.Diagnostics.Process]::new()
+                $p.StartInfo = $psi
+                if (-not $p.Start()) { throw "Failed to start $Id harness" }
+                return $p
+            }
+
+            $process = Start-DnatHarness -Id old -MaxPasses 20
+            for ($i = 0; $i -lt 100 -and -not (Test-Path -LiteralPath $ruleState); $i++) {
+                Start-Sleep -Milliseconds 25
+            }
+            Test-Path -LiteralPath $ruleState | Should -BeTrue
+            $oldOwner = Get-Content -LiteralPath (Join-Path $state 'owner') -Raw
+            $oldInsertBefore = @((Get-Content -LiteralPath $iptablesLog) | Where-Object {
+                $_ -match '^old .* -I PREROUTING .*--dport 7782 '
+            }).Count
+
+            $replacement = Start-DnatHarness -Id new -MaxPasses 3
+            for ($i = 0; $i -lt 100; $i++) {
+                $newOwner = Get-Content -LiteralPath (Join-Path $state 'owner') -Raw -ErrorAction SilentlyContinue
+                if ($newOwner -and $newOwner -ne $oldOwner) { break }
+                Start-Sleep -Milliseconds 25
+            }
+            $newOwner | Should -Not -Be $oldOwner
+            Remove-Item -LiteralPath $ruleState -Force
+
+            $replacement.WaitForExit(10000) | Should -BeTrue
+            $replacement.ExitCode | Should -Be 0
+            $process.WaitForExit(10000) | Should -BeTrue
+            $process.ExitCode | Should -Be 0
+
+            [int](Get-Content -LiteralPath $ssCount -Raw) | Should -BeGreaterThan 3
+            Test-Path -LiteralPath $k3sStarted | Should -BeTrue
+            $iptables = Get-Content -LiteralPath $iptablesLog
+            @($iptables | Where-Object {
+                $_ -match '^new .* -I PREROUTING 1 -d 192\.168\.1\.20 -p udp --dport 7782 -j DNAT --to-destination 203\.0\.113\.10'
+            }).Count | Should -Be 1
+            @($iptables | Where-Object {
+                $_ -match '^old .* -I PREROUTING .*--dport 7782 '
+            }).Count | Should -Be $oldInsertBefore
+        } finally {
+            if ($replacement -and -not $replacement.HasExited) { $replacement.Kill($true) }
+            if ($process -and -not $process.HasExited) { $process.Kill($true) }
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+
+Describe 'P34 advertised-address diagnostic' {
+    BeforeAll {
+        Import-DstLib 'Database.ps1'
+        function global:Get-DuneDbContext { }
+        function global:Invoke-DuneSqlRaw { param($Ip, $Sql, [switch]$Csv, $TimeoutSec) }
+        function global:Invoke-V6Ssh { param($Ip, $Cmd, $TimeoutSec) }
+        function global:Get-DunePublicIp { }
+    }
+    BeforeEach {
+        Mock Get-DuneDbContext { @{ ok = $true; ip = '192.168.23.219' } }
+        Mock Read-DuneConfig { @{ PublicIpMode = 'auto' } }
+        Mock Get-DunePublicIp { '' }
+        Mock Invoke-V6Ssh {
+            if ($Cmd -match 'flowtype=Login') { return 'POD=sh-test-sg-survival-1-pod-1 LOGIN=2 FAIL=2' }
+            return 'PUB=50.123.67.198', 'EXT=50.123.67.198', 'DC=50.123.67.198'
+        }
+        Mock Invoke-DuneSqlRaw {
+            return "map,server_id,ip,game_port,igw_ip,igw_port,ready,alive`nDeepDesert_1,dd,50.123.67.198,7779,192.168.23.219,7890,t,t`nOvermap,om,50.123.67.198,7777,192.168.23.219,7888,t,t`nSurvival_1,hb,50.123.67.198,7778,192.168.23.219,7889,t,t"
+        }
+    }
+    It 'does not diagnose a router fault from historical login failures on one map' {
+        $result = Get-DuneP34Diagnostic
+        $result.verdict | Should -Be 'healthy'
+        @($result.maps).Count | Should -Be 3
+        $result.summary | Should -Not -Match 'single port|2G2|every connection'
+        Should -Invoke Invoke-V6Ssh -Times 0 -ParameterFilter { $Cmd -match 'flowtype=Login' }
+    }
+    It 'still identifies an actual advertised public IP mismatch' {
+        Mock Invoke-V6Ssh { 'PUB=50.123.67.199', 'EXT=50.123.67.198', 'DC=50.123.67.198' }
+        $result = Get-DuneP34Diagnostic
+        $result.verdict | Should -Be 'stale-ip'
+        $result.staleFarmIp | Should -BeTrue
+    }
+    It 'flags ready maps at the saved manual IP when the internet IP changed (<Detection>)' -ForEach @(
+        @{ Detection = 'vm' }
+        @{ Detection = 'host' }
+    ) {
+        Mock Read-DuneConfig { @{ PublicIpMode = 'manual'; ManualPublicIp = '50.123.67.198'; LastAppliedPublicIp = '50.123.67.198' } }
+        if ($Detection -eq 'vm') {
+            Mock Invoke-V6Ssh { 'PUB=98.36.235.161', 'EXT=50.123.67.198', 'DC=50.123.67.198' }
+        } else {
+            Mock Invoke-V6Ssh { 'EXT=50.123.67.198', 'DC=50.123.67.198' }
+            Mock Get-DunePublicIp { '98.36.235.161' }
+        }
+        $result = Get-DuneP34Diagnostic
+        $result.verdict | Should -Be 'stale-ip'
+        $result.serversReady | Should -BeTrue
+        $result.vmPublicIp | Should -Be '98.36.235.161'
+        $result.publicIpSource | Should -Be $Detection
+        $result.staleFarmIp | Should -BeTrue
+        $result.staleK3sIp | Should -BeTrue
+        $result.datacenterStale | Should -BeTrue
+        $result.summary | Should -Not -Match 'correct public IP|are ready'
+    }
+    It 'keeps matching manual and detected addresses healthy' {
+        Mock Read-DuneConfig { @{ PublicIpMode = 'manual'; ManualPublicIp = '50.123.67.198' } }
+        (Get-DuneP34Diagnostic).verdict | Should -Be 'healthy'
+    }
+    It 'does not certify a saved address when live detection fails' -ForEach @(
+        @{ Mode = 'manual' }
+        @{ Mode = 'ddns' }
+    ) {
+        $script:diagnosticMode = $Mode
+        Mock Read-DuneConfig { @{ PublicIpMode = $script:diagnosticMode; ManualPublicIp = '50.123.67.198'; LastAppliedPublicIp = '50.123.67.198' } }
+        Mock Invoke-V6Ssh { 'EXT=50.123.67.198', 'DC=50.123.67.198' }
+        $result = Get-DuneP34Diagnostic
+        $result.verdict | Should -Be 'unknown'
+        $result.summary | Should -Match 'current internet IP could not be detected'
+    }
+}

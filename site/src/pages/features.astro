@@ -1,0 +1,122 @@
+---
+import Base from "../layouts/Base.astro";
+import PageHeader from "../components/PageHeader.astro";
+import Screenshot from "../components/Screenshot.astro";
+
+const base = import.meta.env.BASE_URL;
+const sections = [
+  {
+    id: "operations", title: "Your next task, within reach", img: "operations.png",
+    location: "Server Management → Operations",
+    body: "Search everyday server tasks and go straight to server controls, Backups, Server updates, Live Map, and maintenance tools. Owner and local-only controls follow the same access permissions as their full pages.",
+    alt: "Current Operations workspace with searchable tasks and direct Backups and Server updates shortcuts",
+    caption: "Current interface preview with no server connected. Task links open the existing guarded controls.",
+  },
+  {
+    id: "command-deck", title: "Command Deck", img: "command-deck.png",
+    location: "Opt in with Try Command Deck",
+    body: "An optional World/dashboard view and focused workspaces put the next task within reach. The persistent bottom dock includes the static DD Atlas, Solo Mode, Players, Bases, Economy, Commands, and Database. Find a tool searches the wider collection. Classic remains the default, and the Classic control takes you back.",
+    alt: "Command Deck World view with the Arrakis globe, no connected map instances, and the DD Atlas shortcut in the bottom dock",
+    caption: "Offline World view. The globe organizes navigation and reported status; it is not live game geography.",
+  },
+  {
+    id: "health", title: "Classic, still at home", img: "server-health.png",
+    location: "Classic → Server Overview",
+    body: "Keep the familiar sidebar and Server Health dashboard. When connected, inspect VM, battlegroup, database, gateway, game pods, public ports, and restart information. Raw output and log exports help distinguish missing information from a healthy server.",
+    alt: "Current Classic Server Health dashboard showing a not-configured VM",
+    caption: "Classic's default layout with no server connected. This is not a running-server status report.",
+  },
+  {
+    id: "maps", title: "Read the Deep Desert", img: "dd-seed-maps.png",
+    location: "Bottom dock → DD Atlas",
+    body: "Browse all twelve Coriolis layouts using sector grids, POI filters, and confidence notes. The shipped DD Atlas is a static community reference, not a live map. When server seed data is available, DST distinguishes a running Deep Desert seed from the next farm seed; exact POI placement remains approximate.",
+    alt: "Static DD Atlas seed zero with the sector grid, seven POI filters, seed selector, and shipped static atlas label",
+    caption: "Shipped static seed 0 data. The current server seed is deliberately unavailable in this offline capture.",
+  },
+  {
+    id: "gameplay", title: "People, not database rows", img: "gameplay-admin.png",
+    location: "Players → Player admin",
+    body: "Find a character and open Manage Player for focused administration: inventory, currency, progression, identity, and supported gameplay actions. Availability and offline checks remain authoritative. Teleport tracing records diagnostic evidence; it does not guarantee that the game executes a teleport.",
+    alt: "Current Players workspace with the shipped sample-character directory, faction summary, and explicit demo-data notice",
+    caption: "DST's built-in fictional sample roster. No real player or account data is shown.",
+  },
+  {
+    id: "blueprints", title: "Give your bases a second life", img: "blueprints.png",
+    location: "Bases → Blueprints",
+    body: "Blueprints has a dedicated place inside Bases, alongside base management and storage inventory. Inspect the catalogue and use supported import/export tools without hunting through unrelated pages. Import stays unavailable until the live game database is connected.",
+    alt: "Bases workspace with the Blueprints tab selected, an empty demo catalogue, and import unavailable while disconnected",
+    caption: "Empty offline catalogue. No player buildings, imported designs, or successful writes are simulated.",
+  },
+  {
+    id: "solo", title: "Your save. Your pace.", img: "solo-overview.png",
+    location: "Solo Mode · host-local",
+    body: "Choose Solo only in the v16 installer to open local save tools directly, without server setup, VM discovery, port checks, or server background jobs. Self-Hosted + Solo includes the same Solo tools. Manage a supported Retail Solo save with validation, retained backups, settings, inventory, currencies, specialization levels, and Journey unlocks. Older or custom save formats may not be compatible. Save mutations require the game to be closed.",
+    alt: "Current Solo overview with a fictional example save",
+    caption: "Current Solo interface with a fictional example save. No real save or account data is shown or edited.",
+  },
+  {
+    id: "gameconfig", title: "Deliberate configuration", img: "game-config.png",
+    location: "Server Controls → Server Settings",
+    body: "Review official server controls, advanced INI settings, gameplay compatibility, and recovery tools in one place. Review changes before applying them. Client Engine.ini management is a separate opt-in, and recovered, unconfirmed controls belong in Experimental Lab.",
+    alt: "Current Server Settings workspace with official and advanced server controls",
+    caption: "Current Server Settings while disconnected. Live configuration values are not loaded.",
+  },
+  {
+    id: "commands", title: "The right controls, together", img: "commands.png",
+    location: "Bottom dock → Commands",
+    body: "Command Deck groups commands by Battlegroup, VM & Power, Configuration, Network & Access, Database, Logs & Files, and Terminals & Tools. Review each action's requirements before running it. The custom layout remains available when you prefer your own arrangement.",
+    alt: "Command Deck Commands workspace with category navigation and unavailable server operations in an offline preview",
+    caption: "Shipped command catalogue with server-dependent operations disabled. Nothing is executed.",
+  },
+  {
+    id: "database", title: "A recovery path before a change", img: "database.png",
+    location: "Server Data → Database",
+    body: "Back up, restore, import, mirror, inspect, and query PostgreSQL without tracking pod names. SQL starts read-only, and restore guidance calls out Deep Desert risks. Backups are recovery tools, not a promise that a destructive restore can be undone.",
+    alt: "Database workspace displaying Deep Desert restore safety and disabled backup and restore actions without a running VM",
+    caption: "Offline database workspace. No backups, queries, or restore results are fabricated.",
+  },
+  {
+    id: "settings", title: "Keep control of access", img: "settings.png",
+    location: "System → Settings",
+    body: "Choose appearance, updates, host configuration, and remote access in one place. Browser Portal with Tailscale Funnel is the recommended remote path. Legacy Cloudflare configuration is retained but its portal is disabled by default until explicitly re-enabled in local Settings.",
+    alt: "Current Settings workspace focused on appearance and theme choices",
+    caption: "Current appearance controls. No host paths, account credentials, remote URLs, or QR codes are exposed.",
+  },
+];
+---
+
+<Base title="Explore v16 — DST" description="Tour DST v16: dedicated Solo-only installation, local save tools, Self-Hosted administration, Command Deck, and Browser Portal.">
+  <PageHeader title="A field guide to your control room." intro="The same DST tools, a clearer view of the work. Classic remains the default; opt into Command Deck when you want the World view and focused workspaces." />
+  <section class="site-width pb-16">
+    <p class="surface-note !mt-0 !border-t-0 !pt-0">Screenshots show the current v16.6.9 interface preview. Server tools are disconnected; Solo uses a fictional example save, Players uses DST’s built-in sample roster, and DD Atlas shows static reference data. Select an image to inspect it.</p>
+    <nav class="tour-nav" aria-label="Feature tour">
+      {sections.map(s => <a href={`#${s.id}`}>{s.id === "command-deck" ? "Command Deck" : s.id === "maps" ? "DD Atlas" : s.location.split(" → ").at(-1)?.split(" · ")[0]}</a>)}
+      <a href="#browser-portal">Browser Portal</a>
+    </nav>
+    {sections.map(s => (
+      <section id={s.id} class="tour-section">
+        <div class="tour-intro">
+          <div><h2>{s.title}</h2><div class="tour-location">{s.location}</div></div>
+          <p>{s.body}</p>
+        </div>
+        <Screenshot src={`${base}screenshots/${s.img}`} alt={s.alt} caption={s.caption} width={1600} height={1000} />
+        {s.id === "solo" && (
+          <>
+            <a href={`${base}install#solo`} class="text-link">Install Solo only →</a>
+            <Screenshot src={`${base}screenshots/solo-settings.png`} alt="Current Solo Settings with Blueprint building and Retail Engine settings" caption="Current Solo settings with a fictional example save. No settings are applied in this preview." width={1600} height={1000} />
+            <Screenshot src={`${base}screenshots/solo-progression.png`} alt="Current Solo Progression with character levels and skill controls" caption="Current Solo progression controls with fictional example values. No progression action is executed." width={1600} height={1000} />
+          </>
+        )}
+      </section>
+    ))}
+    <section id="browser-portal" class="tour-section phone-tour">
+      <div>
+        <h2>Leave the desk.<br />Keep the portal.</h2>
+        <p>The full Browser Portal adapts to phones, tablets, and PCs. Host-created Owner and Admin accounts have different permissions; local-only tools such as Solo Mode and PowerShell stay on the host.</p>
+        <p>For new remote setups, use Tailscale Funnel. No separate native mobile app is required. Enabling account login retires the legacy paired native-app path.</p>
+        <a class="text-link" href={`${base}remote`}>Set up Browser Portal <span aria-hidden="true">↗</span></a>
+      </div>
+      <Screenshot src={`${base}screenshots/browser-portal.png`} alt="Browser Portal's responsive sign-in form on a phone-sized screen, with empty username and password fields" caption="Phone sign-in at 390 × 844. No account or remote session is connected." width={390} height={844} />
+    </section>
+  </section>
+</Base>

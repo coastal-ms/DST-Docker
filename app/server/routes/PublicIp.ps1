@@ -1,0 +1,172 @@
+# Public IP / DDNS Settings API.
+
+Register-DuneRoute -Method GET -Path '/api/widget/status' -Handler {
+    param($req, $res, $routeParams, $body)
+    try { Write-DuneJson -Response $res -Body (Get-DuneWidgetStatus) }
+    catch { Write-DuneError -Response $res -Status 503 -Message 'Map status unavailable.' }
+}
+
+function Get-DunePublicIpBodyValue {
+    param($Body, [string]$Name, [object]$Default = $null)
+    if (-not $Body) { return $Default }
+    if ($Body -is [hashtable] -and $Body.ContainsKey($Name)) { return $Body[$Name] }
+    if ($Body.PSObject.Properties[$Name]) { return $Body.$Name }
+    return $Default
+}
+
+Register-DuneRoute -Method GET -Path '/api/public-ip/status' -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        Write-DuneJson -Response $res -Body (Get-DunePublicIpStatus)
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message $_.Exception.Message
+    }
+}
+
+Register-DuneRoute -Method GET -Path '/api/public-ip/p34' -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        Write-DuneJson -Response $res -Body (Get-DuneP34Diagnostic)
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message $_.Exception.Message
+    }
+}
+
+Register-DuneRoute -Method POST -Path '/api/public-ip/resolve' -Handler {
+    param($req, $res, $routeParams, $body)
+    $hostname = [string](Get-DunePublicIpBodyValue -Body $body -Name 'hostname' -Default '')
+    $r = Resolve-DunePublicIpHostname -Hostname $hostname
+    if (-not $r.ok) { Write-DuneError -Response $res -Status ([int]$r.status) -Message $r.message; return }
+    Write-DuneJson -Response $res -Body @{ ok=$true; hostname=$r.hostname; publicIp=$r.publicIp; candidates=@($r.candidates) }
+}
+
+Register-DuneRoute -Method POST -Path '/api/public-ip/hostname' -Handler {
+    param($req, $res, $routeParams, $body)
+    $hostname = [string](Get-DunePublicIpBodyValue -Body $body -Name 'hostname' -Default '')
+    $r = Save-DunePublicIpHostname -Hostname $hostname
+    if (-not $r.ok) { Write-DuneError -Response $res -Status ([int]$r.status) -Message $r.message; return }
+    Write-DuneJson -Response $res -Body @{ ok=$true; hostname=$r.hostname }
+}
+
+Register-DuneRoute -Method POST -Path '/api/public-ip/validate' -Handler {
+    param($req, $res, $routeParams, $body)
+    $publicIp = [string](Get-DunePublicIpBodyValue -Body $body -Name 'publicIp' -Default '')
+    # Allow re-validating an already-applied IP: this is a repair/re-assert tool,
+    # so re-applying the same IP (when the VM config has drifted) is valid.
+    $v = Assert-DuneManualPublicIp -PublicIp $publicIp -AllowUnchanged
+    if (-not $v.ok) { Write-DuneError -Response $res -Status ([int]$v.status) -Message $v.message; return }
+    Write-DuneJson -Response $res -Body @{ ok=$true; publicIp=$v.publicIp }
+}
+
+Register-DuneRoute -Method GET -Path '/api/public-ip/apply/status' -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        Write-DuneJson -Response $res -Body (Get-DunePublicIpApplyStatus)
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message $_.Exception.Message
+    }
+}
+
+Register-DuneRoute -Method POST -Path '/api/public-ip/apply' -Handler {
+    param($req, $res, $routeParams, $body)
+    if (-not $body) { Write-DuneError -Response $res -Status 400 -Message 'Missing JSON body.'; return }
+    $mode = [string](Get-DunePublicIpBodyValue -Body $body -Name 'mode' -Default '')
+    $confirmed = [bool](Get-DunePublicIpBodyValue -Body $body -Name 'confirmed' -Default $false)
+    $hostRouteEnabled = [bool](Get-DunePublicIpBodyValue -Body $body -Name 'hostRouteEnabled' -Default $true)
+    if (-not $confirmed) { Write-DuneError -Response $res -Status 400 -Message 'Confirmation is required before applying a public IP change.'; return }
+    if (-not (Test-DuneDisruptiveActionGuard -Req $req -Res $res -Action 'applying the public IP and restarting the battlegroup')) { return }
+
+    $target = ''
+    if ($mode -eq 'ddns') {
+        $hostname = [string](Get-DunePublicIpBodyValue -Body $body -Name 'hostname' -Default '')
+        $resolvedIp = [string](Get-DunePublicIpBodyValue -Body $body -Name 'resolvedIp' -Default '')
+        $r = Resolve-DunePublicIpHostname -Hostname $hostname
+        if (-not $r.ok) { Write-DuneError -Response $res -Status ([int]$r.status) -Message $r.message; return }
+        if (@($r.candidates) -notcontains $resolvedIp) {
+            Write-DuneError -Response $res -Status 409 -Message "DDNS changed before apply. $($r.hostname) now resolves to $(@($r.candidates) -join ', '), not $resolvedIp."
+            return
+        }
+        $v = Assert-DuneManualPublicIp -PublicIp $resolvedIp -AllowUnchanged
+        if (-not $v.ok) { Write-DuneError -Response $res -Status ([int]$v.status) -Message $v.message; return }
+        $target = $resolvedIp
+        [void](Set-DunePublicIpHostRouteEnabled -Enabled $hostRouteEnabled)
+        $launch = Start-DunePublicIpApplyAsync -PublicIp $target -Mode 'ddns' -Hostname $r.hostname
+    }
+    elseif ($mode -eq 'manual') {
+        $publicIp = [string](Get-DunePublicIpBodyValue -Body $body -Name 'publicIp' -Default '')
+        $v = Assert-DuneManualPublicIp -PublicIp $publicIp -AllowUnchanged
+        if (-not $v.ok) { Write-DuneError -Response $res -Status ([int]$v.status) -Message $v.message; return }
+        $target = $v.publicIp
+        [void](Set-DunePublicIpHostRouteEnabled -Enabled $hostRouteEnabled)
+        $launch = Start-DunePublicIpApplyAsync -PublicIp $target -Mode 'manual'
+    }
+    else {
+        Write-DuneError -Response $res -Status 400 -Message "Unknown public IP mode: $mode"
+        return
+    }
+
+    if (-not $launch.ok) {
+        $status = if ($launch.running) { 409 } else { 500 }
+        Write-DuneError -Response $res -Status $status -Message ([string]$launch.error)
+        return
+    }
+    # 202 Accepted: the apply runs in the background; the UI polls
+    # GET /api/public-ip/apply/status for streamed progress.
+    Write-DuneJson -Response $res -Status 202 -Body @{ ok=$true; running=$true; publicIp=$target }
+}
+
+# ---- Server-browser Ping fix (HOST_DATACENTER_ID) ---------------------------
+# Reads the BG CR's HOST_DATACENTER_ID / HOST_DATACENTER_IP_ADDRESS from the 3
+# utility pods so the Settings card can pre-populate its inputs and show whether
+# the CR already carries the recommended "dune-awakening" id. Read-only.
+Register-DuneRoute -Method GET -Path '/api/public-ip/datacenter-id' -Handler {
+    param($req, $res, $routeParams, $body)
+    $vm = $null
+    try { $vm = Get-DuneVmStatus } catch {}
+    if (-not $vm -or -not $vm.running -or -not $vm.ip) {
+        Write-DuneError -Response $res -Status 503 -Message 'VM is not running.'
+        return
+    }
+    try {
+        $status = Get-DuneBrowserPingStatus -Ip $vm.ip
+        Write-DuneJson -Response $res -Body $status
+    } catch {
+        Write-DuneError -Response $res -Status 502 -Message "Datacenter ID status read failed: $($_.Exception.Message)"
+    }
+}
+
+# Patches HOST_DATACENTER_ID (and, if publicIp is supplied and differs,
+# HOST_DATACENTER_IP_ADDRESS) on the 3 utility pods of the battlegroup CR, then
+# restarts the battlegroup so FLS re-registers. Patching the CR is the
+# persistent lever (it is the operator's desired state), so the value survives
+# pod/BG restarts. Only runs on an explicit user request from the Settings card
+# -- never auto-applied. Setting the id to "dune-awakening" is the live-verified
+# fix that makes the in-game server-browser Ping column populate.
+Register-DuneRoute -Method POST -Path '/api/public-ip/datacenter-id' -Handler {
+    param($req, $res, $routeParams, $body)
+    $vm = $null
+    try { $vm = Get-DuneVmStatus } catch {}
+    if (-not $vm -or -not $vm.running -or -not $vm.ip) {
+        Write-DuneError -Response $res -Status 503 -Message 'VM is not running.'
+        return
+    }
+    $dcId  = [string](Get-DunePublicIpBodyValue -Body $body -Name 'datacenterId' -Default '')
+    $pubIp = [string](Get-DunePublicIpBodyValue -Body $body -Name 'publicIp'     -Default '')
+    if (-not $dcId) {
+        Write-DuneError -Response $res -Status 400 -Message 'Body must include "datacenterId".'
+        return
+    }
+    if (-not (Test-DuneDisruptiveActionGuard -Req $req -Res $res -Ip $vm.ip -Action 'reconciling the server-browser identity and restarting the battlegroup')) { return }
+    try {
+        $result = Invoke-DuneBrowserPingReconcile -Ip $vm.ip -DatacenterId $dcId -PublicIp $pubIp
+        if (-not $result.ok) {
+            $status = 502
+            if ($result.ContainsKey('status') -and $result.status) { $status = [int]$result.status }
+            Write-DuneError -Response $res -Status $status -Message $result.message
+            return
+        }
+        Write-DuneJson -Response $res -Body $result
+    } catch {
+        Write-DuneError -Response $res -Status 502 -Message "Reconcile failed: $($_.Exception.Message)"
+    }
+}

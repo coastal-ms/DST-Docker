@@ -1,0 +1,344 @@
+﻿# Ports — external TCP port checks; UDP is marked as skipped.
+# Cache confirmed open checks for six hours. Retry an inconclusive check on
+# the next status poll (at least ten seconds apart). Retry a closed
+# result after one minute so a stopped/restarting server can recover its badge.
+
+$script:DunePortCheckCache    = $null
+$script:DunePortCheckPubIp    = $null
+$script:DunePortCheckFetched  = [datetime]::MinValue
+$script:DunePortCheckTtlSecs  = 21600
+$script:DunePortCheckBgState  = $null
+$script:DunePortCheckPortSignature = $null
+
+# Invalidate the cached port-check results so the next status call re-evaluates
+# from scratch. Called after a config save changes the port-check settings
+# (mode / URL template / UDP visibility) so the change takes effect immediately
+# instead of after the six-hour TTL.
+function Reset-DunePortCheckCache {
+    $table = $script:DuneApiLockTable
+    if ($table) {
+        [System.Threading.Monitor]::Enter($table.SyncRoot)
+        try {
+            if (-not $table.ContainsKey('ports.gate')) { $table['ports.gate'] = [object]::new() }
+            $gate = $table['ports.gate']
+        } finally { [System.Threading.Monitor]::Exit($table.SyncRoot) }
+        [System.Threading.Monitor]::Enter($gate)
+        try {
+            $table.Remove('ports.snapshot')
+            $script:DunePortCheckCache = $null
+            $script:DunePortCheckPubIp = $null
+            $script:DunePortCheckFetched = [datetime]::MinValue
+            $script:DunePortCheckBgState = $null
+        } finally { [System.Threading.Monitor]::Exit($gate) }
+        return
+    }
+    $script:DunePortCheckCache   = $null
+    $script:DunePortCheckPubIp   = $null
+    $script:DunePortCheckFetched = [datetime]::MinValue
+    $script:DunePortCheckBgState = $null
+}
+
+$script:DuneRequiredPorts = @(
+    [pscustomobject]@{ Port = 7777;  Protocol = 'UDP'; Label = 'Game (first)' }
+    [pscustomobject]@{ Port = 7810;  Protocol = 'UDP'; Label = 'Game (last)' }
+    [pscustomobject]@{ Port = 31982; Protocol = 'TCP'; Label = 'RabbitMQ' }
+)
+
+function Get-DunePublicIp {
+    try {
+        $ip = (Invoke-WebRequest -Uri 'https://api.ipify.org' -UseBasicParsing -TimeoutSec 5).Content.Trim()
+        if ($ip -match '^\d+\.\d+\.\d+\.\d+$') { return $ip }
+    } catch {}
+    return $null
+}
+
+function Get-DuneCheckHostTcpVerdict {
+    param($Result, [string[]]$Nodes)
+    if (-not $Result -or -not $Nodes -or $Nodes.Count -eq 0) { return 'unknown' }
+
+    $successes = 0
+    $failures = 0
+    foreach ($node in $Nodes) {
+        $property = $Result.PSObject.Properties[$node]
+        if (-not $property -or $null -eq $property.Value) { continue }
+        $entry = @($property.Value)[0]
+        if ($entry -and $entry.address -and $null -ne $entry.time) {
+            $successes++
+        } elseif ($entry -and "$($entry.error)" -match '(?i)\bconnection refused\b') {
+            $failures++
+        }
+    }
+
+    if ($successes -gt 0) { return 'open' }
+    if ($failures -eq $Nodes.Count) { return 'closed' }
+    return 'unknown'
+}
+
+function Test-DunePortCheckHost {
+    param([string]$PublicIp, [int]$Port)
+    if (-not $PublicIp) { return 'unknown' }
+
+    # Documented API contract: https://check-host.net/about/api
+    # Three independent nodes avoid treating one regional failure as closed.
+    $headers = @{
+        'Accept'     = 'application/json'
+        'User-Agent' = 'DuneServerTool/port-check'
+    }
+    try {
+        $target = [uri]::EscapeDataString("${PublicIp}:$Port")
+        $startResponse = Invoke-WebRequest `
+            -Uri "https://check-host.net/check-tcp?host=$target&max_nodes=3" `
+            -UseBasicParsing -TimeoutSec 8 -ErrorAction Stop -Headers $headers
+        $start = "$($startResponse.Content)" | ConvertFrom-Json
+        if ($start.ok -ne 1 -or -not $start.request_id -or -not $start.nodes) { return 'unknown' }
+        $nodes = @($start.nodes.PSObject.Properties.Name)
+        if ($nodes.Count -eq 0) { return 'unknown' }
+
+        $requestId = [uri]::EscapeDataString("$($start.request_id)")
+        # External nodes complete asynchronously. A pending result is not a
+        # verdict; allow slower observers time to report before returning unknown.
+        for ($attempt = 1; $attempt -le 10; $attempt++) {
+            if ($attempt -gt 1) { Start-Sleep -Milliseconds 1000 }
+            $resultResponse = Invoke-WebRequest `
+                -Uri "https://check-host.net/check-result/$requestId" `
+                -UseBasicParsing -TimeoutSec 8 -ErrorAction Stop -Headers $headers
+            $result = "$($resultResponse.Content)" | ConvertFrom-Json
+            $verdict = Get-DuneCheckHostTcpVerdict -Result $result -Nodes $nodes
+            if ($verdict -ne 'unknown') { return $verdict }
+        }
+    } catch {}
+    return 'unknown'
+}
+
+function Test-DunePortCanYouSeeMe {
+    param([string]$PublicIp, [int]$Port)
+    # Alternate external observer. Parses the success/error verdict line out
+    # of the response HTML and leaves transport or markup failures unknown.
+    try {
+        $resp = Invoke-WebRequest -Uri 'https://canyouseeme.org/' `
+            -Method POST -UseBasicParsing -TimeoutSec 12 -ErrorAction Stop `
+            -Body @{ port = "$Port"; IP = $PublicIp } `
+            -Headers @{
+                'User-Agent' = 'Mozilla/5.0 (dune-server-tool)'
+                'Referer'    = 'https://canyouseeme.org/'
+            }
+        $body = "$($resp.Content)"
+        $targetPattern = 'service on\s*<b>(?<ip>[^<]+)</b>\s*on port\s*\(<b>(?<port>\d+)</b>\)'
+        $success = [regex]::Match($body, '(?is)<b>Success:</b>.{0,80}?I can see your ' + $targetPattern)
+        if ($success.Success -and $success.Groups['ip'].Value.Trim() -eq $PublicIp -and
+            [int]$success.Groups['port'].Value -eq $Port) { return 'open' }
+        $refused = [regex]::Match($body, '(?is)<b>Error:</b>.{0,80}?I could not see your ' + $targetPattern + '.{0,200}?\bReason:\s*(?:<[^>]+>\s*)*Connection refused\b')
+        if ($refused.Success -and $refused.Groups['ip'].Value.Trim() -eq $PublicIp -and
+            [int]$refused.Groups['port'].Value -eq $Port) { return 'closed' }
+        return 'unknown'
+    } catch {
+        return 'unknown'
+    }
+}
+
+function Test-DunePortCheckTool {
+    param([string]$PublicIp, [int]$Port)
+    if (-not $PublicIp) { return 'unknown' }
+    # This observer checks the caller's public address. Require the response
+    # to name our requested target so remote/proxied hosts cannot be misreported.
+    try {
+        $resp = Invoke-WebRequest -Uri 'https://www.portchecktool.com/' `
+            -Method POST -UseBasicParsing -TimeoutSec 12 -ErrorAction Stop `
+            -Body @{ port = "$Port"; submit = 'Check your port' } `
+            -Headers @{ 'User-Agent' = 'Mozilla/5.0 (dune-server-tool)' }
+        $success = [regex]::Match("$($resp.Content)", '(?is)<strong>Success!</strong>.{0,100}?I can see your service on\s*<b>(?<ip>[^<]+)</b>\s*on port\s*\(<b>(?<port>\d+)</b>\)')
+        if ($success.Success -and $success.Groups['ip'].Value.Trim() -eq $PublicIp -and
+            [int]$success.Groups['port'].Value -eq $Port) { return 'open' }
+    } catch {}
+    return 'unknown'
+}
+
+function Test-DunePortBuiltin {
+    param([string]$PublicIp, [int]$Port, [string]$Protocol)
+    # No public UDP checker available across free services - mark as skipped
+    # and let the UI render "UDP - skipped" so the user knows to check manually.
+    if ($Protocol -ne 'TCP') { return 'udp-skip' }
+    if (-not $PublicIp) { return 'unknown' }
+    # Prefer the observer that does not depend on Check-Host's request quota.
+    # A positive connection wins; an inconclusive observer is never "closed".
+    $primary = Test-DunePortCanYouSeeMe -PublicIp $PublicIp -Port $Port
+    if ($primary -eq 'open') { return 'open' }
+    $secondary = Test-DunePortCheckTool -PublicIp $PublicIp -Port $Port
+    if ($secondary -eq 'open') { return 'open' }
+    $fallback = Test-DunePortCheckHost -PublicIp $PublicIp -Port $Port
+    if ($fallback -eq 'open') { return 'open' }
+    if ($primary -eq 'closed' -or $fallback -eq 'closed') { return 'closed' }
+    return 'unknown'
+}
+
+function Test-DunePortCustom {
+    param([string]$Template, [string]$PublicIp, [int]$Port, [string]$Protocol)
+    if (-not $Template -or -not $PublicIp) { return 'unknown' }
+    $url = $Template.Replace('{ip}', $PublicIp).Replace('{port}', "$Port").Replace('{protocol}', $Protocol.ToLower())
+    try {
+        $resp = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 8 -ErrorAction Stop
+        $body = "$($resp.Content)"
+        if ($body -match '(?i)"open"\s*:\s*true|"reachable"\s*:\s*true|"status"\s*:\s*"open"|\bopen\b')   { return 'open' }
+        if ($body -match '(?i)"open"\s*:\s*false|"reachable"\s*:\s*false|"status"\s*:\s*"closed"|\bclosed\b') { return 'closed' }
+        return 'unknown'
+    } catch {
+        return 'unknown'
+    }
+}
+
+function Get-DunePortStatus {
+    param([switch]$Force, [string]$BattlegroupState, [object[]]$RequiredPorts)
+    $table = $script:DuneApiLockTable
+    if (-not $table) { return Get-DunePortStatusCore -Force:$Force -BattlegroupState $BattlegroupState -RequiredPorts $RequiredPorts }
+    # Share one result across HTTP workers and serialize checks so simultaneous
+    # status refreshes cannot dispatch duplicate external probes.
+    [System.Threading.Monitor]::Enter($table.SyncRoot)
+    try {
+        if (-not $table.ContainsKey('ports.gate')) { $table['ports.gate'] = [object]::new() }
+        $gate = $table['ports.gate']
+    } finally { [System.Threading.Monitor]::Exit($table.SyncRoot) }
+    [System.Threading.Monitor]::Enter($gate)
+    try {
+        $entry = $table['ports.snapshot']
+        $script:DunePortCheckCache = if ($entry) { $entry.Results } else { $null }
+        $script:DunePortCheckPubIp = if ($entry) { $entry.PublicIp } else { $null }
+        $script:DunePortCheckFetched = if ($entry) { $entry.Fetched } else { [datetime]::MinValue }
+        $script:DunePortCheckBgState = if ($entry) { $entry.BattlegroupState } else { $null }
+        $script:DunePortCheckPortSignature = if ($entry) { $entry.PortSignature } else { $null }
+        $status = Get-DunePortStatusCore -Force:$Force -BattlegroupState $BattlegroupState -RequiredPorts $RequiredPorts
+        if ($script:DunePortCheckCache) {
+            $table['ports.snapshot'] = @{
+                Results = $script:DunePortCheckCache
+                PublicIp = $script:DunePortCheckPubIp
+                Fetched = $script:DunePortCheckFetched
+                BattlegroupState = $script:DunePortCheckBgState
+                PortSignature = $script:DunePortCheckPortSignature
+            }
+        }
+        return $status
+    } finally { [System.Threading.Monitor]::Exit($gate) }
+}
+
+function Get-DunePortStatusCore {
+    param([switch]$Force, [string]$BattlegroupState, [object[]]$RequiredPorts)
+    if ((Get-Command Test-DuneSoloInstallation -ErrorAction SilentlyContinue) -and (Test-DuneSoloInstallation)) { return $null }
+    $cfg  = Read-DuneConfig
+    $mode = if ($cfg.PortCheckMode) { $cfg.PortCheckMode } else { 'builtin' }
+    $hasCustomUrl = -not [string]::IsNullOrWhiteSpace("$($cfg.PortCheckUrlTemplate)")
+
+    # UDP game ports (7777-7810) cannot be verified by the built-in/free TCP
+    # checkers, so their indicators are HIDDEN by default to avoid confusion
+    # ("not green" was being read as a fault). They only appear when the user
+    # has BOTH configured a custom UDP-capable checker (custom mode + a URL
+    # template) AND opted in via the ShowUdpPortStatus flag. Otherwise we strip
+    # UDP from the results so every render site naturally hides them.
+    $showUdp = $false
+    if ($mode -eq 'custom' -and $hasCustomUrl) {
+        $v = "$($cfg.ShowUdpPortStatus)".Trim().ToLowerInvariant()
+        $showUdp = $v -in @('1','true','yes','on')
+    }
+
+    if ($mode -eq 'disabled') {
+        return @{ mode = 'disabled'; publicIp = $null; results = @(); showUdp = $false }
+    }
+    $portsToCheck = if ($RequiredPorts) { $RequiredPorts } else { $script:DuneRequiredPorts }
+    $signature = ($portsToCheck | ForEach-Object { '{0}:{1}' -f $_.Protocol,$_.Port }) -join ','
+    if ($signature -ne $script:DunePortCheckPortSignature) {
+        $script:DunePortCheckCache = $null
+        $script:DunePortCheckPortSignature = $signature
+    }
+
+    # Custom mode selected but no URL template entered yet: don't break the
+    # check (and don't strand the user). Fall back to the builtin checker so the
+    # TCP port still gets verified; UDP simply stays hidden (no real checker).
+    $effectiveMode = $mode
+    if ($mode -eq 'custom' -and -not $hasCustomUrl) { $effectiveMode = 'builtin' }
+
+    # Lifecycle changes invalidate even a recent verdict. Keep this context in
+    # the shared worker snapshot so only the first observer probes the new state.
+    if ($BattlegroupState -in @('stopped', 'stopping', 'starting', 'running', 'updating')) {
+        if ($script:DunePortCheckCache -and $BattlegroupState -ne $script:DunePortCheckBgState) { $Force = [switch]$true }
+        $script:DunePortCheckBgState = $BattlegroupState
+    }
+    $now   = Get-Date
+    $cacheTtl = $script:DunePortCheckTtlSecs
+    if (@($script:DunePortCheckCache | Where-Object { $_.status -eq 'unknown' }).Count -gt 0) {
+        $cacheTtl = [Math]::Min($cacheTtl, 10)
+    }
+    if (@($script:DunePortCheckCache | Where-Object { $_.status -eq 'closed' }).Count -gt 0) {
+        $cacheTtl = [Math]::Min($cacheTtl, 60)
+    }
+    if (-not $Force.IsPresent -and
+        $script:DunePortCheckCache -and
+        (($now - $script:DunePortCheckFetched).TotalSeconds -lt $cacheTtl)) {
+        return @{
+            mode      = $mode
+            publicIp  = $script:DunePortCheckPubIp
+            results   = @(Select-DuneVisiblePortResults -Results $script:DunePortCheckCache -ShowUdp $showUdp)
+            showUdp   = $showUdp
+            cached    = $true
+            ageSecs   = [int]($now - $script:DunePortCheckFetched).TotalSeconds
+        }
+    }
+
+    $pubIp = Get-DunePublicIp
+    $results = @()
+    foreach ($p in $portsToCheck) {
+        $status = switch ($effectiveMode) {
+            'canyouseeme' {
+                if ($p.Protocol -ne 'TCP') { 'udp-skip' }
+                else { Test-DunePortCanYouSeeMe -PublicIp $pubIp -Port $p.Port }
+            }
+            'yougetsignal' {
+                # Backward-compatible alias for installs that selected the old
+                # primary-only mode before its hostname was retired.
+                if ($p.Protocol -ne 'TCP') { 'udp-skip' }
+                else { Test-DunePortCheckHost -PublicIp $pubIp -Port $p.Port }
+            }
+            'checkhost' {
+                if ($p.Protocol -ne 'TCP') { 'udp-skip' }
+                else { Test-DunePortCheckHost -PublicIp $pubIp -Port $p.Port }
+            }
+            'custom' {
+                Test-DunePortCustom -Template $cfg.PortCheckUrlTemplate -PublicIp $pubIp -Port $p.Port -Protocol $p.Protocol
+            }
+            default {
+                # 'builtin': CanYouSeeMe, PortCheckTool, then Check-Host.
+                Test-DunePortBuiltin -PublicIp $pubIp -Port $p.Port -Protocol $p.Protocol
+            }
+        }
+        $detail = if ($status -eq 'unknown') {
+            'Public reachability could not be verified because the external checker was unavailable or returned no verdict.'
+        } else { $null }
+        if ($status -eq 'unknown' -and -not $Force.IsPresent -and $pubIp -eq $script:DunePortCheckPubIp) {
+            $previous = @($script:DunePortCheckCache | Where-Object {
+                $_.port -eq $p.Port -and $_.protocol -eq $p.Protocol -and $_.status -eq 'open'
+            }) | Select-Object -First 1
+            if ($previous) {
+                $status = $previous.status
+                $detail = 'Last confirmed result retained; the automatic check could not verify reachability. Use Refresh to run a new check.'
+            }
+        }
+        $results += @{ port = $p.Port; protocol = $p.Protocol; label = $p.Label; status = $status; detail = $detail }
+    }
+    $script:DunePortCheckCache   = $results
+    $script:DunePortCheckPubIp   = $pubIp
+    $script:DunePortCheckFetched = $now
+    return @{
+        mode     = $mode
+        publicIp = $pubIp
+        results  = @(Select-DuneVisiblePortResults -Results $results -ShowUdp $showUdp)
+        showUdp  = $showUdp
+        cached   = $false
+        ageSecs  = 0
+    }
+}
+
+# Drop UDP entries unless the user opted into showing them (custom UDP-capable
+# checker + ShowUdpPortStatus). The full result set is still what gets cached;
+# this only filters what is returned to the UI.
+function Select-DuneVisiblePortResults {
+    param($Results, [bool]$ShowUdp)
+    if ($ShowUdp) { return @($Results) }
+    return @(@($Results) | Where-Object { $_.protocol -eq 'TCP' })
+}

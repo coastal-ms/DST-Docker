@@ -1,0 +1,692 @@
+name: 🐛 Tool bug report
+description: Report a bug or unexpected behavior in the Dune Server Tool itself (the desktop app, the PowerShell script, the .bat launcher, or the installer).
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## What this tracker is for
+
+        This issue tracker is for **bugs in this tool's code** — the desktop
+        app (Server Health, Commands, PowerShell, Server Settings, Gameplay Admin,
+        Maps — DD Atlas / Live state / Lifecycle, Vehicles, Shared Inventory Explorer,
+        Solo Mode, Database, Sietches, Sponsors & Credits, Settings, Setup
+        Wizard), the PowerShell script (`dune-server.ps1`), the `.bat`
+        launcher, and the installer (`DuneServerSetup.exe`).
+
+        > 💡 **Create a diagnostics package first.** In the desktop app, click
+        > **Help → Create Diagnostics Package**. It saves
+        > `dst-diagnostics-<timestamp>.zip` to your Desktop and opens Explorer
+        > with the ZIP selected. Then open this form and **drag the ZIP into the
+        > comment area below** to attach all logs at once — VM IPs,
+        > SSH paths, Windows usernames, and config secrets are redacted before
+        > the ZIP is written. The bundle includes a redacted **UserGame.ini /
+        > UserEngine.ini snapshot** and, when available, sanitized local client
+        > **Game.ini / Engine.ini snapshots** (with an automatic duplicate-section-header
+        > check), a sanitized **Solo Mode health snapshot** (adapter, schema,
+        > and process-lock facts; never save paths), recent sanitized in-app
+        > **updater relaunch / Inno / installed-identity logs**, and a
+        > **`vm-memory-pressure.txt`** VM-health probe (Funcom
+        > operator / Postgres restart counts + OOMKilled/exit-137 state, `free -h`,
+        > **root-disk usage and node conditions**, **unfinished database
+        > operations and the battlegroup's DATABASE phase**, **per-map memory
+        > limits vs Funcom defaults**, **retained Funcom build images**, and
+        > whether the **game UDP bridge rules** are present) when the VM is
+        > reachable. `game-pods.txt` now includes every pod (dump/backup pods
+        > are no longer hidden) plus database-operation state, and
+        > `game-server-logs.txt` also carries the database pods' logs. The
+        > bundle also includes `world-restart-state.json` when available,
+        > recording restart/rollback steps and recovery-lock state. The
+        > row-free `inventory-explorer.txt` probe checks the same read-only
+        > player and storage inventory paths without including item, owner,
+        > container, or database identifiers. The
+        > active backend runtime logs and their rollovers are included as
+        > bounded, sanitized `backend-runtime-N.log` files when available. The
+        > `manifest.txt` lists what's inside, leads with any health finding, and
+        > records any sanitization warnings. For Maps Live state reports,
+        > `maps-platform.txt` adds row-free cache integrity, structural
+        > fingerprints, source timing/backoff, and map/dimension evidence
+        > without cached rows, identifiers, payloads, paths, or coordinates.
+        > Review the ZIP before attaching it. If it contains private information,
+        > omit it and say what was withheld; never paste raw config, credentials,
+        > account/player/server identifiers, save paths, or browser storage.
+
+        **✅ Do open an issue here** when the tool shows you a problem, e.g.:
+        - The **Server Health** page shows the battlegroup as **Unknown** with
+          a yellow message under it (SSH key / connection diagnostics).
+        - The **Setup Wizard / preflight** "SSH key authorized on VM" check
+          fails, or any other preflight check is wrong.
+        - **Server Settings**, **Database** (backup / restore / SQL editor /
+          backup schedule), **Map SpinUp**, **Settings Public IP / DDNS**,
+          **Gameplay Admin**, **Solo Mode**, a button, page, the top menu bar, or the embedded
+          PowerShell pane misbehaves.
+
+        > 💡 The tool explains *why* it can't reach the VM. If you see one of
+        > those yellow messages, copy it into the **Connection / VM status
+        > message** box below — that's usually all we need to pinpoint it.
+
+        **Please do _not_ open issues here for:**
+        - Raw network / router / port-forwarding setup where the **tool itself
+          shows no message** (ping `@allcoast` on Discord instead).
+        - Hyper-V configuration or performance tuning.
+        - Funcom dedicated-server bugs (game crashes, missing pods,
+          `battlegroup` CLI errors that aren't caused by this tool).
+        - General "how do I play / host" questions.
+
+        For those, ping `@allcoast` on Discord or check the
+        [Funcom Self-Hosted Server docs](https://duneawakening.com/self-hosted-servers/).
+
+        ---
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      description: Please confirm this is about the tool, not a raw Funcom/network problem.
+      options:
+        - label: This is about the tool — the app/CLI itself misbehaves, **or** the tool shows me an error/diagnostic message (e.g. the Server Health battlegroup status, a Setup "SSH key" check). It is **not** a pure Funcom game-server crash or router/port-forwarding question with no tool message.
+          required: true
+
+  - type: input
+    id: tool_version
+    attributes:
+      label: Tool version
+      description: Shown in the bottom-left of the web portal sidebar (status bar) and in the CLI menu header.
+      placeholder: "v16.7.3"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Where did the bug happen?
+      description: Which part of the tool was affected? Pick the closest match. The primary navigation is server-first; gameplay destinations live inside the Gameplay Admin gateway.
+      options:
+        - Web portal - Command Deck / Spatial dashboard (globe / saved zoom and orientation / auto rotate / map status / map details / move maps / pulse lines / controls / Solo Mode dock shortcut)
+        - Web portal - Command Deck workspaces (Players dossier / compact inventory / Commands categories and controls / Bases → Blueprints / Vehicles / Economy details / section navigation)
+        - Web portal - Appearance (Classic / Try Command Deck / Dashboard or Spatial home / shared themes and custom colors / square dock consistency)
+        - Web portal — Server Health (Dashboard / Game Servers responsive pod rows / Game Ready State)
+        - Web portal — Database — VM info card (disk / swap / active and failed database operations / failed-operation cleanup / retained build images / old-image cleanup / per-map memory limits)
+        - Web portal — Server Health — Scheduled restarts (daily BG restart / broadcast lead / Discord webhook notices (advance warning / state change) / Funcom server-update check + badge)
+        - Web portal — Pods (pod list / per-pod events / describe tail)
+        - Web portal — Battlegroup shows "Unknown" / tool can't connect to the VM (SSH)
+        - Web portal — Commands
+        - Web portal — Browser Portal sign-in / forced password change / Settings account management / QR or portal link
+        - Web portal — Commands — Open PowerShell (embedded xterm.js terminal, local only)
+        - Web portal — Game Config — VM INI (UserGame.ini / UserEngine.ini / Apply INIs to pods / Storm Cycle / Coriolis start time / Spicefield Types / Crafting / Land Claim Timer)
+        - Web portal — Game Config — Time of Day (Sunset / Twilight / night / Dew Harvest / restore normal cycle)
+        - Web portal — Experimental Lab (recovered Dune / Unreal Engine CVars, remaining DefaultGame.ini / DefaultEngine.ini settings, source/risk filters)
+        - Web portal — Commands — Apply INIs & Restart
+        - Web portal — Game Config — Server name (rename / battlegroup title shown in the in-game server browser)
+        - Web portal — Game Config — Deep Desert PvP (live partitions / Apply & restart)
+        - Web portal — Game Config — BaseBackUp (allowed maps / cooldown / extensions / keep stored bases through the Deep Desert reset)
+        - Web portal — Game Config — client-side INI (Game.ini / Engine.ini opt-in / preview / Open in Notepad / client-apply reminder / Player config hand-out list)
+        - Web portal — Game Config — Landsraad (contract choices / daily bonus cap / active contracts / abandon cooldown / client Data struct)
+        - Web portal — Gameplay Admin — Overview
+        - Web portal — Gameplay Admin — Map — DD Atlas (including Command Deck Map navigation)
+        - Web portal — Gameplay Admin — Map — Live state (cached active spice / freshness / unavailable or stale source)
+        - Web portal — Gameplay Admin — Map — Lifecycle (Map SpinUp / Restart Hagga / Restart Deep Desert)
+        - Web portal — Gameplay Admin — Overview — In-game commands (!kit / !item / !vehicle / !water / !tp / !small / !medium / !large — shared teleport destinations, polling / Real-time monitoring, per-command toggles + cooldowns, character-name broadcasts, !item quantity cap, chat channels, reply heading)
+        - Web portal — Gameplay Admin — Overview — Welcome back (returning-player package / days away / announce)
+        - Web portal — Gameplay Admin — Market / Market Bot
+        - Web portal — Gameplay Admin — Players
+        - Web portal — Shared Inventory Explorer (Players / Bases / Vehicles / Economy — cached search / freshness / refresh / rename storage box / single or multi-delete / delete quantity / load more / item details / owning entity link)
+        - Web portal — Vehicles (Fleet / Inspect / Cargo / Repair vehicle / Delete vehicle)
+        - Web portal — Gameplay Admin — Players — Specs (Set level / Apply level rewards / Repair Pattern / Max / Reset)
+        - Web portal — Gameplay Admin — Players — Manage Player (Give Item / kits / packages / cosmetics / repairs)
+        - Web portal — Gameplay Admin — Players — Give Item / pre-augmented item / Give Package / Give Vehicle Kit / Grant Cosmetic / All House Swatches / Buildable House Swatches / Max Augment Attributes / loaded weapon ammo / Variant (incl. "Allow overflow")
+        - Web portal — Gameplay Admin — Players — Cheat Scripts / Dev-Perf Scripts (Live)
+        - Web portal — Gameplay Admin — Players — Journey (node browser / complete / post-NPE reset to Find the Fremen / chosen starter-tree refund)
+        - Web portal — Gameplay Admin — Players — Unlock Trainers (skill-tree ownership status) / Unlock Main Quest / Complete Contract (clear stuck contract) / Apply Quick Preset (Progression)
+        - Web portal — Gameplay Admin — Players — Apply Quick Preset / Progression Unlock (NPE / A New Beginning / Act 1 / Ch3 Start / Rank 19 Eligible)
+        - Web portal — Gameplay Admin — Players — Reset Faction (wipe rep + singular/plural faction dialogue tags + ClimbTheRanks + faction contract items / stuck contract card, offline)
+        - Web portal — Gameplay Admin — Players — Fresh Start (Snapshot builds + cosmetics / Restore builds by name after in-game delete + recreate; offline to restore)
+        - Web portal — Gameplay Admin — Players — Full Delete / reclaim abandoned bases, vehicles, or fiefs
+        - Web portal — Gameplay Admin — Players — Tags (search/add typeahead + tag list)
+        - Web portal — Gameplay Admin — Players — Landsraad (contribution editor)
+        - Web portal — Gameplay Admin — Landsraad — Landsraad Control (holding House / active decree / battlegroup restart)
+        - Web portal — Gameplay Admin — Bases (incl. Owner column + Release/Destroy claim)
+        - Web portal — Gameplay Admin — Storage
+        - Web portal — Gameplay Admin — Blueprints (incl. Blueprint Designer link)
+        - Web portal — Maps — DD Atlas — wrong or missing POI / cave sector / layout data for a seed
+        - Web portal — Solo Mode — connection / wrapper or schema validation / process lock
+        - Web portal — Solo Mode — native and Engine settings (load / apply / retained INI backup)
+        - Web portal — Solo Mode — Current inventory browser / ranged weapon ammo / Give Item / pre-augmented item / Vehicle Kit / Package / Cosmetics / backpack or built-storage delivery
+        - Web portal — Solo Mode — profile/save-folder selection / Export Base Blueprint / portable DST JSON
+        - Web portal — Solo Mode — Import Base Blueprint / portable blueprint JSON
+        - Web portal — Solo Mode — Solari / Landsraad Scrip / Hajra Literjon fill
+        - Web portal — Solo Mode — save backup / restore / single or multi-select delete / safety backup
+        - Web portal — Solo Mode — Progression — max specializations / Find the Fremen / Complete NPE / skill and Intel points / Enable All Skills
+        - Web portal — Database (Backup / Restore / Cross-VM or cross-BG migration / SQL Editor)
+        - Web portal — Database — World Restart / Roll back last restart
+        - Web portal — Database (Backup Schedule / crontab)
+        - Web portal — Sietches (Additional Survival_1 shards)
+        - Web portal — Sponsors & Credits (sponsor names / Notes from Duke / support link)
+        - Web portal — Settings (general — paths, ports, providers)
+        - Web portal — Settings — Dune Server Tool install folder (copy path / open folder)
+        - Web portal — Settings — Desktop shell (hardware acceleration / software rendering / shell restart)
+        - Web portal — Settings — Public IP / DDNS (hostname resolve, manual IP, same-PC loopback route, apply)
+        - Web portal — Settings — Server Browser Ping (datacenter id / IP fix — in-game server browser shows Ping 0 / empty bars)
+        - Web portal — Settings — Database connection (Database port / Test connection — empty Players/Bases/Storage)
+        - Web portal — Settings (Dune Server Tool self-updater — incl. Stable/Test channel toggle + pre-release picker)
+        - Web portal — Settings — Remote Device Access / Browser Portal accounts / QR / Tailscale Funnel / legacy Cloudflare domain
+        - Web portal — Settings — Hyper-V over LAN (host IP / credential / Test / Route toggle / Remove credential)
+        - Web portal — Settings — Server authorization token / 403002 recovery (regenerate + apply self-hosting token)
+        - Web portal — Setup Wizard / first-run
+        - Web portal — Setup Wizard — Hyper-V over LAN (host connect / Test connection / remote VM install onto the host / SSH key Generate & authorize)
+        - Web portal — Top menu bar / Help dropdown
+        - Web portal — Sidebar customization (page or section hide/show / reorder / rename / reset) / top status bar (server name, port/VM/BG pills, refresh) / window chrome
+        - Web portal — "Web Portal" button / open in default browser hand-off ("page is unavailable")
+        - Desktop app shell (DuneShell.exe / WebView2) / tray hide, restore, or Quit / PWA install
+        - CLI (`dune-server.ps1` / `dune-server.bat`)
+        - Installer (`DuneServerSetup.exe`) / first-run setup
+        - Update checker / auto-updater (DST)
+        - Public documentation site / release screenshots / download link
+        - Other (describe below)
+    validations:
+      required: true
+
+  - type: input
+    id: menu_option
+    attributes:
+      label: Specific page / button / command
+      description: Which button, tab, menu letter/number, or `-Cmd <name>` triggered the bug? For tray behavior, include left-click vs double-click vs right-click Open, whether the taskbar button returned, and whether the restored window was invisible, off-screen, or unexpectedly small. For Browser Portal authentication, include login vs forced change vs local Settings administration, whether account mode was enabled, transport (Funnel or Cloudflare), and HTTP status only—never include usernames, passwords, cookies, tokens, account IDs, hashes, or salts. For the DST updater, include Update Banner vs Settings, the visible TEST number before/after, and the exact verification message; attach fresh diagnostics so the sanitized relaunch, Inno, and installed-identity logs are included. For Game Config Storm Cycle, include the selected local Coriolis start time, displayed GMT/UTC hour, browser timezone, and whether Apply INIs & restart completed. For a pre-augmented grant, include Solo vs Self-Hosted, item name, item grade, each augment name and grade, offline state, and visible result after login—never include character, account, inventory, or item IDs. For Maps Live state, include whether the preview disclosure and tab were present, the freshness label, active-field count, source error code, and whether the host is Windows or Linux—never include raw database rows or private marker data. For Shared Inventory Explorer, include the workspace (Players, Bases, Vehicles, or Economy), Search vs Refresh vs Rename box vs single delete vs multi-delete vs delete quantity vs Load more vs item details vs owning-entity link, whether the view was global or scoped, the query text if it contains no private names, the Live database/Demo inventory source badge, freshness label, and exact visible error—never include owner, character, container, item, inventory, actor, or account identifiers. For Sidebar customization, include the page or section label, whether it was hidden or shown individually or by section, pointer vs keyboard input, and whether the layout was migrated, reset, or reopened in the same browser. For Sponsors & Credits, include the affected supporter name, Notes from Duke message, or support link. For the responsive Game Servers card, include viewport width, the affected pod name, and whether Phase / Ready / Players / Age were visible. For in-game commands, include the exact `!command`, chat channel, monitoring interval, cooldown, whether any broadcast appeared, and whether it used the character name. For shared teleport destinations, include direct Save location vs Arm live capture, whether the player paused about five seconds, and whether they teleported on foot or from a vehicle seat. For scheduled Funcom updates, include the scheduled time, whether Apply available Funcom server updates was enabled, installed/latest build IDs, and the last schedule result. For Reboot All, include the visible phase and whether an on-demand-map repair ran. For World Restart, include the failed progress step, whether rollback ran automatically, whether every player was offline, and whether the Roll back last restart button remains available. For Specs > Apply level, include the track, before/after level, and before/after unspent skill points. For Repair Pattern, include whether the player was fully offline, whether Pattern Upgrading became purchasable after login, and whether Grade 2-5 schematic recipes appeared after the in-game purchase. For Apply Quick Preset, include the exact preset and the first journey research/crafting objective still active afterward. For Full Delete, include whether the deleted character owned or co-owned the affected object and whether Claim Ownership appears—never include account, actor, or permission IDs. For Reset Journey, include whether the post-NPE story restarted at Find the Fremen, which starter-class tree was reset, and how many skill points were refunded. For DD Atlas, include the selected seed, POI type, displayed sector(s), and a current reference screenshot or link when possible. For an Experimental Lab control, include its exact CVar or INI key, source/risk badge, file and section, and whether local Engine.ini management was enabled. For Solo Mode, include the adapter, wrapper/schema status, whether the game was fully closed, and the exact action; for Current inventory include search/sort, item type, location label, and visible quantity/quality only—never include save paths or account identifiers. For Import Base Blueprint, include whether the portable file came from Retail Solo and whether the game was fully closed. After deleting/recreating a character, state whether Dune: Awakening was fully restarted before creation. For Enable All Skills, state whether Bindu Sprint remained learnable. For a database migration, name the failing step.
+      placeholder: "e.g. Map > DD Atlas, Vehicles > Fleet > Inspect, public site > Features screenshot, or Players > Inventory > loaded ammo"
+    validations:
+      required: true
+
+  - type: textarea
+    id: what_happened
+    attributes:
+      label: What happened
+      description: Paste the actual error message or unexpected output from the terminal pane / status bar. Screenshots also welcome.
+      placeholder: |
+        e.g. "After clicking 'Save' on the Players > Inventory tab,
+        the status text went red and said 'psql exec failed' but the
+        terminal pane was empty."
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected to happen
+    validations:
+      required: true
+
+  - type: textarea
+    id: command_deck_diag
+    attributes:
+      label: Command Deck / Spatial dashboard details (only for these views)
+      description: |
+        Include Classic vs Command Deck, Dashboard vs Spatial home, palette and
+        light/dark mode, desktop shell vs browser, window size and display scaling,
+        and pointer vs touch vs keyboard input. For the globe, include whether 3D
+        was enabled, the affected control or map status, whether a detail panel was
+        open, and whether the dock or controls overlapped the globe or left the
+        visible screen. For saved map placement, canvas zoom, rotation orientation,
+        or Auto rotate, state whether reload, navigation, resize, or opening map
+        details changed it. For theme differences, name the selected preset or
+        custom color and the source/destination pages; include the globe and dock
+        if affected. For Commands, name the category, control, and visible result.
+        For Bases → Blueprints, identify the Command Deck or legacy Gameplay
+        Admin route and the visible tab/result, but do not include base or
+        blueprint identifiers.
+        For Map or DD Atlas navigation, state whether it opened the static atlas
+        and remained selected after navigation.
+        For Solo Mode navigation, state whether the dock shortcut was visible and
+        opened the expected page. For pulse or simulated
+        travel visibility, name the affected toggle and include a screenshot of the
+        sunlit or shaded area. Report visible errors and freshness/source labels; unsupported
+        per-map measurements may correctly say "Not reported".
+
+        Attach a screenshot with private player/server names removed. Do not
+        include player, account, map-instance or database identifiers, private
+        coordinates, credentials, or browser storage contents.
+      placeholder: |
+        Command Deck / Spatial, desktop shell, 1366x768, 100% scaling.
+        Selected a map icon; its details opened but the bottom controls disappeared.
+    validations:
+      required: false
+
+  - type: textarea
+    id: gameconfig_diag
+    attributes:
+      label: Game Config — setting that didn't apply (only for Game Config / INI bugs)
+      description: |
+        For "I changed a setting but it had no effect in-game", or values that
+        seem ignored / duplicated (e.g. base expansion, player inventory
+        capacity, XP / Fame). The diagnostic ZIP now bundles a redacted
+        **UserGame.ini / UserEngine.ini snapshot** headlined with a
+        duplicate-section-header check — attaching it (see below) is the single
+        most useful thing for these bugs. Also tell us:
+
+        - Which exact setting(s) you changed, and to what value.
+        - What DST shows for that value after a reload vs what you see in-game.
+        - Whether you **restarted the battlegroup** after saving. Saving writes
+          the server INI only; Experimental console variables are applied to the
+          servers when the battlegroup restarts, so nothing changes in-game until
+          you use **Apply INIs & restart** or another battlegroup restart.
+
+        Leave blank if your bug isn't about Game Config.
+      placeholder: |
+        Changed: Base > Max Building Extensions 5 -> 8; Player Inventory Volume 185 -> 195
+        DST shows 195 after reload; in-game still behaves like 185.
+        Battlegroup restarted after save? yes
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: inventory_explorer_diag
+    attributes:
+      label: Shared Inventory Explorer — search, scope, freshness, or item details
+      description: |
+        Only fill this in for the **Shared Inventory Explorer** embedded
+        in Players, Bases, Vehicles, and Economy. Attach a fresh diagnostics ZIP;
+        `inventory-explorer.txt` checks the live player/storage read paths with
+        row counts bounded to one and never includes item, owner, container, or
+        database identifiers. Also tell us:
+
+        - Which workspace you opened and whether the view was global or reached
+          through an owning-player/container link.
+        - Search, Refresh, Load more, an item detail card, or Open owning entity.
+        - The query text only if it contains no private character/container names.
+        - The visible source and freshness labels, or unavailable/error message.
+        - Whether retrying or reopening the same workspace changed the result.
+        - For Rename box, whether the new name appeared after the save completed.
+
+        Do not paste owner names, character names, container names, template IDs,
+        or item/inventory/actor/account IDs into this public report.
+        Leave blank if the bug is not about Shared Inventory Explorer.
+      placeholder: |
+        Workspace: Economy > Inventory
+        View: global
+        Action: Search
+        Source/freshness: Live database / Fresh
+        Message: "Inventory database read failed: ..."
+        Retry changed result: no
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: vehicle_lifecycle_diag
+    attributes:
+      label: Vehicles — fleet, cargo, repair, or deletion details
+      description: |
+        Only fill this in for the Vehicles workspace's **Fleet**, **Inspect**,
+        or **Cargo** views. Attach a fresh diagnostics ZIP, then tell us:
+
+        - Whether the action was Fleet, Inspect, Cargo, Repair vehicle, or
+          Delete vehicle.
+        - The visible vehicle subtype and status text.
+        - Whether the battlegroup stop/restart phase began, and the visible
+          result after it completed.
+
+        Do not paste vehicle, actor, owner, cargo, permission, account, or
+        database identifiers into this public report.
+      placeholder: |
+        Action: Vehicles > Fleet > Inspect
+        Vehicle subtype: Sandbike
+        Visible status: "Refresh the vehicle list and try again"
+        Stop/restart phase began: no
+    validations:
+      required: false
+
+  - type: textarea
+    id: giveitem_diag
+    attributes:
+      label: Give Item / Give Package / Give Vehicle Kit — item or part that didn't appear
+      description: |
+        For items or vehicle parts that show in DST's listing/preview but don't
+        appear in-game (player inventory or a storage container).
+
+        **Give Item / Give Package** — tell us:
+
+        - The exact item — its **name AND the template id** shown in the picker
+          (e.g. `Copper Ingot — CopperBar`). If you only see a number, paste it.
+        - Destination: player inventory, or a storage container (and its type).
+        - Quantity / quality, and whether it's a stackable resource or equipment.
+        - If this came from **Give Package > Import**, paste the tcno.co
+          item/quantity lines and the package name you saved.
+        - Whether **"Allow overflow (drop to ground)"** was ticked, and whether
+          the player was **online or offline** (overflow only applies online).
+        - Did it show in DST's listing? Did it show in-game **after a server zone
+          restart** / relog?
+
+        **Give Vehicle Kit** — tell us:
+
+        - Which **vehicle** you picked (Sandbike, Buggy, Sandcrawler, Scout /
+          Assault / Carrier Ornithopter).
+        - Which **part(s)** were missing or wrong, and the **quantity** the
+          preview showed vs what landed (e.g. *preview said Tread ×3, only 1
+          arrived*).
+        - Whether **"Allow overflow (drop to ground)"** was ticked, and whether
+          the player was **online or offline** (overflow only applies online).
+        - Did the parts show in the form's preview? Did they appear in-game after
+          a relog / zone restart?
+
+        Leave blank if your bug isn't about giving items or vehicle kits.
+      placeholder: |
+        Item/kit: Give Vehicle Kit > Sandbike
+        Missing/wrong: preview showed Tread Mk6 ×3, only 1 Tread arrived
+        Allow overflow: on. Player online: yes
+        Showed in preview: yes. Showed in-game after relog: partial
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: solo_diag
+    attributes:
+      label: Solo Mode — local save, blueprint, settings, inventory, package, cosmetic, backup, or restore details
+      description: |
+        Only fill this in for the host-local **Solo Mode** page. Attach a fresh
+        diagnostics ZIP; it includes `solo-mode.txt` with adapter, wrapper,
+        schema fingerprint, integrity/FK result, character count, settings
+        count, process-lock state, and backup count—without save paths or account
+        folder names. Also tell us:
+
+        - Retail or custom folder.
+        - For profile selection, whether the expected profile appeared and
+          whether DST showed its save folder; do not include the profile's
+          account-folder name or full path.
+        - Exact step: Connect and validate, Apply Solo settings, Create backup,
+          Restore/Delete one backup, Delete selected backups, Give Item, Give
+          Vehicle Kit, Give Package, Grant Cosmetic / Building Set, Import Base
+          Blueprint, Set currency balances, Fill Hajra Literjon, Max
+          specializations, Complete Find the Fremen, or Enable All Skills.
+        - Whether Dune: Awakening was fully closed for a write.
+        - The exact message DST showed.
+        - For settings/currencies/fillables, the key or item and before/after value.
+        - For item/package/cosmetic grants, the selection, quantity/quality when
+          applicable, and selected backpack or built-storage destination.
+        - For blueprint import, saved-blueprint vs placed-base export and the
+          displayed piece/placeable/pentashield counts.
+        - For restore, whether the pre-restore safety backup was reported.
+        - For multi-delete, the selected backup count and exact deleted/retained
+          result. Do not paste backup paths.
+
+        Do not paste your Steam/account folder name or full local save path.
+        Leave blank if the bug is not about Solo Mode.
+      placeholder: |
+        Channel: Retail
+        Step: Solo Mode > Settings > Apply Solo settings
+        Game fully closed: yes
+        Setting: GatheringAmount 1.0 -> 2.0
+        Message: "..."
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: cheatscripts_diag
+    attributes:
+      label: Cheat Scripts / Dev-Perf Scripts — script had no effect (Players → Live)
+      description: |
+        For the Players → Live **Cheat Scripts** and **Dev / Perf Scripts** rows.
+        Note that these scripts originate from the Playtest server and **may
+        legitimately do nothing on a retail server** — tell us so we can tell a
+        real bug apart from an expected no-op:
+
+        - Which **button** (e.g. Playtest Setup, Award Player XP, Unlock All
+          Skills / Abilities, Leave Me Alone, Start/Stop Hitch Test) **or the
+          freeform script name** you typed.
+        - Was the target player **online**? (Live-only — the buttons are disabled
+          while the player is offline.)
+        - What DST's status line said after firing, and what you expected vs saw
+          in-game.
+
+        Leave blank if your bug isn't about the cheat / dev-perf script buttons.
+      placeholder: |
+        Button / script: Award Player XP
+        Player online: yes
+        DST said: "script dispatched"; in-game XP did not change
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: landsraad_diag
+    attributes:
+      label: Landsraad — contribution editor, term control, or settings-struct / client-block warning
+      description: |
+        For Players → **Landsraad** (setting a player's House contribution),
+        **Landsraad → Landsraad Control** (which House holds the Landsraad and
+        which decree is in force), **or** Game Config Landsraad settings (the
+        nested `LandsraadSettings Data=(...)` struct). The diagnostic ZIP's
+        redacted **UserGame.ini snapshot** captures this struct — attaching it
+        (see below) is the single most useful thing for these bugs. Also tell us:
+
+        - **Contribution editor:** which House and amount you set, what DST showed
+          after reload, and what you saw in-game.
+        - **Landsraad Control:** which House and decree you applied, whether you
+          ran the battlegroup restart afterwards, and what the in-game Landsraad
+          board showed once the maps came back.
+        - **Settings struct / client warning:** which Landsraad member(s) you
+          edited; whether the **"your client is missing part of a settings block"**
+          warning appeared (and what it listed); and whether **"Fix my client
+          config"** resolved it or members went missing after a save.
+
+        Leave blank if your bug isn't about Landsraad.
+      placeholder: |
+        Edited: Game Config > Landsraad > Voting Period Duration 600 -> 900
+        Client warning appeared: yes — listed ~35 missing members
+        After "Fix my client config": block restored / still missing?
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: connection_diag
+    attributes:
+      label: Connection / VM status message (only if your bug involves the VM / SSH / battlegroup)
+      description: |
+        The tool now tells you **why** it can't reach the battlegroup — copy the
+        exact message it shows. Where to find each piece (skip what doesn't apply):
+
+        - **Dashboard → "Battlegroup + VM" card:** the yellow line under the
+          status (e.g. *"SSH key is passphrase-protected…"*, *"VM rejected the
+          SSH key…"*, *"Battlegroup not started…"*, *"VM is not answering SSH
+          yet…"*). Also shown under **Battlegroup info**.
+        - **Setup Wizard / Settings → "Re-run checks":** paste the detail text
+          from the **"SSH key authorized on VM"** row.
+        - **Settings → SSH Key field:** the path to the key the tool is using,
+          plus the **Generate new** (rotate) and **Remove passphrase** (strip the
+          passphrase off the existing key) buttons.
+
+        Leave blank if your bug has nothing to do with the VM/SSH.
+      placeholder: |
+        Dashboard message: "SSH key is passphrase-protected, so background checks can't use it…"
+        Setup "SSH key authorized on VM": "The VM rejected this key…"
+        SSH Key path (Settings): C:\Users\<user>\.ssh\dune_key
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: hypervlan_diag
+    attributes:
+      label: Hyper-V over LAN (only if your bug involves a remote/separate Hyper-V host)
+      description: |
+        Only fill this in if your bug is about **Hyper-V over LAN** (Setup Wizard's
+        third option, or **Settings → Hyper-V over LAN**) — connecting to, installing
+        onto, or routing VM commands to a **separate Hyper-V host**. Please include:
+
+        - The **exact step** where it went wrong (e.g. "Test connection", "Install
+          the VM on the host → Install", "Route all VM commands to this LAN host"
+          toggle, "Remove credential").
+        - The **remote host's OS** (e.g. Windows Server 2022, Windows 11 Pro) and
+          whether it's in a **workgroup or a domain**.
+        - Whether you connected by the host's **IP address or a DNS/hostname**.
+        - The exact message shown (connection-test result, VM-install error, guest-IP
+          discovery, SSH, or Server Health message). **Do not paste the host
+          administrator password** — it's never needed for a bug report.
+        - Whether the problem **persists after a DST restart**, or only happens once
+          per session.
+        - If possible, attach a **fresh diagnostics ZIP** captured right after
+          reproducing (see the **Diagnostics ZIP** field below) — it includes the
+          sanitized `VmHostMode` / redacted `HyperVHostIp` config and backend logs.
+
+        Leave blank if your bug has nothing to do with a remote Hyper-V host.
+      placeholder: |
+        Step: Setup Wizard > Hyper-V over LAN > Test connection
+        Remote host OS: Windows Server 2022, workgroup (no domain)
+        Connected by: IP address (192.168.1.50)
+        Message shown: "Could not connect — WinRM: Access is denied"
+        Persists after DST restart: yes
+      render: shell
+    validations:
+      required: false
+
+  - type: dropdown
+    id: ssh_interactive
+    attributes:
+      label: Does an interactive SSH terminal still work?
+      description: |
+        Only relevant for VM/SSH bugs. Open **Commands → "Open an SSH terminal to
+        the VM"** (or the **PowerShell** page and run the SSH command yourself).
+        This single answer tells us apart a passphrase-protected key (works here,
+        fails the dashboard) from a key the VM never authorized (fails everywhere).
+      options:
+        - Not applicable — my bug isn't about VM/SSH connectivity
+        - "Yes — the interactive SSH terminal connects, but the Dashboard still shows Unknown"
+        - No — the interactive SSH terminal also fails
+        - Haven't tried
+    validations:
+      required: false
+
+  - type: textarea
+    id: remote_access_diag
+    attributes:
+      label: Browser Portal / remote access (only if your bug is about sign-in, accounts, QR, or transport)
+      description: |
+        Browser Portal remote access defaults to a **Tailscale Funnel**: DST is
+        reached at a stable `https://<name>.ts.net` address that proxies to a
+        local loopback **bridge** (127.0.0.1:47900), which forwards into DST.
+        v15 retains existing **Cloudflare custom-domain** configuration, but its
+        legacy portal is disabled by default until the host explicitly re-enables
+        it in local Settings. New setups use Tailscale Funnel. If pairing or
+        remote access fails, note:
+
+        - What **Settings → Remote Device Access** shows: the remote-address badge
+          ("Tailscale Funnel" / "legacy custom domain"), "No remote address yet", or
+          "Remote access bridge not running".
+        - Whether the phone/tablet/PC can open the URL after scanning the QR.
+        - Whether the affected account is Owner or Admin and which expected page
+          is present or missing. Never include its username.
+        - Whether Browser Portal account login is enabled, and whether the QR/link
+          is the stable token-free URL or legacy `?key=` magic link. Never paste
+          the key, password, cookie, account ID, hash, or salt.
+        - For a legacy Cloudflare setup, whether **Legacy Cloudflare custom
+          domain** is shown as enabled or disabled, and whether the team domain
+          and application AUD are configured. Do not paste their values, service
+          tokens, tunnel details, or Cloudflare credentials. DST requires a
+          valid signed Access JWT and does not trust the raw email header.
+        - On the host, the bridge health probe:
+
+        ```
+        curl http://127.0.0.1:47900/_dst/health
+        ```
+
+        Leave blank if your bug isn't about Browser Portal / remote access.
+      placeholder: |
+        Settings > Remote Device Access shows: Tailscale Funnel https://<name>.ts.net
+        Account role: Admin; Gameplay Admin appears, Settings is hidden
+        Device shows: "Unable to reach Dune Server Tool"
+        curl http://127.0.0.1:47900/_dst/health: {"ok":true}
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: playerdata_diag
+    attributes:
+      label: Players / Bases show rows but blank names, factions, or 0 pieces (Gameplay Admin)
+      description: |
+        If **Gameplay Admin → Players** or **Bases** lists rows but the
+        names/factions come back blank or piece counts are 0 (often after a
+        character transfer or on an unusual game-DB setup), the most useful
+        thing to attach is the diagnostic ZIP from **Help → Create GitHub Issue
+        + Save Logs**. It now includes `gameplay-read-probe.txt`, which re-runs
+        the Players/Bases list queries and reports COUNTS ONLY (no player names
+        or ids) so we can tell "no rows" from "rows but blank detail" at a
+        glance.
+
+        In text, note: how many Players/Bases rows show, whether **all** names
+        are blank vs. only some, and whether this started after a character
+        transfer or a DB change.
+
+        Leave blank if your bug isn't about missing player/base data.
+      placeholder: |
+        Gameplay Admin > Players: 5 rows, all names blank, all Unaligned
+        Started after: character transfer to a separate game DB
+        (Attached dst-diagnostics-*.zip — see gameplay-read-probe.txt)
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: mempressure_diag
+    attributes:
+      label: Battlegroup restarted off-schedule / ping surges under load (VM memory pressure)
+      description: |
+        If your battlegroup **restarted outside its scheduled time**, pods
+        cycle on their own, or you see **ping/lag spikes under load** even when
+        the host looks idle, this is usually the **VM running low on memory**:
+        the kubelet OOM-kills the Funcom operators (exit 137) and evicts
+        Postgres. DST now flags this itself — attach the diagnostic ZIP from
+        **Help → Create GitHub Issue + Save Logs** and see **`vm-memory-pressure.txt`**
+        (and the red banner at the top of **Server Health**).
+
+        In text, note: how much **RAM the VM has** (Hyper-V), whether Server
+        Health showed the red **"VM low on memory"** banner, and whether swap is
+        on (`free -h` in the bundle — `Swap: 0` is the pressure signature).
+
+        Leave blank if your bug isn't about off-schedule restarts / memory.
+      placeholder: |
+        Symptom: battlegroup restarted at ~06:09 and ~07:11 (schedule is 02:00)
+        Server Health banner: "VM low on memory — Funcom operators killed 34x"
+        VM RAM (Hyper-V): 24 GB. free -h in bundle showed Swap: 0
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: transcript
+    attributes:
+      label: Transcript / log excerpt
+      description: |
+        💡 **Easiest path: attach the diagnostic ZIP.** Use **Help → Create
+        GitHub Issue + Save Logs** in the desktop app — it saves a redacted
+        `dst-diagnostics-<timestamp>.zip` to your Desktop and reveals it in
+        Explorer. Drag it onto this comment area to attach.
+
+        If you'd rather paste manually, every CLI run is auto-logged to
+        `.logs\dune-server-<timestamp>.log` next to `dune-server.bat`. The
+        desktop app also writes `%APPDATA%\DuneServer\webview2-debug.log`.
+        Paste the relevant section (last 30-50 lines around the failure is
+        usually enough — please **redact** public IPs, SSH key paths,
+        hostnames, and any secrets first).
+      render: shell
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Auto-collected diagnostics
+      description: |
+        Auto-filled by the `Report Issue` button / `report-issue` command. Includes:
+        environment (Windows + PowerShell + WebView2 runtime version), app paths,
+        and the tail of `%APPDATA%\DuneServer\webview2-debug.log` if present.
+        Leave as-is unless you want to redact something.
+      render: shell
+
+  - type: input
+    id: env
+    attributes:
+      label: Environment
+      description: Windows version + PowerShell version (`$PSVersionTable.PSVersion`). Auto-filled.
+      placeholder: "Windows 11 23H2, PowerShell 7.4.1"

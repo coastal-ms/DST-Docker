@@ -1,0 +1,39 @@
+---
+const { src, alt, caption, width = 1600, height = 1000, eager = false } = Astro.props as {
+  src: string;
+  alt: string;
+  caption?: string;
+  width?: number;
+  height?: number;
+  eager?: boolean;
+};
+const thumbnail = src.replace(/\.png$/, "-800.webp");
+const full = src.replace(/\.png$/, ".webp");
+---
+
+<figure class="my-8">
+  <button
+    type="button"
+    data-lightbox-trigger
+    data-lightbox-src={full}
+    data-lightbox-alt={alt}
+    aria-label={`Open larger view: ${alt}`}
+    class="group block w-full overflow-hidden rounded-lg border border-dune-border bg-dune-surface cursor-zoom-in focus:outline-none focus-visible:ring-2 focus-visible:ring-dune-accent"
+  >
+    <img
+      src={full}
+      srcset={width > 800 ? `${thumbnail} 800w, ${full} ${width}w` : undefined}
+      sizes="(max-width: 800px) calc(100vw - 48px), 1216px"
+      alt={alt}
+      width={width}
+      height={height}
+      loading={eager ? "eager" : "lazy"}
+      fetchpriority={eager ? "high" : undefined}
+      decoding="async"
+      class="w-full h-auto transition-transform duration-200 group-hover:scale-[1.01]"
+    />
+  </button>
+  {caption && (
+    <figcaption class="mt-2 text-sm text-dune-muted">{caption}</figcaption>
+  )}
+</figure>

@@ -1,0 +1,293 @@
+// GameConfig API — typed wrappers around /api/gameconfig/*
+import { api, withOnlinePlayerGuard } from './client'
+import type {
+  GameConfigSchemaResponse,
+  GameConfigExperimentalCategoriesResponse,
+  GameConfigExperimentalCategoryResponse,
+  GameConfigExperimentalSearchResponse,
+  GameConfigField,
+  GameConfigResponse,
+  RetailServerSettingsResponse,
+  RetailServerSettingsSaveResponse,
+  GameConfigSaveResponse,
+  GameConfigBackupResponse,
+  GameConfigBackupListResponse,
+  GameConfigClientInfo,
+  GameConfigClientEngineGateResult,
+  GameConfigClientApplyResult,
+  GameConfigClientApplyItem,
+  GameConfigDefaultsResponse,
+  GameConfigRawUpdate,
+  GameConfigPodReloadResponse,
+  LandclaimTimerState,
+  LandclaimTimerSaveResponse,
+  SpicefieldsResponse,
+  SpicefieldStateResponse,
+  SpicefieldSaveResponse,
+  SpicefieldType,
+  DeepDesertPvpState,
+  BaseBackupGuardState,
+} from './types'
+
+const fq = (force: boolean) => (force ? '?force=true' : '')
+
+export function getGameConfigSchema() {
+  return api<GameConfigSchemaResponse>('/api/gameconfig/schema')
+}
+
+export function getGameConfigExperimentalCategories() {
+  return api<GameConfigExperimentalCategoriesResponse>('/api/gameconfig/experimental/categories')
+}
+
+function isGameConfigField(value: unknown): value is GameConfigField {
+  return typeof value === 'object'
+    && value !== null
+    && 'key' in value
+    && typeof value.key === 'string'
+}
+
+function normalizeGameConfigFields(value: unknown): GameConfigField[] {
+  if (Array.isArray(value)) return value.filter(isGameConfigField)
+  return isGameConfigField(value) ? [value] : []
+}
+
+export async function getGameConfigExperimentalCategory(category: string) {
+  const response = await api<GameConfigExperimentalCategoryResponse>(
+    `/api/gameconfig/experimental/category?name=${encodeURIComponent(category)}`,
+  )
+  return { ...response, fields: normalizeGameConfigFields(response.fields) }
+}
+
+export async function searchGameConfigExperimental(query: string) {
+  const response = await api<GameConfigExperimentalSearchResponse>(
+    `/api/gameconfig/experimental/search?q=${encodeURIComponent(query)}`,
+  )
+  return { ...response, fields: normalizeGameConfigFields(response.fields) }
+}
+
+export interface TimeOfDayLockConfig {
+  available: boolean
+  evidenceStatus: 'visual-phases-verified'
+  candidates: Array<{ value: string; label: string }>
+  current: { startTime: string | null; timeOfDayEnabled: string | null; candidate: string | null }
+  clientApply: { available: false; reason: string }
+  restartRequired: true
+  minimumObservationMinutes: number
+}
+
+export interface TimeOfDayLockActionResult {
+  ok: boolean
+  staged?: boolean
+  restored?: boolean
+  candidate?: string
+  backup: string
+  restartRequired: true
+  clientApplied: false
+  message: string
+}
+
+export function getTimeOfDayLockConfig() {
+  return api<TimeOfDayLockConfig>('/api/gameconfig/time-of-day')
+}
+
+export function stageTimeOfDayPhase(candidate: string) {
+  return withOnlinePlayerGuard(force =>
+    api<TimeOfDayLockActionResult>(
+      `/api/gameconfig/time-of-day/stage${fq(force)}`,
+      { method: 'POST', body: JSON.stringify({ candidate }) },
+    ),
+  )
+}
+
+export function restoreTimeOfDayCycle() {
+  return withOnlinePlayerGuard(force =>
+    api<TimeOfDayLockActionResult>(
+      `/api/gameconfig/time-of-day/restore${fq(force)}`,
+      { method: 'POST' },
+    ),
+  )
+}
+
+export function getGameConfig() {
+  return api<GameConfigResponse>('/api/gameconfig')
+}
+
+export function getRetailServerSettings(signal?: AbortSignal, source?: 'operator') {
+  return api<RetailServerSettingsResponse>(`/api/gameconfig/retail-server-settings${source ? '?source=operator' : ''}`, { signal })
+}
+
+export function saveRetailServerSettings(revision: string, updates: Record<string, string>, importOperatorRevision?: string) {
+  return withOnlinePlayerGuard(force =>
+    api<RetailServerSettingsSaveResponse>(`/api/gameconfig/retail-server-settings${fq(force)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ revision, updates, ...(importOperatorRevision ? { importOperatorRevision } : {}) }),
+    }),
+  )
+}
+
+export function saveGameConfig(updates: Record<string, string>) {
+  return withOnlinePlayerGuard(force =>
+    api<GameConfigSaveResponse>(`/api/gameconfig${fq(force)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ updates }),
+    }),
+  )
+}
+
+export function reloadGameConfigPods() {
+  return withOnlinePlayerGuard(force =>
+    api<GameConfigPodReloadResponse>(`/api/gameconfig/reload-pods${fq(force)}`, {
+      method: 'POST',
+    }),
+  )
+}
+
+// Defaults catalog — full DefaultGame.ini / DefaultEngine.ini from the live
+// pod, merged with current overrides. Pass refresh=true to re-read the pod.
+export function getGameConfigDefaults(refresh = false) {
+  return api<GameConfigDefaultsResponse>(
+    `/api/gameconfig/defaults${refresh ? '?refresh=1' : ''}`,
+  )
+}
+
+// Save arbitrary (file, section, key, value) tuples — used by the defaults
+// browser so keys outside the curated schema can still be persisted via the
+// existing explicit-array form of PUT /api/gameconfig.
+export function saveGameConfigRaw(updates: GameConfigRawUpdate[]) {
+  return withOnlinePlayerGuard(force =>
+    api<GameConfigSaveResponse>(`/api/gameconfig${fq(force)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ updates, lab: true }),
+    }),
+  )
+}
+
+export function saveLabLocal(updates: GameConfigRawUpdate[], validateOnly = false) {
+  return api<GameConfigClientApplyResult>('/api/gameconfig/client/lab', {
+    method: 'PUT', body: JSON.stringify({ approved: true, updates, validateOnly }),
+  })
+}
+
+export function backupGameConfig() {
+  return api<GameConfigBackupResponse>('/api/gameconfig/backup', { method: 'POST' })
+}
+
+export function listGameConfigBackups() {
+  return api<GameConfigBackupListResponse>('/api/gameconfig/backups')
+}
+
+export function deleteGameConfigBackups(paths: string[]) {
+  return api<{ ok: boolean; deleted: number; results: Array<{ path: string; ok: boolean; reason?: string }> }>(
+    '/api/gameconfig/backups/delete',
+    { method: 'POST', body: JSON.stringify({ paths }) },
+  )
+}
+
+// --- Local client config (admin's own machine) -----------------------------
+
+export function getGameConfigClient() {
+  return api<GameConfigClientInfo>('/api/gameconfig/client')
+}
+
+export function setGameConfigClientDir(dir: string) {
+  return api<GameConfigClientInfo>('/api/gameconfig/client/dir', {
+    method: 'PUT',
+    body: JSON.stringify({ dir }),
+  })
+}
+
+export function setGameConfigClientEngineEnabled(enabled: boolean, dir?: string) {
+  return api<GameConfigClientEngineGateResult>('/api/gameconfig/client/engine', {
+    method: 'PUT',
+    body: JSON.stringify({ enabled, ...(dir ? { dir } : {}) }),
+  })
+}
+
+export function applyGameConfigClient(items: GameConfigClientApplyItem[], dir?: string) {
+  return api<GameConfigClientApplyResult>('/api/gameconfig/client/apply', {
+    method: 'PUT',
+    body: JSON.stringify({
+      updates: items.map(i => ({ file: i.file, key: i.key, value: i.value })),
+      ...(dir ? { dir } : {}),
+    }),
+  })
+}
+
+export function openGameConfigClientFile(file: 'game' | 'engine' = 'game', dir?: string) {
+  return api<{ ok: boolean; path: string }>('/api/gameconfig/client/open', {
+    method: 'POST',
+    body: JSON.stringify({ file, ...(dir ? { dir } : {}) }),
+  })
+}
+
+// --- Land-claim (staking unit) extension timer ------------------------------
+
+export function getLandclaimTimer() {
+  return api<LandclaimTimerState>('/api/gameconfig/landclaim-timer')
+}
+
+export function saveLandclaimTimer(enabled: boolean, seconds: string) {
+  return withOnlinePlayerGuard(force =>
+    api<LandclaimTimerSaveResponse>(`/api/gameconfig/landclaim-timer${fq(force)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ enabled, seconds }),
+    }),
+  )
+}
+
+export function getSpicefields() {
+  return api<SpicefieldsResponse>('/api/gameconfig/spicefields')
+}
+
+export function getSpicefieldState(id: number) {
+  return api<SpicefieldStateResponse>(`/api/gameconfig/spicefields/${id}/state`)
+}
+
+export function saveSpicefield(
+  id: number,
+  payload: Pick<SpicefieldType, 'maxActive' | 'maxPrimed' | 'isSpawningActive'>,
+) {
+  return withOnlinePlayerGuard(force =>
+    api<SpicefieldSaveResponse>(`/api/gameconfig/spicefields/${id}${fq(force)}`, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
+  )
+}
+
+// Live toggle for is_spawning_active ONLY. Hits the dedicated guard-railed
+// endpoint that never touches any other column and never writes NULL.
+export function setSpicefieldSpawning(id: number, active: boolean) {
+  return withOnlinePlayerGuard(force =>
+    api<SpicefieldSaveResponse>(`/api/gameconfig/spicefields/${id}/spawning${fq(force)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ active: active === true }),
+    }),
+  )
+}
+
+export function getBaseBackupGuard() {
+  return api<BaseBackupGuardState>('/api/gameconfig/base-backup-guard')
+}
+
+export function saveBaseBackupGuard(enabled: boolean) {
+  return withOnlinePlayerGuard(force =>
+    api<BaseBackupGuardState>(`/api/gameconfig/base-backup-guard${fq(force)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ enabled }),
+    }),
+  )
+}
+
+export function getDeepDesertPvp() {
+  return api<DeepDesertPvpState>('/api/gameconfig/deep-desert-pvp')
+}
+
+export function saveDeepDesertPvp(enabled: boolean, partitionIds: number[]) {
+  return withOnlinePlayerGuard(force =>
+    api<DeepDesertPvpState>(`/api/gameconfig/deep-desert-pvp${fq(force)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ enabled, partitionIds }),
+    }),
+  )
+}
