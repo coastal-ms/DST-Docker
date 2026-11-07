@@ -19,6 +19,41 @@ class FakeEngine:
 
 
 class ManagerTests(unittest.TestCase):
+    def test_cold_database_starts_existing_owned_container_then_waits_for_health(self):
+        engine=Mock(spec=manager.Engine)
+        engine.assert_owned.side_effect=[
+            {'State':{'Status':'exited','Health':{'Status':'healthy'}}},
+            {'State':{'Status':'running','Health':{'Status':'starting'}}},
+            {'State':{'Status':'running','Health':{'Status':'healthy'}}}]
+        state={'id':'a'*32,'phase':'database-ready','database':{'id':'existing-db'}}
+        with patch.object(manager.time,'sleep'):
+            manager.ensure_database_ready(state,engine)
+        engine.lifecycle.assert_called_once_with('existing-db','a'*32,'start')
+        self.assertEqual(engine.assert_owned.call_count,3)
+        engine.create_database.assert_not_called();engine.exec_internal.assert_not_called()
+        self.assertNotIn('desiredState',state)
+
+    def test_ready_database_is_not_restarted_and_unmigrated_database_is_not_started(self):
+        engine=Mock(spec=manager.Engine)
+        engine.assert_owned.return_value={'State':{'Status':'running','Health':{'Status':'healthy'}}}
+        state={'id':'a'*32,'phase':'database-ready','database':{'id':'existing-db'}}
+        manager.ensure_database_ready(state,engine)
+        state['phase']='database-migration-failed'
+        with self.assertRaisesRegex(ValueError,'setup and migration'):manager.ensure_database_ready(state,engine)
+        engine.lifecycle.assert_not_called();engine.exec_internal.assert_not_called()
+
+    def test_failed_or_slow_database_does_not_authorize_maps_or_reinitialize_storage(self):
+        state={'id':'a'*32,'phase':'database-ready','database':{'id':'existing-db'},'desiredState':'stopped'}
+        engine=Mock(spec=manager.Engine)
+        engine.assert_owned.side_effect=[{'State':{'Status':'exited'}},{'State':{'Status':'exited'}}]
+        with self.assertRaisesRegex(ValueError,'stopped during startup'):manager.ensure_database_ready(state,engine)
+        engine.assert_owned.side_effect=None
+        engine.assert_owned.return_value={'State':{'Status':'running','Health':{'Status':'unhealthy'}}}
+        with self.assertRaisesRegex(ValueError,'did not become ready'):manager.ensure_database_ready(state,engine,timeout=0)
+        engine.lifecycle.assert_called_once_with('existing-db','a'*32,'start')
+        engine.create_database.assert_not_called();engine.exec_internal.assert_not_called()
+        self.assertEqual(state['desiredState'],'stopped')
+
     def test_regis_payload_requires_booleans_before_journaling_or_thread_dispatch(self):
         for payload in ({}, {'enabled':'true'}, {'enabled':1}, {'enabled':True,'acknowledgeStoredTanks':'false'}):
             state={'id':'a'*32}

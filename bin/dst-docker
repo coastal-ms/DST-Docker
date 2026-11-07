@@ -2,6 +2,19 @@
 set -eu
 task_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$task_root"
+
+# Installer releases share this optional override and their persistent CA.
+# Checkouts keep it outside Git-tracked configuration in their own root.
+task_https_state=$task_root
+if [ -f "$task_root/../../installation.json" ]; then task_https_state=$(CDPATH= cd -- "$task_root/../.." && pwd); fi
+task_https_override=${DST_HTTPS_OVERRIDE:-$task_https_state/https.compose.json}
+compose() {
+  if [ -f "$task_https_override" ]; then
+    docker compose -f "$task_root/compose.yaml" -f "$task_https_override" "$@"
+  else
+    docker compose -f "$task_root/compose.yaml" "$@"
+  fi
+}
 task_port=''
 case "${1:-up}" in
   up) if [ "$#" -gt 1 ]; then [ "$#" -eq 3 ] && [ "$2" = '--port' ] || { echo 'Usage: sh bin/dst-docker up [--port PORT]' >&2; exit 1; }; task_port=$3; fi;;
@@ -10,20 +23,22 @@ esac
 if [ -n "$task_port" ]; then
   case "$task_port" in *[!0-9]*|'') echo 'Choose a console port between 1024 and 65535.' >&2; exit 1;; esac
   [ "$task_port" -ge 1024 ] && [ "$task_port" -le 65535 ] || { echo 'Choose a console port between 1024 and 65535.' >&2; exit 1; }
+  [ ! -f "$task_https_override" ] || { echo 'HTTPS is paired with the current HTTP port. Keep that port while HTTPS is enabled.' >&2; exit 1; }
 fi
 command -v docker >/dev/null 2>&1 || { echo 'Docker is required. Run this inside Linux or your WSL distribution.' >&2; exit 1; }
 docker compose version >/dev/null
 portal_links() {
-  docker compose exec -T dst cat /data/state/DuneServer/last-url.txt |
+  compose exec -T dst cat /data/state/DuneServer/last-url.txt |
     python3 packaging/docker/portal_urls.py $(hostname -I 2>/dev/null || true)
+  if [ -f "$task_https_override" ]; then python3 -c 'import json,sys;print("HTTPS: "+json.load(open(sys.argv[1]))["x-dst-https-origin"])' "$task_https_override"; fi
 }
 set_port() {
-  docker compose run --rm --no-deps --entrypoint pwsh dst -NoLogo -NoProfile -File /opt/dst/packaging/docker/set-console-port.ps1 -Port "$task_port"
+  compose run --rm --no-deps --entrypoint pwsh dst -NoLogo -NoProfile -File /opt/dst/packaging/docker/set-console-port.ps1 -Port "$task_port"
 }
 wait_portal() {
   task_attempt=0
   while [ "$task_attempt" -lt 30 ]; do
-    if docker compose exec -T dst pwsh -NoLogo -NoProfile -File /opt/dst/healthcheck.ps1 >/dev/null 2>&1; then
+    if compose exec -T dst pwsh -NoLogo -NoProfile -File /opt/dst/healthcheck.ps1 >/dev/null 2>&1; then
       printf '\nOpen DST in your browser:\n'
       portal_links
       return 0
@@ -39,17 +54,39 @@ case "${1:-up}" in
     if ! docker compose -f packaging/docker/compose.assets.yaml run --rm --entrypoint python3 assets -c 'import json; from pathlib import Path; state=json.loads(Path("/srv/dst/install-state.json").read_text()); raise SystemExit(0 if state.get("state")=="downloaded" else 1)' >/dev/null 2>&1; then
       docker compose -f packaging/docker/compose.assets.yaml run --rm assets
     fi
-    docker compose build map-observer-image scaler-image regis-tools-image
-    docker compose pull file-browser-image
-    docker compose build
+    compose build map-observer-image scaler-image regis-tools-image
+    compose pull file-browser-image
+    compose build
     if [ -n "$task_port" ]; then set_port; fi
-    docker compose up --no-build -d
+    compose up --no-build -d
     wait_portal
     ;;
-  port) set_port; docker compose restart dst; wait_portal ;;
+  port) set_port; compose restart dst; wait_portal ;;
+  https)
+    [ "$#" -ge 2 ] && [ "$#" -le 3 ] || { echo 'Usage: sh bin/dst-docker https HOST_IPV4 [HTTPS_PORT]' >&2; exit 1; }
+    task_tls_port=${3:-8443}
+    if [ -f "$task_https_override" ]; then
+      python3 - "$task_https_override" "$2" "$task_tls_port" <<'PY'
+import json,sys
+expected='https://'+sys.argv[2]+':'+sys.argv[3]
+if json.load(open(sys.argv[1])).get('x-dst-https-origin')!=expected:raise SystemExit('Existing HTTPS configuration uses another address or port. Preserve its authority; review the configuration before changing it.')
+PY
+    else
+      task_project=$(compose config --format json | python3 -c 'import json,sys;print(json.load(sys.stdin)["name"])')
+      task_http_port=$(compose exec -T dst cat /data/state/DuneServer/last-url.txt | python3 -c 'import sys,urllib.parse;print(urllib.parse.urlparse(sys.stdin.read().strip()).port)')
+      python3 packaging/docker/https.py prepare --project "$task_project" --address "$2" --port "$task_tls_port" --upstream-port "$task_http_port" --output "$task_https_override"
+    fi
+    compose up --no-build -d --no-deps dst https
+    printf '\nHTTPS started. Export its public trust certificate with: sh bin/dst-docker https-root OUTPUT.crt\nTrust that certificate on each client PC before using HTTPS. HTTP remains available.\n'
+    ;;
+  https-root)
+    [ "$#" -eq 2 ] && [ -f "$task_https_override" ] || { echo 'Usage after enabling HTTPS: sh bin/dst-docker https-root OUTPUT.crt' >&2; exit 1; }
+    task_project=$(compose config --format json | python3 -c 'import json,sys;print(json.load(sys.stdin)["name"])')
+    python3 packaging/docker/https.py export-root --project "$task_project" --output "$2"
+    ;;
   url) portal_links ;;
-  status) docker compose ps ;;
-  logs) docker compose logs --tail=80 ;;
-  down) docker compose down ;;
-  *) echo 'Usage: sh bin/dst-docker up [--port PORT] | port PORT | url | status | logs | down' >&2; exit 1 ;;
+  status) compose ps ;;
+  logs) compose logs --tail=80 ;;
+  down) compose down ;;
+  *) echo 'Usage: sh bin/dst-docker up [--port PORT] | port PORT | https HOST_IPV4 [HTTPS_PORT] | https-root OUTPUT.crt | url | status | logs | down' >&2; exit 1 ;;
 esac

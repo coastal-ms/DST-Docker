@@ -67,3 +67,5 @@ tools/atlas/__pycache__/
 
 # Local player INI backups produced when running helpers from source.
 /app/DST/INI Backups/
+# Local HTTPS configuration contains installation-specific volume names.
+https.compose.json

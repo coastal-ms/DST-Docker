@@ -499,6 +499,28 @@ def prepare_services(state,engine):
     return public_state(state,engine)
 
 
+def ensure_database_ready(state,engine,timeout=90):
+    database=state.get('database',{})
+    if not database.get('id') or state.get('phase')!='database-ready':
+        raise ValueError('Finish database setup and migration before starting the world.')
+    observed=engine.assert_owned(database['id'],state['id'],'postgres')
+    status=observed['State']['Status']
+    if status in {'created','exited'}:
+        engine.lifecycle(database['id'],state['id'],'start')
+    elif status not in {'running','restarting'}:
+        raise ValueError('The existing game database cannot start in its current container state.')
+    deadline=time.monotonic()+timeout
+    while True:
+        observed=engine.assert_owned(database['id'],state['id'],'postgres')
+        status=observed['State']['Status']
+        if status=='running' and observed['State'].get('Health',{}).get('Status')=='healthy':return
+        if status not in {'running','restarting'}:
+            raise ValueError('The existing game database stopped during startup. Check its logs; maps were not started.')
+        if time.monotonic()>=deadline:
+            raise ValueError('The game database did not become ready. Check its logs and retry Start Battlegroup; maps were not started.')
+        time.sleep(0.25)
+
+
 def start_services(state,engine,publish_gateway=True):
     regis_compatibility.assert_prepared_images(state,engine)
     if state.get('pendingResourceChange'):raise ValueError('Finish the pending resource allocation before starting the world.')
@@ -511,8 +533,6 @@ def start_services(state,engine,publish_gateway=True):
     if state.get('pendingAddressChange'):raise ValueError('Finish the network configuration update before starting the world.')
     if not state.get('services') or any(entry['phase']!='prepared' for entry in state['services'].values()):
         raise ValueError('Prepare all game services before starting the world.')
-    database=engine.assert_owned(state['database']['id'],state['id'],'postgres')
-    if database['State'].get('Health',{}).get('Status')!='healthy': raise ValueError('The game database is not ready.')
     needed=0
     initial={partition for item in state['worldPlan']['maps'] for partition in item['partitions'][:item['initialReplicas']]}
     selected={int(name.removeprefix('game-')) for name in state['services'] if name.startswith('game-')
@@ -530,6 +550,10 @@ def start_services(state,engine,publish_gateway=True):
         available=int(counters['MemAvailable'])*1024
         if available<needed+2*1024**3:
             raise ValueError(f'Starting these maps needs {needed/1024**3:.1f} GiB plus 2 GiB host headroom; {available/1024**3:.1f} GiB is available.')
+    # A host reboot stops the infrastructure too. Start the existing migrated
+    # database only after admission checks, and wait before launching any maps.
+    # This never recreates storage, initializes roles, or reruns migrations.
+    ensure_database_ready(state,engine)
     state['desiredState']='running';save(state)
     prepare_connections(state,engine)
     if state.get('scaler',{}).get('phase')=='prepared':engine.lifecycle(state['scaler']['id'],state['id'],'start')

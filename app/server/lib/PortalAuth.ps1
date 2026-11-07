@@ -418,13 +418,13 @@ function Set-DunePortalSessionCookie {
     param($Response, [string]$Token, [bool]$RememberMe = $false, $Request=$null)
     $cookie = "$($script:DunePortalCookieName)=$Token; Path=/"
     if ($RememberMe) { $cookie += "; Max-Age=$($script:DunePortalRememberDays * 86400)" }
-    $secure=if($env:DST_HOSTING_BACKEND -eq 'docker' -and $Request -and $Request.Url.Scheme -eq 'http'){''}else{'; Secure'}
+    $secure=if($env:DST_HOSTING_BACKEND -eq 'docker' -and $Request -and $Request.Url.Scheme -eq 'http' -and -not (Get-DuneDockerTlsOrigin $Request)){''}else{'; Secure'}
     $Response.Headers['Set-Cookie'] = "$cookie$secure; HttpOnly; SameSite=Strict"
 }
 
 function Clear-DunePortalSessionCookie {
     param($Response,$Request=$null)
-    $secure=if($env:DST_HOSTING_BACKEND -eq 'docker' -and $Request -and $Request.Url.Scheme -eq 'http'){''}else{'; Secure'}
+    $secure=if($env:DST_HOSTING_BACKEND -eq 'docker' -and $Request -and $Request.Url.Scheme -eq 'http' -and -not (Get-DuneDockerTlsOrigin $Request)){''}else{'; Secure'}
     $Response.Headers['Set-Cookie'] = "$($script:DunePortalCookieName)=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT$secure; HttpOnly; SameSite=Strict"
 }
 
@@ -532,6 +532,25 @@ function Get-DunePortalTrustedRequestAuthority {
     return (ConvertTo-DunePortalAuthority $authority)
 }
 
+function Get-DuneDockerTlsOrigin {
+    param($Request)
+    # Only our explicitly paired local TLS proxy may supply the external scheme.
+    # Generic forwarding headers never authorize HTTPS or a local launch session.
+    if($env:DST_HOSTING_BACKEND -ne 'docker' -or -not $env:DST_TLS_PROXY_CONFIG){return $null}
+    try {
+        if(-not [Net.IPAddress]::IsLoopback($Request.RemoteEndPoint.Address)){return $null}
+        if([string]$Request.Headers['X-Forwarded-Proto'] -cne 'https'){return $null}
+        $config=Get-Content -LiteralPath $env:DST_TLS_PROXY_CONFIG -Raw -ErrorAction Stop|ConvertFrom-Json -AsHashtable -ErrorAction Stop
+        if($config.secret -isnot [string] -or $config.secret -cnotmatch '^[a-f0-9]{64}$'){return $null}
+        $proof=[string]$Request.Headers['X-Dst-Tls-Proxy']
+        if(-not $proof -or -not (Test-DunePortalFixedTimeEqual ([Text.Encoding]::UTF8.GetBytes($proof)) ([Text.Encoding]::UTF8.GetBytes($config.secret)))){return $null}
+        $origin=[uri]$config.origin
+        if($origin.Scheme -cne 'https' -or $origin.UserInfo -or $origin.AbsolutePath -ne '/' -or $origin.Query -or $origin.Fragment){return $null}
+        if([string]$Request.Headers['Host'] -ine $origin.Authority){return $null}
+        return $origin
+    } catch {return $null}
+}
+
 function Test-DunePortalRequestOrigin {
     param($Request)
     $origin = ''
@@ -544,7 +563,8 @@ function Test-DunePortalRequestOrigin {
             # port translation. Host retains the browser's original authority.
             $authority=[string]$Request.Headers['Host']
             if(-not $authority){$authority=$Request.Url.Authority}
-            $expected=[uri]("$($Request.Url.Scheme)://${authority}/")
+            $expected=Get-DuneDockerTlsOrigin $Request
+            if(-not $expected){$expected=[uri]("$($Request.Url.Scheme)://${authority}/")}
             return (-not $expected.UserInfo -and $expected.AbsolutePath -eq '/' -and -not $expected.Query -and -not $expected.Fragment -and
                 $originUri.Scheme -in @('http','https') -and $originUri.Scheme -ceq $expected.Scheme -and
                 $originUri.Authority -ieq $expected.Authority -and -not $originUri.UserInfo -and

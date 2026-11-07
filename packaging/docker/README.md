@@ -14,6 +14,23 @@ The private preview builds DST from this checkout. The first build downloads the
 
 On Windows with WSL NAT networking, the WSL address works from Windows; access through the Windows machine's LAN address additionally needs a Windows forwarding rule. Linux hosts and WSL mirrored networking use their reachable host address directly. A host firewall must permit the selected port for other devices to connect.
 
+## Optional HTTPS for a private IP
+
+After the HTTP console is ready, enable a separate HTTPS address from Linux or WSL:
+
+```sh
+sh bin/dst-docker https YOUR_HOST_IPV4
+sh bin/dst-docker https-root "$HOME/dst-root.crt"
+```
+
+HTTPS uses port 8443 by default; a third argument selects another available port. HTTP keeps its existing port, normally 8088. Enabling HTTPS recreates only the management application and starts its TLS proxy. It does not start game maps, replace the database or change server settings. Existing owner accounts remain available. Use a stable host address; a WSL NAT address may change when WSL restarts. This private-IP setup does not buy a domain, expose router ports or require a Windows service.
+
+The second command exports only the public root certificate and prints its SHA-256 fingerprint. Transfer that certificate to each client PC and verify the fingerprint before explicitly trusting it in that client's certificate store. For Windows Chrome/Edge, the current user's Trusted Root Certification Authorities store is sufficient. Firefox may require its own Authorities import. DST never installs trust automatically and does not ask you to bypass certificate warnings. The private authority keys remain in a dedicated Docker volume, separate from the application and its game data. Preserve that volume across upgrades; deleting it requires clients to trust a replacement authority.
+
+Open the printed `https://HOST_IPV4:8443` address after trust is installed. Supported Chromium browsers can then request permission to read and write the selected client config folder directly. HTTPS alone does not add directory-write support to Firefox; the reviewed download workflow remains available there. The browser still cannot establish whether the game is closed.
+
+The launcher retains the HTTPS override outside versioned installer releases and reuses it on subsequent `up`, `status`, `logs` and `down` commands. Repeating `https` with the same address and port reuses the existing authority. It refuses to replace an existing authority or silently change its address. Choose the HTTP console port before enabling HTTPS; the paired proxy currently keeps that upstream port fixed. This path requires the Docker image built with HTTPS proxy support.
+
 For WSL NAT, `packaging/docker/Enable-DstDockerLan.ps1` configures a specific Windows LAN address and console port from administrator Windows PowerShell. Run it with `-ListenAddress <Windows-LAN-IP>` after the portal starts; it defaults to8088, or accepts `-Port PORT` for your chosen port. `-WhatIf` previews its exact changes. It leaves other forwarding rules intact, limits its firewall rule to the private local subnet, and can be rerun to refresh a changed WSL address.
 
 ```sh
