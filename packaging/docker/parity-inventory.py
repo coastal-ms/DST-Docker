@@ -16,11 +16,14 @@ for path in sorted((root / 'app/server/routes').glob('*.ps1')):
     for match in re.finditer(r"Register-DuneWebSocket\s+-Path\s+'([^']+)'", source):
         routes.append({'source': path.name, 'method': 'CONNECT', 'path': match[1],
                        'dockerStatus': 'not-yet-verified', 'featureDisposition': 'preserve'})
+for route in routes:
+    if route['source'].startswith('Solo') or route['path'].startswith('/api/solo'):
+        route.update(dockerStatus='out-of-scope',featureDisposition='standalone-windows-only')
 report = {'baseline': baseline, 'routeCount': len(routes), 'routes': routes,
           'requirements': ['Preserve existing features, permissions, confirmations, backup/offline/write safeguards and result semantics.',
                            'Replace Windows packaged helpers with Linux-native equivalents.',
                            'Replace Hyper-V/Kubernetes transports with Docker adapters.',
-                           'Preserve Solo feature scope; qualify save access and process-closed guards on Linux/WSL.',
+                           'Solo stays in the standalone Windows DST application; Docker hosts servers on native Linux and WSL without a Windows companion.',
                            'Adapt map collectors and browser presentation without losing map features.',
                            'VM-data migration is lower priority; no public publication authorized.']}
 if len(sys.argv) != 2: raise SystemExit('Usage: parity-inventory.py OUTPUT.json')

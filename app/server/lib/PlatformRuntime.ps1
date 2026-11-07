@@ -33,5 +33,6 @@ function Get-DunePlatformRuntime {
 
 function Test-DunePlatformLiveCacheSupported {
     param([string]$RuntimePlatform)
-    return (Get-DunePlatformRuntime -RuntimePlatform $RuntimePlatform) -eq 'windows'
+    $runtime = Get-DunePlatformRuntime -RuntimePlatform $RuntimePlatform
+    return $runtime -eq 'windows' -or ($runtime -eq 'linux' -and $env:DST_HOSTING_BACKEND -eq 'docker')
 }

@@ -51,7 +51,7 @@ import { BaseBackupGuardPanel } from './gameconfig/BaseBackupGuardPanel'
 import { isLocalViewer } from '../util/viewer'
 import { useSettingsDraft } from './gameconfig/settingsApplyContext'
 import { LabSaveReview } from './gameconfig/LabSaveReview'
-import { chooseBrowserClientFolder } from '../api/browserClientFiles'
+import { chooseBrowserClientFolder, chooseBrowserClientFiles, isBrowserClientSelectionCancelled } from '../api/browserClientFiles'
 
 export const EXPERIMENTAL_BLOCKED_DEFAULT_TARGETS = new Set([
   'game||/script/dunesandbox.timeofdaysettings||m_starttime',
@@ -527,12 +527,12 @@ export function GameConfig({ mode = 'standard', embedded = false, section = 'adv
     void refreshClient()
   }, [refreshClient])
 
-  const onBrowseClientDir = useCallback(async () => {
+  const onBrowseClientDir = useCallback(async (filesOnly = false) => {
     setClientErr(null)
     setClientBusy(true)
     try {
       if (dockerEdition) {
-        const info = await chooseBrowserClientFolder()
+        const info = await (filesOnly ? chooseBrowserClientFiles() : chooseBrowserClientFolder())
         setClientInfo(info); setClientDirInput(info.dir)
         setClientMsg(info.browserDelivery === 'download'
           ? 'Client files selected. Reviewed changes download with exact originals as backups; you install them manually while Dune is closed.'
@@ -549,7 +549,7 @@ export function GameConfig({ mode = 'standard', embedded = false, section = 'adv
       })
       if (r.ok && !r.cancelled && r.path) setClientDirInput(r.path)
     } catch (e) {
-      setClientErr(e instanceof Error ? e.message : String(e))
+      if (!isBrowserClientSelectionCancelled(e)) setClientErr(e instanceof Error ? e.message : String(e))
     } finally {
       setClientBusy(false)
     }
@@ -1628,7 +1628,7 @@ export function GameConfig({ mode = 'standard', embedded = false, section = 'adv
                   )}
               </div>
             )}
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <input
                 type="text"
                 value={clientDirInput}
@@ -1636,11 +1636,12 @@ export function GameConfig({ mode = 'standard', embedded = false, section = 'adv
                 onChange={e => setClientDirInput(e.target.value)}
                 spellCheck={false}
                 placeholder={clientInfo?.default ?? '%LOCALAPPDATA%\\DuneSandbox\\Saved\\Config\\Windows'}
-                className="flex-1 min-w-0 px-3 py-2 rounded-lg bg-surface-2 border border-border text-text text-sm font-mono placeholder:text-text-dim focus:outline-none focus:ring-2 focus:ring-ibad focus:border-ibad/50"
+                className="basis-full sm:basis-0 flex-1 min-w-0 px-3 py-2 rounded-lg bg-surface-2 border border-border text-text text-sm font-mono placeholder:text-text-dim focus:outline-none focus:ring-2 focus:ring-ibad focus:border-ibad/50"
               />
               <button type="button" onClick={() => void onBrowseClientDir()} disabled={clientBusy} className="btn-secondary shrink-0">
-                <Icon name={clientBusy ? 'Loader2' : 'FolderOpen'} size={14} className={clientBusy ? 'animate-spin' : ''} /> Browse
+                <Icon name={clientBusy ? 'Loader2' : 'FolderOpen'} size={14} className={clientBusy ? 'animate-spin' : ''} /> {dockerEdition ? 'Choose folder' : 'Browse'}
               </button>
+              {dockerEdition && <button type="button" onClick={() => void onBrowseClientDir(true)} disabled={clientBusy} className="btn-secondary shrink-0">Choose files</button>}
               {!dockerEdition && <button
                 type="button"
                 onClick={() => void onSaveClientDir()}

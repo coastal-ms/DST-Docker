@@ -1,9 +1,13 @@
-foreach ($fileBrowserMethod in @('GET','HEAD','POST','PUT','PATCH','DELETE')) {
-    Register-DuneRoute -Method $fileBrowserMethod -Path '/api/docker/file-browser/{path*}' -StreamBody -Handler {
-        param($req,$res,$routeParams,$body)
-        Invoke-DuneDockerFileBrowser -Request $req -Response $res
-    }
+$script:DuneDockerFileBrowserHandler = {
+    param($req,$res,$routeParams,$body)
+    Invoke-DuneDockerFileBrowser -Request $req -Response $res
 }
+Register-DuneRoute -Method GET -Path '/api/docker/file-browser/{path*}' -StreamBody -Handler $script:DuneDockerFileBrowserHandler
+Register-DuneRoute -Method HEAD -Path '/api/docker/file-browser/{path*}' -StreamBody -Handler $script:DuneDockerFileBrowserHandler
+Register-DuneRoute -Method POST -Path '/api/docker/file-browser/{path*}' -StreamBody -Handler $script:DuneDockerFileBrowserHandler
+Register-DuneRoute -Method PUT -Path '/api/docker/file-browser/{path*}' -StreamBody -Handler $script:DuneDockerFileBrowserHandler
+Register-DuneRoute -Method PATCH -Path '/api/docker/file-browser/{path*}' -StreamBody -Handler $script:DuneDockerFileBrowserHandler
+Register-DuneRoute -Method DELETE -Path '/api/docker/file-browser/{path*}' -StreamBody -Handler $script:DuneDockerFileBrowserHandler
 
 Register-DuneRoute -Method POST -Path '/api/docker/client-files/transform' -Handler {
     param($req,$res,$routeParams,$body)

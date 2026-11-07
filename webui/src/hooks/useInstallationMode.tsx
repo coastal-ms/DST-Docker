@@ -9,7 +9,7 @@ export function InstallationProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     let active = true
     api<{ mode: 'full' | 'solo' }>('/api/installation')
-      .then(result => { if (active) setMode(result.mode === 'solo' ? 'solo' : 'full') })
+      .then(result => { if (active) setMode(import.meta.env.VITE_DST_EDITION !== 'docker' && result.mode === 'solo' ? 'solo' : 'full') })
       .catch(() => { if (active) setError(true) })
     return () => { active = false }
   }, [])

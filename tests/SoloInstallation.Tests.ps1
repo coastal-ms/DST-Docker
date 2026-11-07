@@ -10,6 +10,16 @@
 Describe 'Solo installation configuration and isolation' {
     BeforeEach { $script:DuneConfigFile = Join-Path $TestDrive 'installation.config' }
     AfterEach { $script:DuneConfigFile = $null }
+    It 'keeps native Linux and WSL Docker server hosting out of an imported Solo installation mode' {
+        $previousBackend=$env:DST_HOSTING_BACKEND
+        try {
+            $env:DST_HOSTING_BACKEND='docker'
+            Mock Read-DuneConfigRaw { [ordered]@{InstallationMode='solo'} }
+            Get-DuneInstallationMode | Should -Be 'full'
+            Test-DuneSoloInstallation | Should -BeFalse
+            Should -Invoke Read-DuneConfigRaw -Times 0
+        } finally { $env:DST_HOSTING_BACKEND=$previousBackend }
+    }
     It 'retains full mode in an uninitialized runtime without a Windows profile' {
         $previousAppData = $env:APPDATA
         $previousConfig = $script:DuneConfigFile

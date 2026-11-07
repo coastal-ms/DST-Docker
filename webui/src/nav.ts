@@ -105,6 +105,7 @@ export function getVisibleNavItems({
   soloOnly?: boolean
 }) {
   return NAV_ITEMS
+    .filter(item => import.meta.env.VITE_DST_EDITION !== 'docker' || item.to !== '/solo')
     .filter(item => !soloOnly || isSoloDestination(item.to))
     .filter(item => includeSidebarHidden || !item.sidebarHidden)
     .filter(item => !item.localOnly || local)

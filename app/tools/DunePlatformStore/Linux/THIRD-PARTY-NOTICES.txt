@@ -1,0 +1,14 @@
+DunePlatformStore Linux runtime and database dependencies
+
+Microsoft .NET runtime 10.0.14
+Copyright Microsoft Corporation and contributors. MIT License.
+See DotNET-LICENSE.txt and DotNET-THIRD-PARTY-NOTICES.txt.
+
+Microsoft.Data.Sqlite / Microsoft.Data.Sqlite.Core 10.0.10
+Copyright Microsoft Corporation. MIT License (included in DotNET-LICENSE.txt).
+
+SQLitePCLRaw bundle, core, e_sqlite3 provider and native e_sqlite3 package 2.1.13
+Copyright 2014-2024 SourceGear, LLC. Apache License 2.0.
+See Apache-2.0.txt. Package metadata is included for the distributed components.
+
+The helper's own code is covered by DST-LICENSE.txt.

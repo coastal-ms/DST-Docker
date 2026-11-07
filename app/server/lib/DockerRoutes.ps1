@@ -4,6 +4,7 @@ function Test-DuneDockerRouteQualified {
     param([string]$Method,[string]$Path)
     if($Path.StartsWith('/api/docker/file-browser/',[StringComparison]::Ordinal) -and $Method -in @('GET','HEAD','POST','PUT','PATCH','DELETE')){return $true}
     if($Path -eq '/api/docker/setup'){return $true}
+    if($Method -eq 'GET' -and $Path -in @('/api/v1/maps/catalog','/api/v1/maps/deep-desert','/api/v1/maps/deep-desert/layers/active-spice','/api/v1/maps/deep-desert/layers/public-poi')){return $true}
     if($Path -eq '/api/gameconfig/regis-tanks' -and $Method -in @('GET','PUT')){return $true}
     if($Path -eq '/api/gameconfig/regis-tanks/recover' -and $Method -eq 'POST'){return $true}
     if($Path -eq '/api/gameplay/vehicles/regis-tanks' -and $Method -in @('GET','POST')){return $true}

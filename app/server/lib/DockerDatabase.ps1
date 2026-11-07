@@ -27,7 +27,7 @@ function Invoke-DuneDockerSqlRaw {
             throw 'Docker database request timed out.'
         }
         if ($process.ExitCode -ne 0) { throw 'Docker database client failed.' }
-        $result = $stdout.GetAwaiter().GetResult() | ConvertFrom-Json -AsHashtable
+        $result = $stdout.GetAwaiter().GetResult() | ConvertFrom-Json -AsHashtable -DateKind String
         if ($Detailed) { return $result }
         if ($result.exitCode -ne 0) { return [string]$result.stderr }
         return [string]$result.stdout

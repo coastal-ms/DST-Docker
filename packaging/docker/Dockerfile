@@ -1,3 +1,15 @@
+FROM mcr.microsoft.com/dotnet/sdk:10.0@sha256:212fe4cb74627d5adf9817a4088906ae3edff1bd853bb27565d4b46731efe61e AS platform-tools
+WORKDIR /source
+COPY app/tools/DunePlatformStore/ ./
+COPY LICENSE /source/DST-LICENSE.txt
+RUN dotnet publish DunePlatformStore.Linux.csproj -c Release -o /out
+RUN mkdir -p /out/licenses \
+    && cp DST-LICENSE.txt Linux/THIRD-PARTY-NOTICES.txt /out/licenses/ \
+    && cp /root/.nuget/packages/microsoft.netcore.app.runtime.linux-x64/10.0.14/LICENSE.TXT /out/licenses/DotNET-LICENSE.txt \
+    && cp /root/.nuget/packages/microsoft.netcore.app.runtime.linux-x64/10.0.14/THIRD-PARTY-NOTICES.TXT /out/licenses/DotNET-THIRD-PARTY-NOTICES.txt \
+    && cp /usr/share/common-licenses/Apache-2.0 /out/licenses/Apache-2.0.txt \
+    && cp /root/.nuget/packages/microsoft.data.sqlite*/10.0.10/*.nuspec /root/.nuget/packages/sqlitepclraw.*/2.1.13/*.nuspec /out/licenses/
+
 FROM node:24-bookworm-slim AS web
 WORKDIR /src/webui
 COPY webui/package.json webui/package-lock.json ./
@@ -18,6 +30,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends openssh-client 
 RUN python3 -m venv /opt/dst-python && /opt/dst-python/bin/pip install --no-cache-dir 'psycopg[binary]==3.3.8'
 WORKDIR /opt/dst
 COPY app/ ./app/
+COPY --from=platform-tools /out/ ./app/tools/platform/
 COPY dune-server.ps1 dune-server.config.example LICENSE NOTICE ./
 COPY --from=web /src/webui/dist/ ./webui/dist/
 COPY packaging/docker/healthcheck.ps1 /opt/dst/healthcheck.ps1

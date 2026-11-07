@@ -128,7 +128,7 @@ function Get-DuneRouteLifecycle {
     $key = Get-DuneRegisteredRouteKey $Route
     $override = $manifest.routeLifecycleOverrides.PSObject.Properties[$key]
     if ($override) { return [string]$override.Value }
-    if ($Route.PSObject.Properties.Name -contains 'Method' -and [string]$Route.Method -eq 'GET') {
+    if ($Route.PSObject.Properties.Name -contains 'Method' -and [string]$Route.Method -in @('GET','HEAD')) {
         return 'read'
     }
     if ($Route.PSObject.Properties.Name -contains 'Method' -and [string]$Route.Method -eq 'DELETE') {
@@ -307,7 +307,7 @@ function Get-DuneCapabilitiesForPrincipal {
     $principalName = Get-DuneCapabilityPrincipalName $Principal
     if (-not $principalName) { return @() }
     return @((Get-DuneCapabilityRegistry).capabilities | Where-Object {
-        ($env:DST_HOSTING_BACKEND -ne 'docker' -or [string]$_.id -in @('platform.capabilities','platform.status','operation.health','settings.setup','map.observer')) -and
+        ($env:DST_HOSTING_BACKEND -ne 'docker' -or [string]$_.id -in @('platform.capabilities','platform.status','operation.health','settings.setup','map.observer','map.live-cache')) -and
         [string]$_.rolloutState -ne 'unavailable' -and
         (
             [string]$_.id -ne 'map.live-cache' -or

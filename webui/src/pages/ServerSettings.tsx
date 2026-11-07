@@ -293,7 +293,7 @@ export function ServerSettings({ initialSection = 'official' }: { initialSection
       <div className="mb-4 rounded-lg border border-border bg-surface p-3 text-sm" role="note">
         {section === 'client' ? <>
           <strong>This PC's game files only</strong>
-          <p className="mt-1 text-xs text-text-muted">Changes this PC’s game files for every server you play on. Other players’ files stay unchanged.</p>
+          <p className="mt-1 text-xs text-text-muted">{import.meta.env.VITE_DST_EDITION === 'docker' ? 'Select this PC’s client config folder or files below. Where direct browser writes are unavailable, DST prepares reviewed downloads for you to install while Dune is closed.' : 'Changes this PC’s game files for every server you play on. Other players’ files stay unchanged.'}</p>
         </> : section === 'official' || section === 'advanced' ? <>
           <strong>Selected server's files</strong>
           <p className="mt-1 text-xs text-text-muted">Applies to the selected server. Review &amp; Apply shows all file changes before saving.</p>

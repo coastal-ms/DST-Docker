@@ -10,6 +10,7 @@ type TimerChange = { enabled: boolean; seconds: string }
 type Transform = { client: GameConfigClientInfo; changes: Partial<Record<Key, { before: string; after: string; created: boolean; applied: number }>>; applied: number; removed: number; download?: { filename: string; base64: string; files: number } | null }
 let directory: Directory | null = null
 let imported: Partial<Record<Key, File>> | null = null
+let importedLabel = 'Selected client files'
 let selectionRevision = 0
 const names: Record<Key, string> = { game: 'Game.ini', engine: 'Engine.ini' }
 const enginePreference = 'dst.browser-client-engine-enabled.v1'
@@ -43,7 +44,7 @@ async function transform(mode: 'inspect' | 'apply' | 'disable-engine', before: R
     return [key, entry]
   })))
   return api<Transform>('/api/docker/client-files/transform', { method: 'POST', body: JSON.stringify({
-    mode: timer ? 'landclaim' : mode, selected: !!directory || !!imported, approved: mode !== 'inspect', directory: directory?.name ?? (imported ? 'Selected client files' : ''), engineEnabled, reviewedRaw, updates, download, files,
+    mode: timer ? 'landclaim' : mode, selected: !!directory || !!imported, approved: mode !== 'inspect', directory: directory?.name ?? (imported ? importedLabel : ''), engineEnabled, reviewedRaw, updates, download, files,
     ...(timer ? { timerEnabled: timer.enabled, timerSeconds: timer.seconds } : {}),
   }) })
 }
@@ -51,7 +52,7 @@ async function transform(mode: 'inspect' | 'apply' | 'disable-engine', before: R
 export function browserClientFolderSelected() { return directory !== null || imported !== null }
 export function browserClientDeliveryMode() { return imported ? 'download' as const : 'folder' as const }
 
-export async function selectBrowserClientFiles(files: File[]) {
+export async function selectBrowserClientFiles(files: File[], label = 'Selected client files') {
   const next: Partial<Record<Key, File>> = {}
   for (const file of files) {
     const key = (Object.keys(names) as Key[]).find(value => names[value].toLowerCase() === file.name.toLowerCase())
@@ -62,33 +63,53 @@ export async function selectBrowserClientFiles(files: File[]) {
     next[key] = file
   }
   if (!Object.keys(next).length) throw new Error('Select Game.ini or Engine.ini from your Dune client config folder.')
-  directory = null; imported = next; selectionRevision++
+  directory = null; imported = next; importedLabel = label; selectionRevision++
   return getBrowserClientInfo()
 }
 
-async function chooseFiles() {
+export function isBrowserClientSelectionCancelled(error: unknown) {
+  return error instanceof DOMException && error.name === 'AbortError'
+}
+
+async function chooseFiles(folder = false) {
   const input = document.createElement('input')
-  input.type = 'file'; input.accept = '.ini'; input.multiple = true
+  input.type = 'file'; input.multiple = true
+  if (folder) input.setAttribute('webkitdirectory', '')
+  else input.accept = '.ini'
   input.style.display = 'none'; document.body.append(input)
   return new Promise<GameConfigClientInfo>((resolve, reject) => {
     let settled = false
-    const cleanup = () => { input.remove(); window.removeEventListener('focus', focused) }
+    const cleanup = () => { input.remove() }
     const cancel = () => { if (settled) return; settled = true; cleanup(); reject(new DOMException('File selection cancelled.', 'AbortError')) }
-    const focused = () => window.setTimeout(() => { if (!settled && !input.files?.length) cancel() }, 250)
-    window.addEventListener('focus', focused)
-    input.addEventListener('change', () => { if (settled) return; settled = true; const files = Array.from(input.files ?? []); cleanup(); void selectBrowserClientFiles(files).then(resolve, reject) }, { once: true })
+    // Focus can return before a directory's files finish enumerating. Only
+    // the browser's change/cancel events decide whether selection completed.
+    input.addEventListener('change', () => {
+      if (settled) return
+      const selected = Array.from(input.files ?? [])
+      if (!selected.length) { cancel(); return }
+      settled = true; cleanup()
+      const files = folder ? selected.filter(file => {
+        const parts = (file.webkitRelativePath ?? '').split('/')
+        return parts.length === 2 && Object.values(names).some(name => name.toLowerCase() === file.name.toLowerCase())
+      }) : selected
+      if (!files.length) { reject(new Error('Choose the client config folder containing Game.ini or Engine.ini directly, or use Choose files.')); return }
+      const label = folder ? files[0].webkitRelativePath.split('/')[0] : undefined
+      void selectBrowserClientFiles(files, label).then(resolve, reject)
+    }, { once: true })
     input.addEventListener('cancel', cancel, { once: true })
     input.click()
   })
 }
 
+export function chooseBrowserClientFiles() { return chooseFiles() }
+
 export async function chooseBrowserClientFolder() {
   const picker = (window as Window & { showDirectoryPicker?: (options: { mode: string; id: string }) => Promise<Directory> }).showDirectoryPicker
-  if (!picker) return chooseFiles()
+  if (!picker) return chooseFiles(true)
   let selected: Directory
   try { selected = await picker.call(window, { mode: 'readwrite', id: 'dst-client-config' }) }
   catch (error) {
-    if (error instanceof DOMException && ['SecurityError', 'NotSupportedError'].includes(error.name)) return chooseFiles()
+    if (error instanceof DOMException && ['SecurityError', 'NotSupportedError'].includes(error.name)) return chooseFiles(true)
     throw error
   }
   // Confirm this is a game config directory before remembering the handle.

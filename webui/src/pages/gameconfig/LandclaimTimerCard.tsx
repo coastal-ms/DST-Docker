@@ -15,7 +15,7 @@ import { ApiError } from '../../api/client'
 import { ConfirmationModal } from '../../components/ConfirmationModal'
 import { getLandclaimTimer, saveLandclaimTimer } from '../../api/gameconfig'
 import type { LandclaimTimerState } from '../../api/types'
-import { chooseBrowserClientFolder } from '../../api/browserClientFiles'
+import { chooseBrowserClientFiles, isBrowserClientSelectionCancelled } from '../../api/browserClientFiles'
 
 type Props = {
   vmRunning: boolean
@@ -171,8 +171,8 @@ export function LandclaimTimerCard({ vmRunning }: Props) {
       {docker && <div className="mt-3 rounded-lg border border-border p-3 text-sm">
         <button type="button" className="btn-secondary mb-3" disabled={saving || loading} onClick={() => {
           setLoading(true); setErr(null)
-          void chooseBrowserClientFolder().then(async () => { setState(await getLandclaimTimer()); setIncludeClient(true) })
-            .catch(e => setErr(e instanceof Error ? e.message : String(e))).finally(() => setLoading(false))
+          void chooseBrowserClientFiles().then(async () => { setState(await getLandclaimTimer()); setIncludeClient(true) })
+            .catch(e => { if (!isBrowserClientSelectionCancelled(e)) setErr(e instanceof Error ? e.message : String(e)) }).finally(() => setLoading(false))
         }}>Choose player config</button>
         <label className="flex items-start gap-2"><input type="checkbox" checked={includeClient} disabled={saving || !client?.dirExists} onChange={e => setIncludeClient(e.target.checked)} />
           <span>{client?.browserDelivery === 'download' ? 'Also prepare this PC’s player Game.ini download' : 'Also save this PC’s selected player Game.ini'}<span className="block text-xs text-text-muted">Close Dune before changing player files. Downloads include originals and must be installed manually.</span></span>

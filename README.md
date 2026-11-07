@@ -4,6 +4,8 @@ Run Dune Server Tool from a browser, with the server and management services ins
 
 This is the private development repository for DST's Docker hosting option. It remains part of DST. Feature parity and installation testing are still in progress.
 
+The Docker edition manages self-hosted servers on native Linux or Windows WSL. Solo save tools stay in the standalone Windows DST application and are outside this edition's scope. Docker server hosting does not require a Windows companion.
+
 ## Installation status
 
 The intended setup is: install WSL on Windows, open Ubuntu, run one DST install command, then finish setup in the browser. Native Linux users will run the same install command directly.

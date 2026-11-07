@@ -438,6 +438,11 @@ function Initialize-DuneApiPool {
     if (-not $script:DuneApiLockTable) {
         $script:DuneApiLockTable = [System.Collections.Hashtable]::Synchronized(@{})
     }
+    # Deferred cache startup must publish into the exact object already shared
+    # with handler workers, including a first launch with no hydrated snapshot.
+    if (Get-Command Get-DunePlatformSnapshotState -ErrorAction SilentlyContinue) {
+        [void](Get-DunePlatformSnapshotState)
+    }
     $cursorSecret = $null
     if (Get-Command Get-DuneApiCursorSecret -ErrorAction SilentlyContinue) {
         $cursorSecret = Get-DuneApiCursorSecret

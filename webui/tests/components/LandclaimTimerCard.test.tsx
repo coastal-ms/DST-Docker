@@ -3,9 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { LandclaimTimerCard } from '../../src/pages/gameconfig/LandclaimTimerCard'
 import { getLandclaimTimer, saveLandclaimTimer } from '../../src/api/gameconfig'
 import type { LandclaimTimerState } from '../../src/api/types'
-import { chooseBrowserClientFolder } from '../../src/api/browserClientFiles'
+import { chooseBrowserClientFiles } from '../../src/api/browserClientFiles'
 vi.mock('../../src/api/gameconfig', () => ({ getLandclaimTimer: vi.fn(), saveLandclaimTimer: vi.fn() }))
-vi.mock('../../src/api/browserClientFiles', () => ({ chooseBrowserClientFolder: vi.fn() }))
+vi.mock('../../src/api/browserClientFiles', () => ({ chooseBrowserClientFiles: vi.fn(), isBrowserClientSelectionCancelled: () => false }))
 const state: LandclaimTimerState = {
   server: { available: true, enabled: true, seconds: '1', formattedOk: true },
   client: { exists: true, dirExists: true, path: 'fixture/Game.ini', dir: 'fixture', enabled: false, seconds: '', formattedOk: false },
@@ -33,7 +33,7 @@ describe('Land claim timer client retry', () => {
     vi.stubEnv('VITE_DST_EDITION', 'docker')
     const selected = { ...state, client: { ...state.client, browserDelivery: 'download' as const } }
     vi.mocked(getLandclaimTimer).mockResolvedValue(selected)
-    vi.mocked(chooseBrowserClientFolder).mockResolvedValue({} as never)
+    vi.mocked(chooseBrowserClientFiles).mockResolvedValue({} as never)
     vi.mocked(saveLandclaimTimer).mockResolvedValue({ ...selected, ok: true, enabled: true, seconds: '2',
       result: { ok: true, server: { ok: true, applied: true }, client: { ok: true, applied: false, delivery: 'download' } } })
     render(<LandclaimTimerCard vmRunning />)

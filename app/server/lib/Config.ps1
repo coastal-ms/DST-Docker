@@ -111,6 +111,9 @@ function Read-DuneConfig {
 }
 
 function Get-DuneInstallationMode {
+    # Docker is the native Linux/WSL server edition. Imported Windows settings
+    # must not switch it into the separate standalone Solo installation mode.
+    if ($env:DST_HOSTING_BACKEND -eq 'docker') { return 'full' }
     # Standalone tools and isolated test runtimes may not have a Windows profile
     # or an explicit config. They retain the pre-existing full-mode behavior.
     if (-not $env:APPDATA -and -not $script:DuneConfigFile) { return 'full' }

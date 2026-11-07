@@ -43,7 +43,7 @@ beforeEach(() => {
   vi.resetModules(); request.mockReset(); localStorage.clear()
   Object.defineProperty(window, 'showDirectoryPicker', { configurable: true, value: undefined })
 })
-afterEach(() => vi.restoreAllMocks())
+afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers() })
 describe('Browser-selected player files', () => {
   it('projects an unselected browser without using native client endpoints or writing files', async () => {
     request.mockImplementation(async (path, init) => { const body = JSON.parse(init.body); expect(path).toBe('/api/docker/client-files/transform'); expect(body.selected).toBe(false); return { client: { ...client(), dirExists: false } } })
@@ -93,6 +93,46 @@ function selectedFile(name: string, text: string, bom = false) {
 }
 
 describe('Portable browser client downloads', () => {
+  it('opens a folder picker without secure directory handles and reads only its direct client INIs', async () => {
+    vi.useFakeTimers()
+    request.mockImplementation(async (_path, init) => {
+      const body = JSON.parse(init.body)
+      expect(body.mode).toBe('inspect'); expect(body.directory).toBe('WindowsClient')
+      expect(body.files.game.raw).toBe('[Manual]\nKeep=original\n')
+      return { client: client(body.files.game.raw), changes: {} }
+    })
+    const module = await import('../src/api/browserClientFiles')
+    const result = module.chooseBrowserClientFolder()
+    const input = document.querySelector<HTMLInputElement>('input[type="file"]')!
+    expect(input.hasAttribute('webkitdirectory')).toBe(true)
+    window.dispatchEvent(new Event('focus'))
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(input.isConnected).toBe(true)
+    const entries = [
+      ['Game.ini', 'WindowsClient/Game.ini', '[Manual]\nKeep=original\n'],
+      ['Engine.ini', 'WindowsClient/Engine.ini', '[ConsoleVariables]\n'],
+      ['Input.ini', 'WindowsClient/Input.ini', 'unrelated'],
+      ['Game.ini', 'WindowsClient/Backups/Game.ini', 'old backup'],
+    ].map(([name, path, raw]) => Object.assign(selectedFile(name, raw), { webkitRelativePath: path }))
+    Object.defineProperty(input, 'files', { value: entries })
+    input.dispatchEvent(new Event('change'))
+    expect((await result).browserDelivery).toBe('download')
+    expect(request).toHaveBeenCalledOnce()
+    expect(document.querySelector('input[type="file"]')).toBeNull()
+  })
+
+  it('offers a separate file picker and keeps the existing selection when a new picker is cancelled', async () => {
+    request.mockResolvedValue({ client: client(), changes: {} })
+    const module = await import('../src/api/browserClientFiles')
+    await module.selectBrowserClientFiles([selectedFile('Game.ini', 'retained original')])
+    const result = module.chooseBrowserClientFiles()
+    const rejected = expect(result).rejects.toMatchObject({ name: 'AbortError' })
+    const input = document.querySelector<HTMLInputElement>('input[type="file"]')!
+    expect(input.hasAttribute('webkitdirectory')).toBe(false)
+    input.dispatchEvent(new Event('cancel'))
+    await rejected
+    expect(module.browserClientFolderSelected()).toBe(true)
+  })
   it('uses the dedicated timer transform for a reviewed download and requires the selected Game.ini', async () => {
     Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: vi.fn(() => 'blob:fixture') })
     Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: vi.fn() })

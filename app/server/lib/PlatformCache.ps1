@@ -9,6 +9,15 @@ $script:DunePlatformSnapshotRetentionGenerations = 20
 $script:DunePlatformCacheMaxBytes = 250MB
 $script:DunePlatformSnapshotState = $null
 
+function ConvertFrom-DunePlatformJson {
+    param([Parameter(Mandatory)][string]$Json)
+    # PowerShell 7.5 otherwise turns ISO strings into DateTime values, whose
+    # later string conversion uses local display formatting in API envelopes.
+    $options=@{}
+    if ((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')) { $options.DateKind='String' }
+    return ConvertFrom-Json -InputObject $Json @options
+}
+
 function Get-DunePlatformCachePath {
     if (-not $env:LOCALAPPDATA) {
         throw 'LOCALAPPDATA is unavailable for the derived platform cache.'
@@ -17,6 +26,11 @@ function Get-DunePlatformCachePath {
 }
 
 function Get-DunePlatformHelperPath {
+    if ($env:DST_HOSTING_BACKEND -eq 'docker') {
+        $native = '/opt/dst/app/tools/platform/DunePlatformStore'
+        if (Test-Path -LiteralPath $native -PathType Leaf) { return $native }
+        return $null
+    }
     $candidates = @()
     if ($script:AppDir) {
         $candidates += (Join-Path $script:AppDir 'tools\platform\DunePlatformStore.exe')
@@ -156,7 +170,7 @@ function Invoke-DunePlatformHelper {
 
     $helper = Get-DunePlatformHelperPath
     if (-not $helper) {
-        throw 'DunePlatformStore.exe is unavailable. Build or install the platform cache helper.'
+        throw 'The platform cache helper is unavailable. Build or install the current DST package.'
     }
     if ($TimeoutSec -lt 1 -or $TimeoutSec -gt 120) {
         throw 'Platform cache helper timeout must be between 1 and 120 seconds.'
@@ -271,7 +285,7 @@ function Invoke-DunePlatformHelper {
         $raw = if ($stdout) { $stdout } else { $stderr }
         $result = $null
         if ($raw) {
-            try { $result = $raw | ConvertFrom-Json } catch {
+            try { $result = ConvertFrom-DunePlatformJson -Json $raw } catch {
                 throw 'Platform cache helper returned malformed JSON.'
             }
         }
@@ -861,7 +875,7 @@ function Set-DunePlatformSourceDetails {
             errorCode = $errorCode
         } | ConvertTo-Json -Compress
     }
-    $copy = $json | ConvertFrom-Json
+    $copy = ConvertFrom-DunePlatformJson -Json $json
     $table = Get-DunePlatformCoordinationTable
     [Threading.Monitor]::Enter($table.SyncRoot)
     try {
@@ -882,7 +896,7 @@ function Get-DunePlatformSourceDetails {
     try {
         $value = $table["platform-source-details:$SourceKey"]
         if (-not $value) { return $null }
-        return ($value | ConvertTo-Json -Depth 6 -Compress | ConvertFrom-Json)
+        return (ConvertFrom-DunePlatformJson -Json ($value | ConvertTo-Json -Depth 6 -Compress))
     } finally {
         [Threading.Monitor]::Exit($table.SyncRoot)
     }
