@@ -1,9 +1,45 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { afterEach, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { RegisTankSetup } from '../src/pages/gameconfig/RegisTankSetup'
 const request = vi.hoisted(() => vi.fn())
+const complete = vi.hoisted(() => vi.fn())
+vi.mock('../src/api/dockerCommand', () => ({ completeDockerCommand: complete }))
 vi.mock('../src/api/client', () => ({ api: request, PlayerGuardCancelledError: class extends Error {}, withOnlinePlayerGuard: (run: (force: boolean) => unknown) => run(false) }))
-afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.resetAllMocks() })
+
+beforeEach(() => { vi.stubEnv('VITE_DST_EDITION', '') })
+afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.resetAllMocks(); vi.unstubAllEnvs() })
+
+it('waits for the persisted Docker operation before reporting enabled', async () => {
+  vi.stubEnv('VITE_DST_EDITION', 'docker')
+  let finish!: () => void
+  complete.mockReturnValue(new Promise<void>(resolve => { finish = resolve }))
+  request.mockResolvedValueOnce({ enabled: false, supported: true }).mockResolvedValueOnce({ operationId: 'fixture-operation' }).mockResolvedValueOnce({ enabled: true, supported: true })
+  render(<RegisTankSetup vmRunning stopped />)
+  fireEvent.click(await screen.findByRole('button', { name: 'Enable Tank support' }))
+  await waitFor(() => expect(complete).toHaveBeenCalledWith('fixture-operation'))
+  expect(screen.getByRole('button', { name: 'Applying…' })).toBeDisabled()
+  expect(request).toHaveBeenCalledTimes(2)
+  expect(screen.queryByRole('button', { name: 'Update with Tank support' })).not.toBeInTheDocument()
+  finish()
+  await screen.findByRole('button', { name: 'Disable Tank support' })
+})
+
+it('refreshes recovery after a failed Docker operation and explicitly restores the old setting', async () => {
+  vi.stubEnv('VITE_DST_EDITION', 'docker')
+  request.mockResolvedValueOnce({ enabled: false, supported: true })
+    .mockResolvedValueOnce({ operationId: 'failed' })
+    .mockResolvedValueOnce({ enabled: false, supported: true, pending: true, recoveryRequired: true })
+    .mockResolvedValueOnce({ operationId: 'restore' })
+    .mockResolvedValueOnce({ enabled: false, supported: true })
+  complete.mockRejectedValueOnce(new Error('Adapter replacement failed')).mockResolvedValueOnce({ complete: true })
+  render(<RegisTankSetup vmRunning stopped />)
+  fireEvent.click(await screen.findByRole('button', { name: 'Enable Tank support' }))
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore previous Tank setting' }))
+  await waitFor(() => expect(complete).toHaveBeenCalledWith('restore'))
+  await waitFor(() => expect(screen.queryByRole('button', { name: 'Restore previous Tank setting' })).not.toBeInTheDocument())
+  expect(request.mock.calls[3]).toEqual(['/api/gameconfig/regis-tanks/recover', { method: 'POST' }])
+  expect(screen.getByRole('button', { name: 'Enable Tank support' })).toBeEnabled()
+})
 
 it('loads disabled without preparing support and enables only on explicit choice', async () => {
   request.mockResolvedValueOnce({ enabled: false, supported: true }).mockResolvedValueOnce({ ok: true }).mockResolvedValueOnce({ enabled: true, supported: true })

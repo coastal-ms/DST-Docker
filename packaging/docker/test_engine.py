@@ -21,6 +21,23 @@ class RecordingEngine(engine.Engine):
 
 
 class EngineTests(unittest.TestCase):
+    def test_tank_override_is_owned_hagga_only_and_keeps_official_reference_validation(self):
+        project='a'*32; official='registry.funcom.com/funcom/self-hosting/seabass-server:2173753-0-shipping'; image='sha256:'+'b'*64
+        class Client(RecordingEngine):
+            def request(self,method,path,body=None,expected=None,timeout=30):
+                if path.startswith('/networks/'):return {'Labels':{'io.dst.managed':'true','io.dst.project':project}}
+                return super().request(method,path,body,expected,timeout)
+        client=Client()
+        with patch('regis_artifacts.inspect_compatibility_image',return_value={'Id':image}) as verify:
+            client.create_component(project,'game-1',official,'dst-'+project+'-network',{},map_name='Survival_1',regis_image=image)
+            verify.assert_called_once_with(client,project,official,image)
+            spec=client.calls[-1][2];self.assertEqual(spec['Image'],image);self.assertEqual(spec['Labels']['io.dst.regis.image'],image)
+        for reference,map_name in [('arbitrary/custom:tag','Survival_1'),(official,'DeepDesert_1')]:
+            client=Client()
+            with patch('regis_artifacts.inspect_compatibility_image') as verify,self.assertRaises(ValueError):
+                client.create_component(project,'game-1',reference,'dst-'+project+'-network',{},map_name=map_name,regis_image=image)
+            verify.assert_not_called();self.assertEqual(client.calls,[])
+
     def test_migration_reconciliation_binds_the_full_operation_and_backup_before_reusing_a_job(self):
         project='a'*32;operation='b'*32;image='registry.funcom.com/funcom/self-hosting/seabass-server-db-utils:fixture'
         existing={'Id':'owned-job','Config':{'Image':image,'Labels':{'io.dst.managed':'true','io.dst.project':project,'io.dst.component':'db-migrate','io.dst.operation':operation,'io.dst.script-sha256':engine.hashlib.sha256(b'script').hexdigest()},

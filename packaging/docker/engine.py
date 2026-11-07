@@ -290,7 +290,7 @@ class Engine:
             'io.dst.managed':'true','io.dst.project':project,'io.dst.component':component}})
 
     def create_component(self, project, component, image, network, environment, command=None, ports=None,
-                         volumes=None, memory=0, host_network=False, entrypoint=None, health=None, map_name=None,generation=None):
+                         volumes=None, memory=0, host_network=False, entrypoint=None, health=None, map_name=None,generation=None,regis_image=None):
         # Internal API only. The Unix/browser dispatcher never accepts these
         # arguments from a client; it derives them from the official template.
         expected={'rmq-admin':'seabass-server-rabbitmq','rmq-game':'seabass-server-rabbitmq',
@@ -302,6 +302,11 @@ class Engine:
         if not re.fullmatch(r'[a-f0-9]{32}',project) or not image_name or not re.fullmatch(
                 re.escape('registry.funcom.com/funcom/self-hosting/'+image_name)+r':[A-Za-z0-9_.-]+',image):
             raise ValueError('Invalid official world component.')
+        effective_image=image
+        if regis_image is not None:
+            if not game or map_name!='Survival_1':raise ValueError('Tank compatibility is limited to owned Hagga game adapters.')
+            from regis_artifacts import inspect_compatibility_image
+            effective_image=inspect_compatibility_image(self,project,image,regis_image)['Id']
         if network!='dst-'+project+'-network' or (host_network and not game): raise ValueError('Invalid component network.')
         if game and (not isinstance(map_name,str) or not re.fullmatch(r'[A-Za-z0-9_]+',map_name)):
             raise ValueError('Invalid game map label.')
@@ -339,11 +344,12 @@ class Engine:
         if memory:
             if type(memory) is not int or memory<64*1024*1024: raise ValueError('Invalid component memory budget.')
             host.update(Memory=memory,MemorySwap=memory)
-        spec={'Image':image,'Env':[key+'='+value for key,value in environment.items()],
+        spec={'Image':effective_image,'Env':[key+'='+value for key,value in environment.items()],
               'Labels':{'io.dst.managed':'true','io.dst.project':project,'io.dst.component':component},
               'ExposedPorts':{key:{} for key in bindings},'HostConfig':host,'StopTimeout':120 if game else 30}
         if game:
             spec['Labels']['io.dst.map']=map_name
+        if regis_image is not None:spec['Labels']['io.dst.regis.image']=effective_image
         if generation is not None:spec['Labels']['io.dst.generation']=generation
         if command is not None: spec['Cmd']=command
         if entrypoint is not None: spec['Entrypoint']=entrypoint

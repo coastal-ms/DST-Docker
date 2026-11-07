@@ -39,7 +39,7 @@ case "${1:-up}" in
     if ! docker compose -f packaging/docker/compose.assets.yaml run --rm --entrypoint python3 assets -c 'import json; from pathlib import Path; state=json.loads(Path("/srv/dst/install-state.json").read_text()); raise SystemExit(0 if state.get("state")=="downloaded" else 1)' >/dev/null 2>&1; then
       docker compose -f packaging/docker/compose.assets.yaml run --rm assets
     fi
-    docker compose build map-observer-image scaler-image
+    docker compose build map-observer-image scaler-image regis-tools-image
     docker compose pull file-browser-image
     docker compose build
     if [ -n "$task_port" ]; then set_port; fi

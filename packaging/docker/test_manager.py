@@ -19,6 +19,23 @@ class FakeEngine:
 
 
 class ManagerTests(unittest.TestCase):
+    def test_regis_payload_requires_booleans_before_journaling_or_thread_dispatch(self):
+        for payload in ({}, {'enabled':'true'}, {'enabled':1}, {'enabled':True,'acknowledgeStoredTanks':'false'}):
+            state={'id':'a'*32}
+            with patch.object(manager,'project_state',return_value=state),patch.object(manager,'save') as save,patch.object(manager.threading,'Thread') as thread:
+                with self.assertRaisesRegex(ValueError,'JSON booleans'):
+                    manager.dispatch({'action':'regis.set',**payload},FakeEngine())
+                save.assert_not_called();thread.assert_not_called();self.assertNotIn('operation',state)
+
+    def test_pending_regis_change_blocks_other_mutations_but_allows_status_reads(self):
+        state={'id':'a'*32,'pendingRegisChange':{'id':'pending'}}
+        with patch.object(manager,'project_state',return_value=state),patch.object(manager.regis_compatibility,'status',return_value={'pending':True}),patch.object(manager,'save') as save:
+            self.assertTrue(manager.dispatch({'action':'regis.status'},FakeEngine())['pending'])
+            for action in ('services.start','services.restart','maps.start','updates.apply','settings.write','resources.set'):
+                with self.assertRaisesRegex(ValueError,'pending Tank change'):
+                    manager.dispatch({'action':action},FakeEngine())
+            save.assert_not_called()
+
     def test_file_browser_read_can_be_observed_but_open_and_writes_obey_operation_guards(self):
         for guard in ({'operation':{'phase':'running'}},{'pendingResourceChange':{'map':'Survival_1'}},
                       {'restore':{'phase':'recovery-required'}}):

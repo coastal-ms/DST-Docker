@@ -178,6 +178,8 @@ class NativeUpdate:
 
     def apply(self,build,allow_online=False):
         if not isinstance(build,str) or not re.fullmatch(r'[0-9]{1,18}',build) or type(allow_online) is not bool:raise ValueError('Invalid update request.')
+        if (self.s.get('regisSupport') or {}).get('enabled') or self.s.get('pendingRegisChange'):
+            raise ValueError('Disable Tank compatibility in Server Settings before a normal server update. Saved Tanks require compatibility; nothing was stopped or updated.')
         previous_run=self.s.get('updateRun')
         if previous_run and previous_run['phase'] not in TERMINAL:raise ValueError('Recover the previous update before starting another.')
         if self.s['phase']!='database-ready' or self.s.get('generationChange') or self.s.get('pendingAddressChange'):raise ValueError('Finish the current database or configuration operation before updating.')

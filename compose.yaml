@@ -1,5 +1,11 @@
 name: dst-docker-preview
 services:
+  regis-tools-image:
+    profiles: [internal-images]
+    image: dst-docker-regis-tools:local
+    build:
+      context: .
+      dockerfile: packaging/docker/regis-tools.Dockerfile
   file-browser-image:
     profiles: [internal-images]
     image: filebrowser/filebrowser@sha256:a469ea076d4a1b4b1d86a41d130f2f536cd9da996a2b1fb39c0d7635f9d89b9a

@@ -3,8 +3,11 @@
 # and all three generated compatibility files on the exact player's map.
 function Get-DuneRegisTankSupport {
     param([string]$Ip, [long]$ActorId = 0)
-    $target = Resolve-DuneRetailServerSettingsTarget -Ip $Ip
-    if (-not $target.available) { return @{ enabled = $false; message = 'Server is unavailable.' } }
+    $docker = $env:DST_HOSTING_BACKEND -eq 'docker'
+    if (-not $docker) {
+        $target = Resolve-DuneRetailServerSettingsTarget -Ip $Ip
+        if (-not $target.available) { return @{ enabled = $false; message = 'Server is unavailable.' } }
+    }
     $map = 'HaggaBasin'
     if ($ActorId -gt 0) {
         $lookup = Invoke-DuneSqlQuery -Ip $Ip -ReadOnly $true -MaxRows 1 -TimeoutSec 10 -Sql "SELECT a.map FROM dune.player_state ps JOIN dune.actors a ON a.id=ps.player_pawn_id WHERE ps.player_pawn_id=${ActorId}::bigint AND ps.online_status::text='Online';"
@@ -14,6 +17,11 @@ function Get-DuneRegisTankSupport {
         $map = [string]$rows[0]['map']
     }
     if ($map -ne 'HaggaBasin') { return @{ enabled = $false; message = 'Regis Tanks are currently supported on Hagga.' } }
+    if ($docker) {
+        $reply = Invoke-DuneDockerManager -Request @{action='regis.support'}
+        if (-not $reply.ok) { throw $reply.error }
+        return $reply.data
+    }
     if ($target.namespace -cnotmatch '^[a-z0-9-]+$') { throw 'Invalid battlegroup namespace.' }
     $raw = (Invoke-V6Ssh -Ip $Ip -Cmd "sudo kubectl -n '$($target.namespace)' get pods -o json" -TimeoutSec 15) -join "`n"
     $pods = $raw | ConvertFrom-Json

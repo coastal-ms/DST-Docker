@@ -80,6 +80,7 @@ function Get-DuneCommandAvailability {
     )
     if ($State.hostingBackend -eq 'docker') {
         if ($State.operation.phase -eq 'running') { return @{available=$false;reason='A server operation is running'} }
+        if ($State.regisPending -and $Command.Name -notin @('stop','shutdown','logs-export','operator-logs-export')) { return @{available=$false;reason='Restore the pending Tank change in Server Settings first'} }
         if ($State.maintenance -and $Command.Name -notin @('logs-export','operator-logs-export') -and -not ($Command.Name -eq 'update' -and $State.updateRecovery)) { return @{available=$false;reason='Server maintenance recovery is active'} }
         if ($Command.Name -notin @('start','stop','restart','startup','shutdown','reboot','apply-inis','update','logs-export','operator-logs-export')) { return @{available=$false;reason='Docker adapter is not available yet'} }
         if (-not $State.prepared) { return @{available=$false;reason='Complete Docker Setup first'} }
@@ -136,6 +137,7 @@ function Get-DuneCurrentState {
         $native=$reply.data
         return @{hostingBackend='docker';vmExists=$false;vmRunning=$false;bgState=$native.desiredState;
             desiredState=$native.desiredState;operation=$native.operation;prepared=(@($native.services).Count -gt 0);
+            regisPending=[bool]$native.regisPending;
             updateRecovery=([bool]$native.update -and $native.update.phase -notin @('completed','rolled-back','failed-preflight'));
             maintenance=(($native.restore.phase -in @('stopping','preparing','restoring','recovering','recovery-required')) -or ([bool]$native.update -and $native.update.phase -notin @('completed','rolled-back','failed-preflight')))}
     }

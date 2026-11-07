@@ -8,6 +8,11 @@ Register-DuneRoute -Method GET -Path '/api/gameplay/vehicles/regis-tanks' -Handl
 
 Register-DuneRoute -Method GET -Path '/api/gameconfig/regis-tanks' -Handler {
     param($req, $res, $routeParams, $body)
+    if ($env:DST_HOSTING_BACKEND -eq 'docker') {
+        $reply = Invoke-DuneDockerManager -Request @{action='regis.status'}
+        if (-not $reply.ok) { Write-DuneError -Response $res -Status 503 -Message $reply.error; return }
+        Write-DuneJson -Response $res -Body $reply.data; return
+    }
     $ctx = Get-DuneGameConfigContext
     if (-not $ctx.ok) { Write-DuneError -Response $res -Status $ctx.status -Message $ctx.message; return }
     try {
@@ -19,6 +24,12 @@ Register-DuneRoute -Method GET -Path '/api/gameconfig/regis-tanks' -Handler {
 Register-DuneRoute -Method PUT -Path '/api/gameconfig/regis-tanks' -Handler {
     param($req, $res, $routeParams, $body)
     if ($body -isnot [hashtable] -or $body.enabled -isnot [bool]) { Write-DuneError -Response $res -Status 400 -Message 'enabled must be a boolean.'; return }
+    if ($env:DST_HOSTING_BACKEND -eq 'docker') {
+        if ($body.ContainsKey('acknowledgeStoredTanks') -and $body.acknowledgeStoredTanks -isnot [bool]) { Write-DuneError -Response $res -Status 400 -Message 'acknowledgeStoredTanks must be a boolean.'; return }
+        $reply = Invoke-DuneDockerManager -Request @{action='regis.set';enabled=$body.enabled;acknowledgeStoredTanks=($body.acknowledgeStoredTanks -eq $true)}
+        if (-not $reply.ok) { Write-DuneError -Response $res -Status 409 -Message $reply.error; return }
+        Write-DuneJson -Response $res -Body @{operationId=$reply.data.operation.id}; return
+    }
     $ctx = Get-DuneGameConfigContext
     if (-not $ctx.ok) { Write-DuneError -Response $res -Status $ctx.status -Message $ctx.message; return }
     try {
@@ -26,6 +37,14 @@ Register-DuneRoute -Method PUT -Path '/api/gameconfig/regis-tanks' -Handler {
         $result = Invoke-WithDuneLock -Name 'regis-tanks-activation' -Script { Set-DuneRegisTankCompatibility -Ip $ctx.ip -Enabled $body.enabled -AcknowledgeStoredTanks:$ack }
         Write-DuneJson -Response $res -Body $result
     } catch { Write-DuneError -Response $res -Status 400 -Message $_.Exception.Message }
+}
+
+Register-DuneRoute -Method POST -Path '/api/gameconfig/regis-tanks/recover' -Handler {
+    param($req, $res, $routeParams, $body)
+    if ($env:DST_HOSTING_BACKEND -ne 'docker') { Write-DuneError -Response $res -Status 404 -Message 'Docker hosting is not enabled.'; return }
+    $reply = Invoke-DuneDockerManager -Request @{action='regis.recover'}
+    if (-not $reply.ok) { Write-DuneError -Response $res -Status 409 -Message $reply.error; return }
+    Write-DuneJson -Response $res -Body @{operationId=$reply.data.operation.id}
 }
 
 Register-DuneRoute -Method POST -Path '/api/gameplay/vehicles/regis-tanks' -Handler {

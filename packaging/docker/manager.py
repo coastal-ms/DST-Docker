@@ -31,6 +31,7 @@ import asset_updates
 import service_generations
 import world_update
 import resource_policy
+import regis_compatibility
 import sys
 
 STATE = Path('/projects')
@@ -177,6 +178,7 @@ def public_state(state, engine):
     if changed and state.get('operation',{}).get('phase')!='running': save(state)
     return {'projectId': state['id'], 'phase': state['phase'], 'assets': assets, 'assetUpdate': update,
             'fileBrowser': browser_status,
+            'regisPending':bool(state.get('pendingRegisChange')),
             'database': database, 'credentialsSaved': (STATE / 'funcom-token').is_file(),
             'profile':state.get('profile'), 'partitionsPrepared':bool(state.get('partitionsPrepared')),
             'connectionServices':connections,'services':services,'desiredState':state.get('desiredState','stopped'),
@@ -473,7 +475,7 @@ def prepare_services(state,engine):
     defaults={name:(Path('/assets/server/scripts/setup/config')/name).read_text()
               for name in ['UserEngine.ini','UserGame.ini','UserServerCustomSettings.ini']}
     for partition in sorted(initial):
-        specifications['game-'+str(partition)]=game_spec(plan,partition,credentials,bridge,defaults)
+        specifications['game-'+str(partition)]=regis_compatibility.apply_image_policy(state,partition,game_spec(plan,partition,credentials,bridge,defaults))
     for component,spec in specifications.items():
         entries=state.setdefault('services',{})
         entry=entries.get(component)
@@ -498,6 +500,7 @@ def prepare_services(state,engine):
 
 
 def start_services(state,engine,publish_gateway=True):
+    regis_compatibility.assert_prepared_images(state,engine)
     if state.get('pendingResourceChange'):raise ValueError('Finish the pending resource allocation before starting the world.')
     if type(publish_gateway) is not bool:raise ValueError('The gateway publication choice must be a JSON boolean.')
     if not publish_gateway and state.get('services',{}).get('gateway'):
@@ -676,6 +679,7 @@ def control_map(state,engine,partition,running,force=False,automatic=False):
         if not automatic and map_info.get('initialReplicas',0)==0:
             set_map_floor(state,engine,game['map'],running)
     if running:
+        regis_compatibility.assert_prepared_images(state,engine,[component])
         observed=engine.assert_owned(entry['id'],state['id'],component) if entry and entry.get('id') else None
         if observed and observed['State']['Status']=='running':
             manual_floor()
@@ -696,7 +700,7 @@ def control_map(state,engine,partition,running,force=False,automatic=False):
             template=read_template();credentials=read_credentials(state)
             bridge=engine.request('GET','/networks/'+plan['network'])['IPAM']['Config'][0]['Gateway']
             defaults={name:(Path('/assets/server/scripts/setup/config')/name).read_text() for name in ['UserEngine.ini','UserGame.ini','UserServerCustomSettings.ini']}
-            spec=game_spec(plan,partition,credentials,bridge,defaults);files=spec.pop('files')
+            spec=regis_compatibility.apply_image_policy(state,partition,game_spec(plan,partition,credentials,bridge,defaults));files=spec.pop('files')
             entry={'phase':'creating','createdAt':time.time()};state['services'][component]=entry;save(state)
             identifier=engine.create_component(state['id'],component,plan['images']['game']['image'],plan['network'],**spec)
             entry.update(id=identifier,phase='configuring');save(state)
@@ -940,7 +944,7 @@ def refresh_game_adapters(state,engine):
     bridge=network['IPAM']['Config'][0]['Gateway']
     for component,previous in games.items():
         partition=int(component.removeprefix('game-'))
-        spec=game_spec(plan,partition,credentials,bridge,{})
+        spec=regis_compatibility.apply_image_policy(state,partition,game_spec(plan,partition,credentials,bridge,{}))
         for volume in spec['volumes']:volume['mustBeNew']=False
         entry={'phase':'retiring','previous':previous};state['services'][component]=entry;save(state)
         entry['previousName']=engine.retire_game_container(previous['id'],state['id'],component);save(state)
@@ -976,7 +980,7 @@ def reconfigure_address(state,engine,profile):
     bridge=network['IPAM']['Config'][0]['Gateway']
     for component in state['services']:
         if component.startswith('game-'):
-            spec=game_spec(plan,int(component.removeprefix('game-')),credentials,bridge,{})
+            spec=regis_compatibility.apply_image_policy(state,int(component.removeprefix('game-')),game_spec(plan,int(component.removeprefix('game-')),credentials,bridge,{}),plan=plan)
             for volume in spec['volumes']:volume['mustBeNew']=False
             specifications[component]=spec
     service_generations.replace_generation(state,engine,specifications,plan,save,'address',
@@ -1113,6 +1117,8 @@ def run_operation(state,engine,request):
         elif action=='maps.observers.prepare':prepare_map_observers(state,engine)
         elif action=='files.prepare':prepare_file_browser(state,engine)
         elif action=='settings.prepare':prepare_settings_service(state,engine)
+        elif action=='regis.set':state['operation']['result']=regis_compatibility.Compatibility(state,engine,sys.modules[__name__]).set(request['enabled'],request.get('acknowledgeStoredTanks',False))
+        elif action=='regis.recover':state['operation']['result']=regis_compatibility.Compatibility(state,engine,sys.modules[__name__]).recover()
         elif action=='logs.export':state['operation']['result']=export_logs(state,engine,request.get('scope'),state['operation']['id'])
         elif action=='updates.stage':state['operation']['result']=asset_updates.start_stage(state,engine,request.get('expectedBuild'),save)
         elif action=='updates.apply':state['operation']['result']=world_update.NativeUpdate(state,engine,sys.modules[__name__]).apply(request.get('expectedBuild'),request.get('allowOnline',False))
@@ -1141,6 +1147,8 @@ def dispatch(request, engine=None):
         state = project_state()
         if action == 'status': return public_state(state, engine)
         if action == 'files.endpoint': return file_browser.endpoint(state, engine)
+        if action == 'regis.status': return regis_compatibility.status(state,engine)
+        if action == 'regis.support': return regis_compatibility.support(state,engine)
         if action == 'assets.version': return installed_version()
         if action=='memory.policy':return {'enabled':state.get('memoryBalancingEnabled',True)}
         if action=='resources.get':return resource_policy.snapshot(state,engine)
@@ -1156,6 +1164,8 @@ def dispatch(request, engine=None):
             raise ValueError('Recover the interrupted server update before starting another operation.')
         if state.get('pendingMemoryChange') and action!='maps.memory':raise ValueError('Finish the pending map memory allocation first.')
         if state.get('pendingResourceChange') and action!='resources.set':raise ValueError('Finish the pending resource allocation first.')
+        if state.get('pendingRegisChange') and action not in {'regis.set','regis.recover','services.stop','logs.export'}:
+            raise ValueError('Finish or restore the pending Tank change in Server Settings before another server operation.')
         if action == 'files.open':
             prepare_file_browser(state, engine)
             return file_browser.endpoint(state, engine)
@@ -1185,7 +1195,9 @@ def dispatch(request, engine=None):
             if not reply.get('ok'):raise ValueError(reply.get('error','Settings backups could not be created.'))
             return reply['data']
         if action in {'database.create','database.initialize','database.migrate','world.configure','connections.prepare',
-                      'services.prepare','services.start','services.stop','services.restart','services.refresh-core-adapters','scale.prepare','maps.start','maps.stop','maps.restart','maps.observers.prepare','files.prepare','settings.prepare','logs.export','updates.stage','updates.apply','updates.recover','rmq.publish','games.refresh-adapters','backups.create','backups.verify','backups.restore'}:
+                      'services.prepare','services.start','services.stop','services.restart','services.refresh-core-adapters','scale.prepare','maps.start','maps.stop','maps.restart','maps.observers.prepare','files.prepare','settings.prepare','regis.set','regis.recover','logs.export','updates.stage','updates.apply','updates.recover','rmq.publish','games.refresh-adapters','backups.create','backups.verify','backups.restore'}:
+            if action=='regis.set' and (type(request.get('enabled')) is not bool or type(request.get('acknowledgeStoredTanks',False)) is not bool):
+                raise ValueError('Supply JSON booleans for Tank support and the stored-Tank acknowledgement.')
             if action=='updates.apply' and (not isinstance(request.get('expectedBuild'),str) or not re.fullmatch(r'[0-9]{1,18}',request['expectedBuild']) or type(request.get('allowOnline',False)) is not bool):raise ValueError('Supply a valid build and JSON boolean online-player authorization.')
             if 'publishGateway' in request and (action!='services.start' or type(request['publishGateway']) is not bool):raise ValueError('Only a typed start can select gateway publication.')
             if action=='logs.export' and request.get('scope') not in {'battlegroup','operator'}:raise ValueError('Choose battlegroup or operator logs.')
