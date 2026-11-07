@@ -425,6 +425,7 @@ export type GameConfigClientFileInfo = {
 // Legacy top-level file fields continue to represent Game.ini. `game` and
 // `engine` expose both client files for file-aware views and comparisons.
 export type GameConfigClientInfo = GameConfigClientFileInfo & {
+  browserDelivery?: 'folder' | 'download' | 'unselected'
   dir: string
   dirResolved: string
   dirExists: boolean
@@ -452,6 +453,7 @@ export type GameConfigClientInfo = GameConfigClientFileInfo & {
 }
 
 export type GameConfigClientEngineGateResult = {
+  delivery?: 'download'
   ok: boolean
   enabled: boolean
   removed: number
@@ -459,6 +461,8 @@ export type GameConfigClientEngineGateResult = {
 }
 
 export type GameConfigClientApplyResult = {
+  delivery?: 'download' | 'validated'
+  prepared?: number
   ok: boolean
   path: string
   paths?: { game: string; engine: string }

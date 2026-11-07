@@ -69,5 +69,36 @@ class SettingsAdapterTests(unittest.TestCase):
                 with self.assertRaises(ValueError):manager.set_startup_settings(self.state,self.engine,values)
                 client.assert_not_called()
 
+    def test_offline_read_starts_only_the_settings_helper_and_waits_for_its_socket(self):
+        snapshot={'raw':'Manual=42\r\n','revision':'a'*64,'fileExists':True}
+        self.state['settingsService']={'id':'owned-helper'}
+        with patch('manager.prepare_settings_service') as prepare,patch('manager.settings_client.request',side_effect=[ConnectionRefusedError(),{'ok':True,'data':snapshot}]) as client,patch('manager.time.sleep'):
+            self.assertEqual(manager.read_settings(self.state,self.engine,'game'),snapshot)
+            prepare.assert_called_once_with(self.state,self.engine)
+            self.assertEqual(client.call_count,2)
+            self.assertEqual(client.call_args.args[0],{'action':'read','file':'game'})
+        self.assertEqual(self.state['desiredState'],'stopped')
+
+    def test_running_helper_is_reused_and_file_errors_are_not_retried(self):
+        self.state['settingsService']={'id':'owned-helper'}
+        self.engine.assert_owned.return_value['State']['Status']='running'
+        with patch('manager.prepare_settings_service') as prepare,patch('manager.settings_client.request',return_value={'ok':False,'error':'Unsupported encoding.'}) as client:
+            with self.assertRaisesRegex(ValueError,'Unsupported encoding'):manager.read_settings(self.state,self.engine,'game')
+            prepare.assert_not_called();client.assert_called_once()
+
+    def test_read_cannot_start_helper_during_busy_or_interrupted_world_operation(self):
+        for guard in [{'operation':{'phase':'running'}},{'restore':{'phase':'recovery-required'}},{'pendingResourceChange':{'anything':True}}]:
+            with patch('manager.project_state',return_value={**self.state,**guard}),patch('manager.prepare_settings_service') as prepare,patch('manager.settings_client.request') as client:
+                with self.assertRaises(ValueError):manager.dispatch({'action':'settings.read','file':'game'},self.engine)
+                prepare.assert_not_called();client.assert_not_called()
+
+    def test_read_rejects_paths_before_start_and_bounds_socket_readiness_wait(self):
+        with patch('manager.prepare_settings_service') as prepare,patch('manager.settings_client.request',side_effect=FileNotFoundError()) as client,patch('manager.time.monotonic',side_effect=[0,6]):
+            for key in ['../game',None,[]]:
+                with self.assertRaises(ValueError):manager.read_settings(self.state,self.engine,key)
+            prepare.assert_not_called();client.assert_not_called()
+            with self.assertRaisesRegex(ValueError,'did not become ready'):manager.read_settings(self.state,self.engine,'engine')
+            prepare.assert_called_once();client.assert_called_once()
+
 
 if __name__=='__main__':unittest.main()

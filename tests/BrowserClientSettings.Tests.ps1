@@ -50,3 +50,57 @@ Describe 'Browser-selected client INI transformation' {
         $result.client.engine.effective['ConsoleVariables||Manual.Other']|Should -BeExactly 'preserved'
     }
 }
+
+Describe 'Portable client settings download' {
+    It 'packages exact original bytes, BOM-preserving changes and verifiable hashes without filesystem writes' {
+        $raw="[ConsoleVariables]`r`nVehicle.MaxVehiclesPerPlayer=10`r`nManual.Other=preserved`r`n"
+        [byte[]]$original=@(239,187,191)+[Text.Encoding]::UTF8.GetBytes($raw)
+        $request=@{mode='apply';selected=$true;approved=$true;engineEnabled=$true;directory='Selected client files';reviewedRaw=$false;download=$true;
+            files=@{game=@{exists=$false;raw=''};engine=@{exists=$true;raw=$raw;bytes=[Convert]::ToBase64String($original)}};
+            updates=@(@{file='engine';section='ConsoleVariables';key='Vehicle.MaxVehiclesPerPlayer';value='20'})}
+        $result=Convert-DuneBrowserClientSettings -Request $request
+        $result.download.filename | Should -Be 'DST-client-settings.zip'
+        $memory=[IO.MemoryStream]::new([Convert]::FromBase64String($result.download.base64))
+        $zip=[IO.Compression.ZipArchive]::new($memory,[IO.Compression.ZipArchiveMode]::Read)
+        try{
+            @($zip.Entries.FullName | Sort-Object) | Should -Be @('manifest.json','Originals/Engine.ini','README.txt','Updated/Engine.ini')
+            $originalStream=$zip.GetEntry('Originals/Engine.ini').Open();$copy=[IO.MemoryStream]::new()
+            try{$originalStream.CopyTo($copy);[Convert]::ToBase64String($copy.ToArray()) | Should -Be ([Convert]::ToBase64String($original))}finally{$originalStream.Dispose();$copy.Dispose()}
+            $updatedStream=$zip.GetEntry('Updated/Engine.ini').Open();$updated=[IO.MemoryStream]::new()
+            try{$updatedStream.CopyTo($updated);$bytes=$updated.ToArray()}finally{$updatedStream.Dispose();$updated.Dispose()}
+            $bytes[0..2] | Should -Be @(239,187,191)
+            $text=[Text.Encoding]::UTF8.GetString($bytes)
+            $text | Should -Match 'Vehicle.MaxVehiclesPerPlayer=20'
+            $text | Should -Match 'Manual.Other=preserved'
+            $manifestReader=[IO.StreamReader]::new($zip.GetEntry('manifest.json').Open())
+            try{$manifest=$manifestReader.ReadToEnd()|ConvertFrom-Json}finally{$manifestReader.Dispose()}
+            $sha=[Security.Cryptography.SHA256]::Create()
+            try{$expected=([BitConverter]::ToString($sha.ComputeHash($original))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
+            $manifest.delivery | Should -Be 'manual'
+            $manifest.files[0].originalSha256 | Should -Be $expected
+            $manifest.files[0].updated | Should -Be 'Updated/Engine.ini'
+        }finally{$zip.Dispose();$memory.Dispose()}
+        $request.files.engine.raw | Should -Be $raw
+    }
+
+    It 'rejects backup bytes that disagree with the reviewed original' {
+        $request=@{files=@{game=@{exists=$true;raw='reviewed';bytes=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('different'))}}}
+        {New-DuneBrowserClientDownload -Request $request -Changes @{game=@{after='new'}}} | Should -Throw '*do not match*'
+    }
+
+    It 'rejects malformed original encoding rather than silently replacing text' {
+        $request=@{files=@{game=@{exists=$true;raw='';bytes=[Convert]::ToBase64String([byte[]]@(255))}}}
+        {New-DuneBrowserClientDownload -Request $request -Changes @{game=@{after='new'}}} | Should -Throw '*UTF-8*'
+    }
+
+    It 'does not manufacture a download for unchanged settings' {
+        New-DuneBrowserClientDownload -Request @{} -Changes @{} | Should -BeNullOrEmpty
+    }
+
+    It 'requires real booleans for review approval and download delivery' {
+        foreach($flag in @('download','approved','reviewedRaw')){
+            $request=@{mode='apply';selected=$true;engineEnabled=$true};$request[$flag]='true'
+            {Convert-DuneBrowserClientSettings -Request $request} | Should -Throw '*JSON booleans*'
+        }
+    }
+}

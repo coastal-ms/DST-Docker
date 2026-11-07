@@ -117,6 +117,7 @@ function clientInfo(engineEnabled: boolean): GameConfigClientInfo {
 }
 
 beforeEach(() => {
+  vi.stubEnv('VITE_DST_EDITION', '')
   localStorage.clear()
   testState.local = true
   vi.mocked(getGameConfigSchema).mockResolvedValue({ schema })
@@ -146,6 +147,20 @@ async function openComparison(user: ReturnType<typeof userEvent.setup>) {
 }
 
 describe('Game Config advanced client compatibility action', () => {
+  it('lets a Docker IP viewer review selected client files and reports a download without a local install', async () => {
+    vi.stubEnv('VITE_DST_EDITION', 'docker'); testState.local = false
+    const client = { ...clientInfo(false), browserDelivery: 'download' as const, dirExists: true }
+    vi.mocked(getGameConfigClient).mockResolvedValue(client)
+    vi.mocked(applyGameConfigClient).mockResolvedValue({ ok: true, applied: 0, prepared: 1, delivery: 'download', path: 'Game.ini', backup: '', created: false, items: [], client })
+    const user = userEvent.setup()
+    render(<GameConfig />)
+    await user.click(await screen.findByRole('button', { name: 'Apply advanced compatibility overrides' }))
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: /^Download \d+ selected settings?$/ }))
+    await screen.findByText(/No client file was installed/)
+    expect(applyGameConfigClient).toHaveBeenCalledOnce()
+    expect(saveGameConfig).not.toHaveBeenCalled()
+    expect(vi.mocked(api).mock.calls.some(([path]) => path === '/api/gameconfig/client/lab')).toBe(false)
+  })
   it('saves a Docker server draft without calling the unavailable host-PC adapter when no browser folder was selected', async () => {
     vi.stubEnv('VITE_DST_EDITION', 'docker')
     const user = userEvent.setup(), drafts = new Map<string, SettingsDraft>()

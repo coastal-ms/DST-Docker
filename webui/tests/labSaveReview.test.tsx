@@ -11,8 +11,13 @@ vi.mock('../src/api/gameconfig', async importOriginal => ({
   getGameConfigClient: vi.fn(), saveLabLocal: vi.fn(),
 }))
 vi.mock('../src/util/viewer', () => ({ isLocalViewer: () => true }))
+vi.mock('../src/api/browserClientFiles', async importOriginal => ({
+  ...await importOriginal<typeof import('../src/api/browserClientFiles')>(),
+  browserClientFolderSelected: () => true,
+}))
 const updates = [{ file: 'game' as const, section: 'Building', key: 'DoorTime', value: '3' }]
 beforeEach(() => {
+  vi.stubEnv('VITE_DST_EDITION', '')
   vi.clearAllMocks()
   vi.mocked(getGameConfigClient).mockResolvedValue({
     game: { path: 'C:\\Game.ini', effective: {} }, engine: { path: 'C:\\Engine.ini', effective: {} },
@@ -20,6 +25,36 @@ beforeEach(() => {
   vi.mocked(saveLabLocal).mockResolvedValue({ ok: true } as Awaited<ReturnType<typeof saveLabLocal>>)
 })
 afterEach(cleanup)
+afterEach(() => vi.unstubAllEnvs())
+
+it('reports a portable download without claiming that local files were installed', async () => {
+  vi.stubEnv('VITE_DST_EDITION', 'docker')
+  vi.mocked(getGameConfigClient).mockResolvedValue({
+    dirExists: true, browserDelivery: 'download', game: { path: 'Game.ini', effective: {} }, engine: { path: 'Engine.ini', effective: {} },
+  } as unknown as GameConfigClientInfo)
+  vi.mocked(saveLabLocal).mockResolvedValue({ ok: true, applied: 0, prepared: 1, delivery: 'download' } as Awaited<ReturnType<typeof saveLabLocal>>)
+  const done = vi.fn(), server = vi.fn()
+  render(<LabSaveReview updates={updates} serverAvailable={false} onServerSave={server} onDone={done} onCancel={vi.fn()} />)
+  await userEvent.click(await screen.findByRole('button', { name: 'Approve changes & Download' }))
+  await waitFor(() => expect(done).toHaveBeenCalledOnce())
+  expect(done.mock.calls[0][0]).toContain('No local file was installed')
+  expect(done.mock.calls[0][0]).not.toContain('INIs saved and verified')
+  expect(server).not.toHaveBeenCalled()
+})
+
+it('reports already-matching portable files as checked without claiming a write', async () => {
+  vi.stubEnv('VITE_DST_EDITION', 'docker')
+  vi.mocked(getGameConfigClient).mockResolvedValue({
+    dirExists: true, browserDelivery: 'download', game: { path: 'Game.ini', effective: {} }, engine: { path: 'Engine.ini', effective: {} },
+  } as unknown as GameConfigClientInfo)
+  vi.mocked(saveLabLocal).mockResolvedValue({ ok: true, applied: 0, prepared: 0, delivery: 'validated' } as Awaited<ReturnType<typeof saveLabLocal>>)
+  const done = vi.fn()
+  render(<LabSaveReview updates={updates} serverAvailable={false} onServerSave={vi.fn()} onDone={done} onCancel={vi.fn()} />)
+  await userEvent.click(await screen.findByRole('button', { name: 'Approve changes & Download' }))
+  await waitFor(() => expect(done).toHaveBeenCalledOnce())
+  expect(done.mock.calls[0][0]).toContain('already match')
+  expect(done.mock.calls[0][0]).not.toContain('saved and verified')
+})
 
 it('requires explicit approval and saves each selected destination without deploying the server', async () => {
   const server = vi.fn().mockResolvedValue({}), done = vi.fn()

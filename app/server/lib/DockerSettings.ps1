@@ -1,24 +1,8 @@
 function Invoke-DuneDockerSettingsReader {
     param([Parameter(Mandatory)][hashtable]$Request)
-    $start=[Diagnostics.ProcessStartInfo]::new()
-    $start.FileName='python3'
-    [void]$start.ArgumentList.Add('/opt/dst/packaging/docker/settings_client.py')
-    $start.UseShellExecute=$false
-    $start.RedirectStandardInput=$true;$start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
-    $start.StandardInputEncoding=[Text.UTF8Encoding]::new($false)
-    $start.StandardOutputEncoding=[Text.UTF8Encoding]::new($false)
-    $process=[Diagnostics.Process]::new();$process.StartInfo=$start
-    try {
-        [void]$process.Start()
-        $stdout=$process.StandardOutput.ReadToEndAsync();$stderr=$process.StandardError.ReadToEndAsync()
-        $process.StandardInput.Write(($Request|ConvertTo-Json -Compress))
-        $process.StandardInput.Close()
-        if(-not $process.WaitForExit(20000)){$process.Kill($true);throw 'The server settings read timed out.'}
-        if($process.ExitCode -ne 0){throw 'The server settings service is unavailable.'}
-        $reply=$stdout.GetAwaiter().GetResult()|ConvertFrom-Json -AsHashtable
-        if(-not $reply.ok){throw $reply.error}
-        return $reply.data
-    } finally {$process.Dispose()}
+    $reply=Invoke-DuneDockerManager -Request @{action='settings.read';file=$Request.file}
+    if(-not $reply.ok){throw $reply.error}
+    return $reply.data
 }
 
 function Read-DuneDockerSettingsFile {

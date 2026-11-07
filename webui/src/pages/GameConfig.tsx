@@ -450,7 +450,7 @@ export function GameConfig({ mode = 'standard', embedded = false, section = 'adv
   const contextual = useCommandDeck()
   const Guidance = contextual ? 'details' : 'div'
   const experimentalPage = mode === 'experimental'
-  const localViewer = isLocalViewer()
+  const localViewer = isLocalViewer() || dockerEdition
   const { status, forceRefresh } = useStatus()
   const vmRunning = status?.vm?.running === true
 
@@ -534,7 +534,9 @@ export function GameConfig({ mode = 'standard', embedded = false, section = 'adv
       if (dockerEdition) {
         const info = await chooseBrowserClientFolder()
         setClientInfo(info); setClientDirInput(info.dir)
-        setClientMsg('Client folder selected in this browser. Reviewed writes are backed up in its DST INI Backups folder.')
+        setClientMsg(info.browserDelivery === 'download'
+          ? 'Client files selected. Reviewed changes download with exact originals as backups; you install them manually while Dune is closed.'
+          : 'Client folder selected in this browser. Reviewed writes are backed up in its DST INI Backups folder.')
         return
       }
       const r = await api<{ ok: boolean; cancelled: boolean; path: string }>('/api/browse-path', {
@@ -582,11 +584,13 @@ export function GameConfig({ mode = 'standard', embedded = false, section = 'adv
       if (result.client.engineEnabled) {
         setClientMsg('Engine.ini management enabled. DST can now mirror opted-in gameplay settings.')
       } else {
-        setClientMsg(result.removed > 0
+        setClientMsg(result.delivery === 'download'
+          ? 'Engine.ini management disabled. Downloaded the reviewed cleanup and original backup; install the updated Engine.ini manually while Dune is closed.'
+          : result.removed > 0
           ? `Engine.ini management disabled and ${result.removed} DST-managed setting${result.removed === 1 ? '' : 's'} removed.`
           : 'Engine.ini management disabled. No DST-managed Engine.ini settings were present.')
       }
-      window.setTimeout(() => setClientMsg(null), 7000)
+      if (result.delivery !== 'download') window.setTimeout(() => setClientMsg(null), 7000)
     } catch (e) {
       setClientErr(e instanceof Error ? e.message : String(e))
     } finally {
@@ -897,7 +901,8 @@ export function GameConfig({ mode = 'standard', embedded = false, section = 'adv
     setClientBusy(true)
     try {
       const result = clientReview?.mode === 'comparison'
-        ? await api<import('../api/types').GameConfigClientApplyResult>('/api/gameconfig/client/lab', {
+        ? dockerEdition ? await saveLabLocal(reviewedItems.map(item => ({ file: item.file, section: item.section, key: item.key, value: item.remove ? '' : item.value })))
+        : await api<import('../api/types').GameConfigClientApplyResult>('/api/gameconfig/client/lab', {
           method: 'PUT',
           body: JSON.stringify({ approved: true, updates: reviewedItems.map(item => ({
             file: item.file, section: item.section, key: item.key, value: item.remove ? '' : item.value,
@@ -910,10 +915,12 @@ export function GameConfig({ mode = 'standard', embedded = false, section = 'adv
       else await refreshClient()
       setClientReview(null)
       const backupCount = Object.keys(result.backups ?? {}).length
-      setClientMsg(
-        `Applied ${result.applied} setting${result.applied === 1 ? '' : 's'} to this PC's local Dune client config${backupCount ? ` after backing up ${backupCount} destination file${backupCount === 1 ? '' : 's'}` : ''}. Other players must apply their own copy.`,
-      )
-      window.setTimeout(() => setClientMsg(null), 7000)
+      setClientMsg(result.delivery === 'download'
+        ? `Prepared ${result.prepared} reviewed setting${result.prepared === 1 ? '' : 's'} in DST-client-settings.zip with original backups. No client file was installed. Close Dune, copy the Updated files into your client config folder, then select them again to verify.`
+        : result.delivery === 'validated'
+          ? 'The selected client files already match the reviewed changes. No file was changed.'
+          : `Applied ${result.applied} setting${result.applied === 1 ? '' : 's'} to this PC's local Dune client config${backupCount ? ` after backing up ${backupCount} destination file${backupCount === 1 ? '' : 's'}` : ''}. Other players must apply their own copy.`)
+      if (result.delivery !== 'download') window.setTimeout(() => setClientMsg(null), 7000)
     } catch (e) {
       setClientErr(e instanceof Error ? e.message : String(e))
     } finally {
@@ -1554,7 +1561,7 @@ export function GameConfig({ mode = 'standard', embedded = false, section = 'adv
             }
           >
             <p className="text-xs text-text-muted mb-3">These settings affect this PC on every server. Close Dune before applying changes.</p>
-            {dockerEdition && <p className="mb-3 text-xs text-text-muted">Choose your Dune client config folder with Browse in a local Chrome or Edge browser. This grants access only to the selected folder for this browser session. Until a folder is selected, Review &amp; Apply changes server files only. Browser access cannot detect whether Dune is running; close the game before saving player files.</p>}
+            {dockerEdition && <p className="mb-3 text-xs text-text-muted">Select your client config folder, or select Game.ini and Engine.ini to download reviewed updates with original backups. Close Dune before installing downloaded files, then select them again to verify.</p>}
             <label className="mb-3 flex items-start gap-3 rounded-lg border border-warning/30 bg-warning/5 p-3 cursor-pointer select-none">
               <input
                 type="checkbox"
@@ -1634,14 +1641,14 @@ export function GameConfig({ mode = 'standard', embedded = false, section = 'adv
               <button type="button" onClick={() => void onBrowseClientDir()} disabled={clientBusy} className="btn-secondary shrink-0">
                 <Icon name={clientBusy ? 'Loader2' : 'FolderOpen'} size={14} className={clientBusy ? 'animate-spin' : ''} /> Browse
               </button>
-              <button
+              {!dockerEdition && <button
                 type="button"
                 onClick={() => void onSaveClientDir()}
                 disabled={clientBusy || !clientDirInput.trim() || clientDirInput.trim() === (clientInfo?.dir ?? '')}
                 className="btn-primary shrink-0"
               >
                 <Icon name="Save" size={14} /> Save
-              </button>
+              </button>}
             </div>
             {clientInfo && (
               <div className="text-[11px] text-text-dim mt-2 font-mono break-all space-y-0.5">
@@ -1654,7 +1661,7 @@ export function GameConfig({ mode = 'standard', embedded = false, section = 'adv
                       {bundle.exists
                         ? <span className="text-success">• found</span>
                         : clientInfo.dirExists
-                          ? <span className="text-warning">• not present yet (will be created on apply)</span>
+                          ? <span className="text-warning">{clientInfo.browserDelivery === 'download' ? '• not selected — select this file before preparing changes' : '• not present yet (will be created on apply)'}</span>
                           : <span className="text-danger">• folder not found</span>}
                     </div>
                   )
@@ -2004,6 +2011,7 @@ export function GameConfig({ mode = 'standard', embedded = false, section = 'adv
           items={clientReview.items}
           mode={clientReview.mode}
           busy={clientBusy}
+          downloadOnly={clientInfo?.browserDelivery === 'download'}
           onCancel={() => setClientReview(null)}
           onConfirm={reviewedItems => void onApplyCurrentClientSettings(reviewedItems)}
         />
@@ -3262,11 +3270,12 @@ function IniSectionBlock({ section }: { section: GameConfigIniSection }) {
 }
 
 function ClientApplyReviewModal({
-  items, mode, busy, onCancel, onConfirm,
+  items, mode, busy, downloadOnly = false, onCancel, onConfirm,
 }: {
   items: GameConfigClientApplyItem[]
   mode: ClientReviewMode
   busy: boolean
+  downloadOnly?: boolean
   onCancel: () => void
   onConfirm: (items: GameConfigClientApplyItem[]) => void
 }) {
@@ -3419,7 +3428,7 @@ function ClientApplyReviewModal({
           ))}
           <p className="text-xs text-text-muted">
             Game.ini compatibility values do not require Engine.ini management. Engine.ini entries appear here only after
-            that separate opt-in is enabled. Existing destination files are backed up before an atomic, verified write.
+            that separate opt-in is enabled. {downloadOnly ? 'The download includes updated files and exact originals as backups. No client file is installed automatically; close Dune before copying the Updated files into place.' : 'Existing destination files are backed up before an atomic, verified write.'}
             This changes this PC only and is not limited to the selected server. The game may read these local values
             when joining other servers; other players' files and server-controlled settings are unchanged.
           </p>
@@ -3440,7 +3449,7 @@ function ClientApplyReviewModal({
               disabled={busy || selectedItems.length === 0}
             >
               <Icon name={busy ? 'Loader2' : 'MonitorCog'} size={14} className={busy ? 'animate-spin' : ''} />
-              {busy ? 'Applying…' : `Apply ${selectedItems.length} selected setting${selectedItems.length === 1 ? '' : 's'}`}
+              {busy ? (downloadOnly ? 'Preparing…' : 'Applying…') : `${downloadOnly ? 'Download' : 'Apply'} ${selectedItems.length} selected setting${selectedItems.length === 1 ? '' : 's'}`}
             </button>
           </div>
         </div>

@@ -20,8 +20,8 @@ services:
     build:
       context: .
       dockerfile: packaging/docker/Dockerfile
-    # The existing authenticated listener stays on loopback. Linux and WSL2
-    # share it with the host without treating a reverse proxy as a local user.
+    # Authenticated IPv4 access supports Linux/WSL host addresses. Owner-only
+    # routes still enforce the console token on non-loopback connections.
     network_mode: host
     init: true
     restart: "no"

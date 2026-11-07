@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { GameConfigClientInfo } from '../src/api/types'
 const request = vi.hoisted(() => vi.fn())
 vi.mock('../src/api/client', () => ({ api: request }))
@@ -39,7 +39,11 @@ function fixture() {
   return { directory, files, backups, events }
 }
 
-beforeEach(() => { vi.resetModules(); request.mockReset(); localStorage.clear() })
+beforeEach(() => {
+  vi.resetModules(); request.mockReset(); localStorage.clear()
+  Object.defineProperty(window, 'showDirectoryPicker', { configurable: true, value: undefined })
+})
+afterEach(() => vi.restoreAllMocks())
 describe('Browser-selected player files', () => {
   it('projects an unselected browser without using native client endpoints or writing files', async () => {
     request.mockImplementation(async (path, init) => { const body = JSON.parse(init.body); expect(path).toBe('/api/docker/client-files/transform'); expect(body.selected).toBe(false); return { client: { ...client(), dirExists: false } } })
@@ -79,5 +83,79 @@ describe('Browser-selected player files', () => {
     const module = await import('../src/api/browserClientFiles'); await module.chooseBrowserClientFolder()
     await expect(module.applyBrowserClientSettings([{ file: 'engine', section: 'ConsoleVariables', key: 'Vehicle.MaxVehiclesPerPlayer', value: '20' }])).rejects.toThrow('changed outside this review')
     expect(f.events).toEqual([]); expect(f.files.get('Engine.ini')).toContain('DoNotOverwrite=yes')
+  })
+})
+
+function selectedFile(name: string, text: string, bom = false) {
+  const content = new TextEncoder().encode(text)
+  const bytes = bom ? new Uint8Array([239, 187, 191, ...content]) : content
+  return { name, size: bytes.length, text: async () => new TextDecoder().decode(bytes), arrayBuffer: async () => bytes.slice().buffer } as File
+}
+
+describe('Portable browser client downloads', () => {
+  it('prepares a download with exact original bytes and never reports an installed change', async () => {
+    const original = selectedFile('Game.ini', '[Manual]\r\nKeep=original\r\n', true)
+    const create = vi.fn(() => 'blob:fixture')
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: create })
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: vi.fn() })
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    request.mockImplementation(async (_path, init) => {
+      const body = JSON.parse(init.body)
+      if (body.mode === 'apply') {
+        expect(body.download).toBe(true)
+        expect(body.files.game.bytes).toBe(btoa(String.fromCharCode(...new Uint8Array(await original.arrayBuffer()))))
+        return { client: client('changed'), applied: 1, changes: { game: { after: 'changed' } }, download: { filename: 'DST-client-settings.zip', base64: btoa('zip fixture'), files: 1 } }
+      }
+      return { client: client(body.files.game.raw), changes: {} }
+    })
+    const module = await import('../src/api/browserClientFiles')
+    const info = await module.selectBrowserClientFiles([original])
+    expect(info.browserDelivery).toBe('download')
+    const result = await module.applyBrowserClientSettings([{ file: 'game', section: 'Manual', key: 'Keep', value: 'changed' }])
+    expect(result).toMatchObject({ applied: 0, prepared: 1, delivery: 'download' })
+    expect(result.client.raw).toContain('Keep=original')
+    expect(await original.text()).toContain('Keep=original')
+    expect(create).toHaveBeenCalledOnce(); expect(click).toHaveBeenCalledOnce()
+  })
+
+  it('requires the original for each changed file instead of inventing an unselected file', async () => {
+    request.mockResolvedValue({ client: client(), changes: {} })
+    const module = await import('../src/api/browserClientFiles')
+    await module.selectBrowserClientFiles([selectedFile('Game.ini', '[Manual]\nKeep=original')])
+    const count = request.mock.calls.length
+    await expect(module.applyBrowserClientSettings([{ file: 'engine', section: 'ConsoleVariables', key: 'Vehicle.MaxVehiclesPerPlayer', value: '20' }])).rejects.toThrow('Select the current Engine.ini')
+    expect(request).toHaveBeenCalledTimes(count)
+  })
+
+  it('rejects unrelated, duplicate, oversized and invalid-UTF8 selections before upload', async () => {
+    const module = await import('../src/api/browserClientFiles')
+    for (const files of [
+      [selectedFile('passwords.ini', 'not a client INI')],
+      [selectedFile('Game.ini', 'a'), selectedFile('GAME.INI', 'b')],
+      [{ ...selectedFile('Game.ini', 'a'), size: 1024 * 1024 + 1 } as File],
+      [{ ...selectedFile('Game.ini', 'a'), arrayBuffer: async () => new Uint8Array([255]).buffer } as File],
+    ]) await expect(module.selectBrowserClientFiles(files)).rejects.toThrow()
+    expect(request).not.toHaveBeenCalled()
+  })
+
+  it('blocks a download if selection changes while its reviewed transform is in flight', async () => {
+    const module = await import('../src/api/browserClientFiles')
+    request.mockImplementation(async (_path, init) => {
+      const body = JSON.parse(init.body)
+      if (body.mode === 'apply') await module.selectBrowserClientFiles([selectedFile('Game.ini', 'new selection')])
+      return { client: client(), applied: 1, changes: body.mode === 'apply' ? { game: { after: 'changed' } } : {} }
+    })
+    await module.selectBrowserClientFiles([selectedFile('Game.ini', 'original')])
+    await expect(module.applyBrowserClientSettings([{ file: 'game', section: 'Manual', key: 'Keep', value: 'changed' }])).rejects.toThrow('selected client files changed')
+  })
+
+  it('cancels a normal file picker without leaving its input behind', async () => {
+    const module = await import('../src/api/browserClientFiles')
+    const result = module.chooseBrowserClientFolder()
+    const input = document.querySelector<HTMLInputElement>('input[type="file"]')!
+    expect(input).not.toBeNull()
+    input.dispatchEvent(new Event('cancel'))
+    await expect(result).rejects.toThrow('cancelled')
+    expect(document.querySelector('input[type="file"]')).toBeNull()
   })
 })

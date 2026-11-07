@@ -10,6 +10,21 @@ BeforeAll {
     function global:Invoke-WithDuneLock {param($Name,$Script);& $Script}
 }
 
+Describe 'Offline settings reads use guarded Docker management' {
+    It 'requests only the selected known INI and returns the helper snapshot' {
+        Mock Invoke-DuneDockerManager { @{ok=$true;data=@{raw='Manual=42';revision=('a'*64)}} }
+        $result=Read-DuneDockerSettingsFile -File game
+        $result.raw | Should -Be 'Manual=42'
+        Should -Invoke Invoke-DuneDockerManager -Times 1 -Exactly -ParameterFilter {
+            $Request.action -eq 'settings.read' -and $Request.file -eq 'game' -and $Request.Count -eq 2
+        }
+    }
+    It 'preserves the manager refusal instead of claiming that settings loaded' {
+        Mock Invoke-DuneDockerManager { @{ok=$false;error='Recover the interrupted server update before starting another operation.'} }
+        { Read-DuneDockerSettingsFile -File engine } | Should -Throw '*Recover the interrupted server update*'
+    }
+}
+
 Describe 'Existing settings workflows use the native file transport' {
     BeforeEach {
         $script:oldBackend=$env:DST_HOSTING_BACKEND;$env:DST_HOSTING_BACKEND='docker'

@@ -575,6 +575,26 @@ def write_settings(state,engine,request):
     return reply['data']
 
 
+def read_settings(state,engine,key):
+    if not isinstance(key,str) or key not in {'game','engine','server'}:
+        raise ValueError('Choose a supported server INI file.')
+    # The management console remains usable with the world stopped. Only this
+    # world's isolated file helper may start; never any game or database service.
+    entry=state.get('settingsService')
+    if not entry or engine.assert_owned(entry['id'],state['id'],'settings')['State']['Status']!='running':
+        prepare_settings_service(state,engine)
+    deadline=time.monotonic()+5
+    while True:
+        try:
+            reply=settings_client.request({'action':'read','file':key})
+            break
+        except (FileNotFoundError,ConnectionRefusedError):
+            if time.monotonic()>=deadline:raise ValueError('The server settings service did not become ready.') from None
+            time.sleep(0.1)
+    if not reply.get('ok'):raise ValueError(reply.get('error','Server settings could not be read.'))
+    return reply['data']
+
+
 def set_startup_settings(state,engine,values):
     if not isinstance(values,dict) or len(values)>10000:raise ValueError('Startup console variables must be a settings object.')
     commands=[]
@@ -1138,6 +1158,7 @@ def dispatch(request, engine=None):
         if action=='scale.patch':return request_scale(state,engine,request.get('name'),request.get('patch'))
         if action=='maps.floor':return set_map_floor(state,engine,request.get('map'),request.get('enabled'))
         if action=='maps.party-sharing':return set_party_sharing(state,engine,request.get('map'),request.get('shared'))
+        if action=='settings.read':return read_settings(state,engine,request.get('file'))
         if action=='settings.write':return write_settings(state,engine,request)
         if action=='settings.startup':return set_startup_settings(state,engine,request.get('values'))
         if action=='settings.defaults':return engine.read_game_defaults(state['services']['game-1']['id'],state['id'])

@@ -4,6 +4,9 @@ function Convert-DuneBrowserClientSettings {
     param([Parameter(Mandatory)][hashtable]$Request)
     $mode=if($Request.mode){[string]$Request.mode}else{'inspect'}
     if($mode -notin @('inspect','apply','disable-engine')){throw 'Choose a supported client-file operation.'}
+    foreach($flag in @('download','reviewedRaw','approved')){
+        if($Request.ContainsKey($flag) -and $Request[$flag] -isnot [bool]){throw 'Client-file approval and delivery flags must be JSON booleans.'}
+    }
     if($Request.selected -isnot [bool] -or $Request.engineEnabled -isnot [bool]){throw 'Client selection and Engine.ini management must be JSON booleans.'}
     $label=if($Request.selected){[string]$Request.directory}else{'Choose this PC''s client config folder'}
     if($label.Length -gt 128 -or $label -match '[\x00-\x1f]'){throw 'Invalid browser folder label.'}
@@ -74,5 +77,69 @@ function Convert-DuneBrowserClientSettings {
     $client.dir=$label;$client.dirResolved=$label;$client.dirExists=$Request.selected
     $client.default='%LOCALAPPDATA%\DuneSandbox\Saved\Config\Windows';$client.engineEnabled=$Request.engineEnabled
     $client.game=$bundles.game;$client.engine=$bundles.engine
-    return @{ok=$true;client=$client;changes=$changes;applied=$updates.Count;removed=$(if($mode -eq 'disable-engine'){$updates.Count}else{0})}
+    $result=@{ok=$true;client=$client;changes=$changes;applied=$updates.Count;removed=$(if($mode -eq 'disable-engine'){$updates.Count}else{0})}
+    if($Request.download -eq $true -and $mode -ne 'inspect'){
+        $result.download=New-DuneBrowserClientDownload -Request $Request -Changes $changes
+    }
+    return $result
+}
+
+# Portable browser delivery. Originals are verified byte-for-byte against the
+# reviewed UTF-8 text; no server or player filesystem path is opened or written.
+function New-DuneBrowserClientDownload {
+    param([hashtable]$Request,[hashtable]$Changes)
+    $files=New-Object 'System.Collections.Generic.List[object]'
+    $utf8=[Text.UTF8Encoding]::new($false,$true)
+    foreach($key in @('game','engine')){
+        if(-not $Changes.ContainsKey($key)){continue}
+        $name=if($key -eq 'game'){'Game.ini'}else{'Engine.ini'}
+        $original=$null;$bom=$false
+        if($Request.files[$key].exists){
+            $encoded=$Request.files[$key].bytes
+            if($encoded -isnot [string] -or $encoded.Length -gt 1400000){throw 'Supply the exact original client file bytes for the download backup.'}
+            try{$original=[Convert]::FromBase64String($encoded)}catch{throw 'The original client file encoding is invalid.'}
+            if($original.Length -gt 1MB){throw 'Each original client file must be no larger than 1 MiB.'}
+            try{$text=$utf8.GetString($original)}catch{throw 'The selected client file must use UTF-8 text.'}
+            $bom=$original.Length -ge 3 -and $original[0] -eq 239 -and $original[1] -eq 187 -and $original[2] -eq 191
+            if($bom){$text=$text.Substring(1)}
+            if($text -cne [string]$Request.files[$key].raw){throw 'The original client bytes do not match the reviewed text. Select the files again.'}
+        }
+        [byte[]]$updated=$utf8.GetBytes([string]$Changes[$key].after)
+        if($bom){$updated=[byte[]](@(239,187,191)+@($updated))}
+        if($updated.Length -gt 1MB){throw 'The updated client file would exceed 1 MiB.'}
+        $files.Add(@{name=$name;original=$original;updated=$updated})
+    }
+    if($files.Count -eq 0){return $null}
+    $memory=[IO.MemoryStream]::new()
+    try{
+    $archive=[IO.Compression.ZipArchive]::new($memory,[IO.Compression.ZipArchiveMode]::Create,$true)
+    $manifest=New-Object 'System.Collections.Generic.List[object]'
+    try{
+        foreach($file in $files){
+            $record=@{name=$file.name;updated='Updated/'+$file.name;original=$null;originalSha256=$null;updatedSha256=$null}
+            foreach($kind in @('original','updated')){
+                [byte[]]$bytes=$file[$kind]
+                if($null -eq $file[$kind]){continue}
+                $path=if($kind -eq 'original'){'Originals/'+$file.name}else{'Updated/'+$file.name}
+                $entry=$archive.CreateEntry($path)
+                $stream=$entry.Open()
+                try{$stream.Write($bytes,0,$bytes.Length)}finally{$stream.Dispose()}
+                $sha=[Security.Cryptography.SHA256]::Create()
+                try{$hash=([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
+                $record[$kind]=$path;$record[$kind+'Sha256']=$hash
+            }
+            $manifest.Add($record)
+        }
+        $documents=@{
+            'manifest.json'=(@{format=1;delivery='manual';files=@($manifest.ToArray())}|ConvertTo-Json -Depth 5)
+            'README.txt'="These client files have NOT been installed automatically.`r`nClose Dune: Awakening before installing them.`r`nKeep this ZIP: Originals contains exact backups of existing files; manifest.json records their SHA256 hashes.`r`nIf the originals changed after you selected them, select the current files again and regenerate this package.`r`nCopy only the files in Updated into the same Dune client config folder you selected the originals from.`r`nRe-select the installed files in DST to inspect and verify them. Restart the game to test.`r`nThis package does not change the server or other players' files.`r`n"
+        }
+        foreach($name in $documents.Keys){
+            $entry=$archive.CreateEntry($name);$stream=$entry.Open()
+            try{$bytes=$utf8.GetBytes($documents[$name]);$stream.Write($bytes,0,$bytes.Length)}finally{$stream.Dispose()}
+        }
+    }finally{$archive.Dispose()}
+    return @{filename='DST-client-settings.zip';base64=[Convert]::ToBase64String($memory.ToArray());files=$files.Count}
+    }
+    finally{$memory.Dispose()}
 }
