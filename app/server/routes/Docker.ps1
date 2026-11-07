@@ -30,7 +30,7 @@ Register-DuneRoute -Method PUT -Path '/api/docker/memory-balancing' -Handler {
     Write-DuneJson -Response $res -Body $reply.data
 }
 
-Register-DuneRoute -Method GET -Path '/api/docker/log-exports/{id}' -LocalOnly -Handler {
+Register-DuneRoute -Method GET -Path '/api/docker/log-exports/{id}' -Handler {
     param($req,$res,$routeParams,$body)
     $id=[string]$routeParams.id
     if($env:DST_HOSTING_BACKEND -ne 'docker' -or $id -cnotmatch '^[a-f0-9]{32}$'){

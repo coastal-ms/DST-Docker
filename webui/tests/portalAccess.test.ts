@@ -74,6 +74,15 @@ describe('Browser Portal role access', () => {
     expect(canAccessCommand('update-with-tanks', false, null)).toBe(false)
     expect(canAccessCommand('restart', false, 'admin')).toBe(true)
   })
+  it('allows authenticated Docker Owners to stop the battlegroup and export logs by IP', () => {
+    for (const command of ['stop', 'logs-export', 'operator-logs-export']) {
+      expect(canAccessCommand(command, false, 'owner', true)).toBe(true)
+      expect(canAccessCommand(command, false, 'admin', true)).toBe(false)
+      expect(canAccessCommand(command, false, null, true)).toBe(false)
+      expect(canAccessCommand(command, false, 'player', true)).toBe(false)
+      expect(canAccessCommand(command, false, 'owner', false)).toBe(false)
+    }
+  })
 })
 
 

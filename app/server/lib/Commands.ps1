@@ -51,6 +51,28 @@ $script:DuneCommands = @(
 
 # ---- Availability ------------------------------------------------------------
 
+function Get-DuneCommandCatalogue {
+    $dockerLabels=@{start='Start Battlegroup';stop='Stop Battlegroup';restart='Restart Battlegroup';
+        'apply-inis'='Apply Server Settings & Restart';update='Update Server';
+        'logs-export'='Export Battlegroup Logs';'operator-logs-export'='Export Management Logs'}
+    foreach($command in $script:DuneCommands){
+        if($command.Hidden){continue}
+        if($env:DST_HOSTING_BACKEND -ne 'docker'){$command;continue}
+        if(-not $dockerLabels.ContainsKey($command.Name)){continue}
+        $copy=$command.Clone();$copy.Label=$dockerLabels[$command.Name];$copy.Mode='Docker';$copy.Requires='none'
+        $copy.Section=if($command.Name -eq 'update'){'Server updates'}elseif($command.Name -like '*logs-export'){'Tools'}else{'Battlegroup'}
+        $copy
+    }
+}
+
+function ConvertTo-DuneCommandLayoutName {
+    param([string]$Name)
+    if($env:DST_HOSTING_BACKEND -eq 'docker'){
+        switch($Name){startup{return 'start'};shutdown{return 'stop'};reboot{return 'restart'}}
+    }
+    return $Name
+}
+
 function Get-DuneCommandAvailability {
     param(
         [Parameter(Mandatory)][hashtable]$Command,
@@ -181,6 +203,13 @@ function Get-DuneCommandOrderFile {
 # shutdown commands next, and the remainder alphabetically.
 
 function Get-DuneDefaultCommandLayout {
+    if($env:DST_HOSTING_BACKEND -eq 'docker'){
+        $dockerSections=@(@(),@(),@())
+        $dockerSections[0]=@('start','stop','restart','apply-inis')
+        $dockerSections[1]=@('update')
+        $dockerSections[2]=@('logs-export','operator-logs-export')
+        return @{sectionNames=@('Battlegroup','Server updates','Tools');sections=$dockerSections}
+    }
     $priority = @{
         'start'    = 0; 'start-vm'   = 0; 'startup' = 0; 'stop-vm' = 0
         'reboot'   = 1; 'shutdown'   = 1; 'stop'    = 1
@@ -222,7 +251,7 @@ function Get-DuneCommandLayout {
         # v6.1.10+ shape: { version: 3, sectionNames: [...], sections: [[],[],[]] }
         if ($parsed.PSObject.Properties['sections'] -and $parsed.sections -is [array] -and $parsed.sections.Count -ge 1) {
             # Names — pad / trim to exactly 3, fall back to defaults if missing.
-            $defaultNames = @('VM','Battlegroup','Tools')
+            $defaultNames = @($default.sectionNames)
             $rawNames = if ($parsed.PSObject.Properties['sectionNames']) { @($parsed.sectionNames | ForEach-Object { "$_" }) } else { @() }
             $names = @()
             for ($i = 0; $i -lt 3; $i++) {
@@ -232,19 +261,20 @@ function Get-DuneCommandLayout {
                 if ($n.Length -gt 40) { $n = $n.Substring(0, 40) }
                 $names += $n
             }
+            if($env:DST_HOSTING_BACKEND -eq 'docker' -and ($names -join '|') -eq 'VM|Battlegroup|Tools'){$names=@($default.sectionNames)}
 
             # Sections — pad / trim to exactly 3 arrays. Drop unknown commands
             # and de-dupe across all three (a command may only live in one
             # section at a time).
             $catalogSet = @{}
-            foreach ($c in $script:DuneCommands) { if ($c.Hidden) { continue }; $catalogSet[$c.Name] = $true }
+            foreach ($c in (Get-DuneCommandCatalogue)) { $catalogSet[$c.Name] = $true }
             $sections = @(@(), @(), @())
             $seen     = @{}
             for ($i = 0; $i -lt 3; $i++) {
                 $arr = if ($i -lt $parsed.sections.Count) { @($parsed.sections[$i]) } else { @() }
                 $kept = @()
                 foreach ($n in $arr) {
-                    $s = "$n"
+                    $s = ConvertTo-DuneCommandLayoutName "$n"
                     if ($catalogSet.ContainsKey($s) -and -not $seen.ContainsKey($s)) {
                         $kept += $s
                         $seen[$s] = $true
@@ -256,10 +286,14 @@ function Get-DuneCommandLayout {
             # Catalogue entries not yet placed anywhere (e.g. new commands
             # introduced after the layout was saved) land in section 0 so
             # they're always visible.
-            foreach ($c in $script:DuneCommands) {
+            foreach ($c in (Get-DuneCommandCatalogue)) {
                 if ($c.Hidden) { continue }
                 if (-not $seen.ContainsKey($c.Name)) {
-                    $sections[0] += $c.Name
+                    $sectionIndex=0
+                    if($env:DST_HOSTING_BACKEND -eq 'docker'){
+                        for($j=0;$j -lt 3;$j++){if($c.Name -in @($default.sections[$j])){$sectionIndex=$j;break}}
+                    }
+                    $sections[$sectionIndex] += $c.Name
                     $seen[$c.Name] = $true
                 }
             }
@@ -287,7 +321,8 @@ function Save-DuneCommandLayout {
     if ($Sections.Count     -ne 3) { throw "Expected exactly 3 sections, got $($Sections.Count)" }
 
     # Sanitize section names — trim, fall back to defaults, cap length.
-    $defaultNames = @('VM','Battlegroup','Tools')
+    $defaultLayout = Get-DuneDefaultCommandLayout
+    $defaultNames = @($defaultLayout.sectionNames)
     $cleanNames = @()
     for ($i = 0; $i -lt 3; $i++) {
         $n = "$($SectionNames[$i])".Trim()
@@ -298,13 +333,13 @@ function Save-DuneCommandLayout {
 
     # Sanitize sections — only catalogue commands, globally unique.
     $catalogSet = @{}
-    foreach ($c in $script:DuneCommands) { if ($c.Hidden) { continue }; $catalogSet[$c.Name] = $true }
+    foreach ($c in (Get-DuneCommandCatalogue)) { $catalogSet[$c.Name] = $true }
     $cleanSections = @(@(), @(), @())
     $seen = @{}
     for ($i = 0; $i -lt 3; $i++) {
         $arr = @($Sections[$i])
         foreach ($n in $arr) {
-            $s = "$n"
+            $s = ConvertTo-DuneCommandLayoutName "$n"
             if ($catalogSet.ContainsKey($s) -and -not $seen.ContainsKey($s)) {
                 $cleanSections[$i] += $s
                 $seen[$s] = $true
@@ -313,10 +348,14 @@ function Save-DuneCommandLayout {
     }
     # Any catalogue command not represented in the incoming payload still has
     # to live somewhere — park it in section 0 so it's discoverable.
-    foreach ($c in $script:DuneCommands) {
+    foreach ($c in (Get-DuneCommandCatalogue)) {
         if ($c.Hidden) { continue }
         if (-not $seen.ContainsKey($c.Name)) {
-            $cleanSections[0] += $c.Name
+            $sectionIndex=0
+            if($env:DST_HOSTING_BACKEND -eq 'docker'){
+                for($j=0;$j -lt 3;$j++){if($c.Name -in @($defaultLayout.sections[$j])){$sectionIndex=$j;break}}
+            }
+            $cleanSections[$sectionIndex] += $c.Name
             $seen[$c.Name] = $true
         }
     }

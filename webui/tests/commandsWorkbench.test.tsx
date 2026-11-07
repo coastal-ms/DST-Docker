@@ -75,6 +75,7 @@ function fixture(): CommandsResponse {
 
 let unregisterGuard: (() => void) | undefined
 beforeEach(() => {
+  vi.stubEnv('VITE_DST_EDITION', '')
   vi.useFakeTimers()
   vi.clearAllMocks()
   vi.mocked(api).mockReset()
@@ -96,6 +97,7 @@ afterEach(() => {
   vi.useRealTimers()
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
+  vi.unstubAllEnvs()
   localStorage.clear()
 })
 
@@ -384,6 +386,26 @@ describe('Contextual Commands workbench', () => {
     expect(screen.getByRole('button', { name: /^Open PowerShell/ })).toBeInTheDocument()
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: /^1Restart battlegroup Console/ })) })
     expect(api).toHaveBeenCalledExactlyOnceWith('/api/commands/run/restart', { method: 'POST' })
+  })
+
+  it('shows Docker owner controls by IP with native sections and no VM wording', () => {
+    vi.stubEnv('VITE_DST_EDITION', 'docker')
+    localStorage.removeItem(COMMAND_DECK_KEY)
+    state.local = false
+    state.role = 'owner'
+    const data = fixture()
+    data.sectionNames = ['Battlegroup', 'Server updates', 'Tools']
+    data.sections = [['start', 'stop', 'restart', 'apply-inis'], ['update'], []]
+    data.commands = data.commands.filter(c => data.sections.flat().includes(c.name)).map(c => ({ ...c, mode: 'Docker', requires: 'none' }))
+    state.data = data
+    render(<Commands />)
+    expect(screen.getByText('Manage the battlegroup, server updates and container logs.')).toBeInTheDocument()
+    expect(screen.getByText('Stop battlegroup')).toBeInTheDocument()
+    expect(screen.queryByText('Start VM')).toBeNull()
+    expect(screen.queryByText('VM and battlegroup actions.')).toBeNull()
+    expect(screen.getByRole('button', { name: /Reset layout/ })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^Open PowerShell/ })).toBeNull()
+    expect(api).not.toHaveBeenCalled()
   })
 
   it('preserves loading, error, refresh, and launch-failure feedback', async () => {

@@ -3,8 +3,9 @@ BeforeAll {
     Import-DstLib 'Commands.ps1'
     Import-DstLib 'DockerRoutes.ps1'
     Import-DstLib 'DockerManager.ps1'
+    . (Join-Path (Get-DstRepoRoot) 'app/server/HttpServer.ps1')
     $script:routes=@{}
-    function Register-DuneRoute {param($Method,$Path,[switch]$LocalOnly,$Handler);$script:routes["$Method $Path"]=@{local=[bool]$LocalOnly;handler=$Handler}}
+    function Register-DuneRoute {param($Method,$Path,[switch]$LocalOnly,[switch]$StreamBody,$Handler);$script:routes["$Method $Path"]=@{local=[bool]$LocalOnly;handler=$Handler}}
     function Write-DuneError {param($Response,$Status,$Message)}
     function Write-DuneFile {param($Response,$Path)}
     function Write-DuneJson {param($Response,$Body)}
@@ -44,9 +45,10 @@ Describe 'Native log download boundary' {
             (Get-DuneCommandAvailability -Command @{Name=$name} -State $state).available|Should -BeTrue
         }
     }
-    It 'keeps downloads local-only and restricts paths to fixed export identities' {
+    It 'allows authenticated owner downloads by IP and restricts paths to fixed export identities' {
         $route=$script:routes['GET /api/docker/log-exports/{id}']
-        $route.local|Should -BeTrue
+        $route.local|Should -BeFalse
+        Test-DunePortalOwnerOnlyPath -Path ('/api/docker/log-exports/'+('a'*32)) -Method GET | Should -BeTrue
         Test-DuneDockerRouteQualified -Method GET -Path ('/api/docker/log-exports/'+('a'*32))|Should -BeTrue
         Test-DuneDockerRouteQualified -Method GET -Path '/api/docker/log-exports/../../secret'|Should -BeFalse
         & $route.handler $null @{Headers=@{}} @{id=('../secret')} $null

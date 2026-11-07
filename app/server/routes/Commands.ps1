@@ -5,7 +5,7 @@ Register-DuneRoute -Method GET -Path '/api/commands' -Handler {
     param($req, $res, $routeParams, $body)
     $state  = Get-DuneCurrentState
     $layout = Get-DuneCommandLayout
-    $cmds = foreach ($c in $script:DuneCommands) {
+    $cmds = foreach ($c in (Get-DuneCommandCatalogue)) {
         if ($c.Hidden) { continue }
         $av = Get-DuneCommandAvailability -Command $c -State $state
         $dockerCommand = $state.hostingBackend -eq 'docker' -and $c.Name -in @('start','stop','restart','startup','shutdown','reboot','update','logs-export','operator-logs-export')
@@ -125,7 +125,9 @@ Register-DuneRoute -Method POST -Path '/api/commands/run/{name}' -Handler {
     $isRemote = -not (Test-DuneLocalOnlyRequest -Request $req)
     $portalRole = [string]$routeParams.portalAccountRole
     $authorizedUpdate = ($portalRole -in @('owner','admin') -and $name -in @('update','update-with-tanks'))
-    if ($isRemote -and ($name -notin $remoteAllowedCommands) -and -not $authorizedUpdate) {
+    $dockerOwnerCommand=($env:DST_HOSTING_BACKEND -eq 'docker' -and $portalRole -eq 'owner' -and
+        $name -in @('start','stop','restart','apply-inis','update','logs-export','operator-logs-export'))
+    if ($isRemote -and ($name -notin $remoteAllowedCommands) -and -not $authorizedUpdate -and -not $dockerOwnerCommand) {
         Write-DuneError -Response $res -Status 403 -Message "Command '$name' is not available remotely."
         return
     }

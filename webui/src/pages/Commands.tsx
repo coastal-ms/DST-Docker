@@ -358,6 +358,7 @@ function SectionTitle({
 // ---------- Page -----------------------------------------------------------
 
 export function Commands() {
+  const docker = import.meta.env.VITE_DST_EDITION === 'docker'
   const navigate = useNavigate()
   const commandDeck = useCommandDeck()
   const search = useSearch()
@@ -442,7 +443,7 @@ export function Commands() {
 
   // Effective layout = local optimistic overlay if present, otherwise server.
   const effective = useMemo<{ names: [string, string, string]; sections: [string[], string[], string[]] }>(() => {
-    const fallbackNames: [string, string, string] = ['VM', 'Battlegroup', 'Tools']
+    const fallbackNames: [string, string, string] = docker ? ['Battlegroup', 'Server updates', 'Tools'] : ['VM', 'Battlegroup', 'Tools']
     const fallbackSections: [string[], string[], string[]] = [[], [], []]
     const serverNames    = (cmdsState.data?.sectionNames ?? fallbackNames) as [string, string, string]
     const serverSections = (cmdsState.data?.sections     ?? fallbackSections) as [string[], string[], string[]]
@@ -450,7 +451,7 @@ export function Commands() {
       names:    localNames    ?? serverNames,
       sections: localSections ?? serverSections,
     }
-  }, [cmdsState.data, localNames, localSections])
+  }, [cmdsState.data, localNames, localSections, docker])
 
   const commandsByName = useMemo(() => {
     const m = new Map<string, Command>()
@@ -466,15 +467,15 @@ export function Commands() {
     const sections = effective.sections.map(arr =>
       arr.map(n => commandsByName.get(n))
         .filter((c): c is Command => Boolean(c))
-        .filter(c => canAccessCommand(c.name, local, portalRole))
+        .filter(c => canAccessCommand(c.name, local, portalRole, docker))
     ) as [Command[], Command[], Command[]]
     const serverUpdate = commandsByName.get('update')
     const updatePlaced = sections.some(section => section.some(command => command.name === 'update'))
-    if (!local && canAccessCommand('update', false, portalRole) && serverUpdate && !updatePlaced) {
+    if (!local && canAccessCommand('update', false, portalRole, docker) && serverUpdate && !updatePlaced) {
       sections[1] = [...sections[1], serverUpdate]
     }
     return sections
-  }, [effective.sections, commandsByName, portalRole])
+  }, [effective.sections, commandsByName, portalRole, docker])
 
   // ---- Persistence -------------------------------------------------------
 
@@ -510,7 +511,7 @@ export function Commands() {
 
   function renameSection(idx: SectionIndex, name: string) {
     const cleaned = name.trim().slice(0, MAX_SECTION_NAME)
-    const fallback = ['VM', 'Battlegroup', 'Tools'][idx]
+    const fallback = (docker ? ['Battlegroup', 'Server updates', 'Tools'] : ['VM', 'Battlegroup', 'Tools'])[idx]
     const finalName = cleaned.length === 0 ? fallback : cleaned
     const nextNames: [string, string, string] = [...effective.names] as [string, string, string]
     nextNames[idx] = finalName
@@ -612,8 +613,8 @@ export function Commands() {
   // Remote (tunnel) viewers get a read-only, curated page: only the allow-listed
   // commands render (see `grouped`), and layout editing — drag/reorder, rename,
   // reset — is disabled so a remote user can't rearrange the host's layout.
-  const readOnly = !isLocalViewer()
-  const pageLinks = getVisibleCommandPageLinks(!readOnly)
+  const readOnly = !isLocalViewer() && !(docker && portalRole === 'owner')
+  const pageLinks = getVisibleCommandPageLinks(isLocalViewer() && !docker)
   const showWorkbench = updatesOnly || Boolean(requestedCategory) || (commandDeck && (readOnly || !editingLayout))
   const tasks = SECTION_INDICES.flatMap<CommandTask>(idx => [
     ...grouped[idx].map((command): CommandTask => ({
@@ -641,7 +642,7 @@ export function Commands() {
         icon="Zap"
         description={updatesOnly ? 'Update the Funcom game server.' : showWorkbench
           ? 'Choose a category to see related controls.'
-          : 'VM and battlegroup actions.'}
+          : docker ? 'Manage the battlegroup, server updates and container logs.' : 'VM and battlegroup actions.'}
         actions={
           <div className={commandDeck ? 'flex flex-wrap items-center gap-2' : 'flex items-center gap-2'}>
             {(updatesOnly || requestedCategory) && <Link to="/commands" className="btn-secondary">All commands</Link>}
