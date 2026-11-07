@@ -15,6 +15,8 @@ COPY packaging/docker/rmq_commands.py /opt/dst-manager/rmq_commands.py
 COPY packaging/docker/scale_protocol.py packaging/docker/scaler.py /opt/dst-manager/
 COPY packaging/docker/director_policy.py /opt/dst-manager/director_policy.py
 COPY packaging/docker/file_browser.py /opt/dst-manager/file_browser.py
+COPY packaging/docker/regis_artifacts.py packaging/docker/regis_job.py /opt/dst-manager/
+COPY app/resources/regis-tanks/ /opt/dst-manager/regis-recipes/
 COPY packaging/docker/asset_version.py /opt/dst-manager/asset_version.py
 COPY packaging/docker/log_export.py /opt/dst-manager/log_export.py
 COPY packaging/docker/assets.py packaging/docker/asset_updates.py /opt/dst-manager/
