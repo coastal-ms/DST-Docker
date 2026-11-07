@@ -26,6 +26,7 @@ class HttpsLauncherTests(unittest.TestCase):
             self.releases.append(release)
         self.override=self.prefix/'https.compose.json'
         self.override.write_text(json.dumps({'x-dst-https-origin':'https://192.0.2.1:8443','services':{}}))
+        (self.prefix/'current').symlink_to('releases/'+self.releases[0].name,target_is_directory=True)
 
     def tearDown(self):self.temp.cleanup()
 
@@ -46,6 +47,16 @@ class HttpsLauncherTests(unittest.TestCase):
         self.assertIn('up --no-build -d --no-deps dst https',calls)
         self.assertNotIn('volume create',calls);self.assertNotIn(' pull ',calls)
         self.assertEqual(self.override.read_bytes(),before)
+
+    def test_current_symlink_resolves_tls_state_outside_release_and_keeps_it_after_upgrade(self):
+        for release in self.releases:
+            (self.prefix/'current').unlink()
+            (self.prefix/'current').symlink_to('releases/'+release.name,target_is_directory=True)
+            result=subprocess.run(['sh',str(self.prefix/'current/bin/dst-docker'),'https','192.0.2.1'],env=self.env,capture_output=True,text=True)
+            self.assertEqual(result.returncode,0,result.stderr)
+        calls=self.log.read_text().splitlines()
+        self.assertEqual(sum('-f '+str(self.override)+' up --no-build -d --no-deps dst https' in line for line in calls),2)
+        self.assertFalse(any((release/'https.compose.json').exists() for release in self.releases))
 
     def test_changed_address_and_http_port_are_refused_without_service_changes(self):
         for args in (('https','192.0.2.2'),('port','9090'),('up','--port','9090')):
