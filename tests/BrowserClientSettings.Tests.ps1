@@ -65,6 +65,23 @@ Describe 'Browser-selected client INI transformation' {
         (Get-DuneLandclaimTimerState -Raw $disabled.client.game.raw).hasOverrides|Should -BeFalse
         $disabled.client.game.effective['Manual||Keep']|Should -Be 'unchanged'
     }
+    It 'generates only the shared timer keys for the dedicated browser operation' {
+        $script:request.mode='landclaim';$script:request.reviewedRaw=$false
+        $script:request.timerEnabled=$true;$script:request.timerSeconds='2.5'
+        $script:request.updates=@(@{file='engine';section='ConsoleVariables';key='Manual.Other';value='injected'})
+        $result=Convert-DuneBrowserClientSettings -Request $script:request
+        $result.client.landclaimTimer.enabled|Should -BeTrue
+        $result.client.landclaimTimer.formattedOk|Should -BeTrue
+        $result.client.landclaimTimer.seconds|Should -Be '2.5'
+        $result.client.engine.raw|Should -BeExactly $script:request.files.engine.raw
+        $result.client.game.effective['Manual||Keep']|Should -Be 'unchanged'
+        foreach($value in @('NaN','Infinity','-1','0',"2`nInjected=1")){
+            $script:request.timerSeconds=$value
+            {Convert-DuneBrowserClientSettings -Request $script:request}|Should -Throw '*positive finite*'
+        }
+        $script:request.timerEnabled='false'
+        {Convert-DuneBrowserClientSettings -Request $script:request}|Should -Throw '*JSON boolean*'
+    }
 }
 
 Describe 'Portable client settings download' {

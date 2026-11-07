@@ -3685,6 +3685,19 @@ function Get-DuneLandclaimClientBlock {
 #   Enabled  -> set both scalars to $Seconds and inject the removal (-) lines.
 #   Disabled -> remove both scalars and strip their removal lines (game default).
 # $File is 'game' (server UserGame.ini) or 'client' (local Game.ini).
+function Get-DuneLandclaimTimerRequestValues {
+    param([hashtable]$Body)
+    if(-not $Body -or $Body.enabled -isnot [bool]){throw 'enabled must be a JSON boolean.'}
+    $seconds=''
+    if($Body.enabled){
+        if($Body.seconds -is [bool] -or $Body.seconds -is [System.Collections.IEnumerable] -and $Body.seconds -isnot [string]){throw 'Enter a positive finite number of seconds for the land-claim timer.'}
+        $seconds=([string]$Body.seconds).Trim();$parsed=0.0
+        if(-not [double]::TryParse($seconds,[Globalization.NumberStyles]::Float,[Globalization.CultureInfo]::InvariantCulture,[ref]$parsed) -or
+            [double]::IsNaN($parsed) -or [double]::IsInfinity($parsed) -or $parsed -le 0){throw 'Enter a positive finite number of seconds for the land-claim timer.'}
+    }
+    return @{enabled=[bool]$Body.enabled;seconds=$seconds}
+}
+
 function Build-DuneLandclaimUpdates {
     param([bool]$Enabled, [string]$Seconds, [string]$File = 'game')
     $ups = New-Object 'System.Collections.Generic.List[object]'
@@ -3754,14 +3767,14 @@ function Get-DuneLandclaimTimer {
     $server = @{ available = $false; enabled = $false; seconds = ''; formattedOk = $false }
     try {
         $paths = Resolve-DuneGameConfigPaths -Ip $Ip
-        $raw   = (Invoke-V6Ssh -Ip $Ip -Cmd "sudo cat '$($paths.game)' 2>/dev/null") -join "`n"
+        $raw   = if($env:DST_HOSTING_BACKEND -eq 'docker'){[string](Read-DuneDockerSettingsFile -File game).raw}else{(Invoke-V6Ssh -Ip $Ip -Cmd "sudo cat '$($paths.game)' 2>/dev/null") -join "`n"}
         $st    = Get-DuneLandclaimTimerState -Raw $raw
         $server = @{ available = $true; enabled = $st.enabled; seconds = $st.seconds; formattedOk = $st.formattedOk; hasOverrides = $st.hasOverrides; path = $paths.game }
     } catch {
-        $server = @{ available = $false; enabled = $false; seconds = ''; formattedOk = $false; error = "$($_.Exception.Message)" }
+        $server = @{ available = $false; enabled = $false; seconds = ''; formattedOk = $false; error = "$($_.Exception.Message)"; reason="$($_.Exception.Message)" }
     }
 
-    $client = Get-DuneGameConfigClient
+    $client = if($env:DST_HOSTING_BACKEND -eq 'docker'){@{raw='';exists=$false;dirExists=$false;path='Game.ini';dir=''}}else{Get-DuneGameConfigClient}
     $cst    = Get-DuneLandclaimTimerState -Raw $client.raw
     # The seconds that actually govern play right now (server wins; fall back to
     # the local client file when the VM is down). Used to render the shareable block.
@@ -3796,6 +3809,11 @@ function Set-DuneLandclaimTimer {
     $ups   = Build-DuneLandclaimUpdates -Enabled $Enabled -Seconds $Seconds -File 'game'
     Save-DuneGameConfigLocked -Ip $Ip -Updates $ups
     $result.server = @{ ok = $true; path = $paths.game; applied = $true }
+
+    if($env:DST_HOSTING_BACKEND -eq 'docker'){
+        $result.client=@{ok=$true;applied=$false;reason='Player files are changed only through the separately selected browser files.'}
+        return $result
+    }
 
     # --- local client Game.ini (best-effort) ---
     try {

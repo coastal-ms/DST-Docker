@@ -3,7 +3,7 @@
 function Convert-DuneBrowserClientSettings {
     param([Parameter(Mandatory)][hashtable]$Request)
     $mode=if($Request.mode){[string]$Request.mode}else{'inspect'}
-    if($mode -notin @('inspect','apply','disable-engine')){throw 'Choose a supported client-file operation.'}
+    if($mode -notin @('inspect','apply','disable-engine','landclaim')){throw 'Choose a supported client-file operation.'}
     foreach($flag in @('download','reviewedRaw','approved')){
         if($Request.ContainsKey($flag) -and $Request[$flag] -isnot [bool]){throw 'Client-file approval and delivery flags must be JSON booleans.'}
     }
@@ -26,9 +26,14 @@ function Convert-DuneBrowserClientSettings {
                 $updates.Add(@{file='engine';section=$field.Section;key=$field.Key;value='';remove=$true})
             }
         }
-    }elseif($mode -eq 'apply'){
-        if(@($Request.updates).Count -lt 1 -or @($Request.updates).Count -gt 256){throw 'Review between 1 and 256 client setting changes.'}
-        foreach($update in @($Request.updates)){
+    }elseif($mode -in @('apply','landclaim')){
+        $requestedUpdates=$Request.updates
+        if($mode -eq 'landclaim'){
+            $timer=Get-DuneLandclaimTimerRequestValues -Body @{enabled=$Request.timerEnabled;seconds=$Request.timerSeconds}
+            $requestedUpdates=Build-DuneLandclaimUpdates -Enabled $timer.enabled -Seconds $timer.seconds -File game
+        }
+        if(@($requestedUpdates).Count -lt 1 -or @($requestedUpdates).Count -gt 256){throw 'Review between 1 and 256 client setting changes.'}
+        foreach($update in @($requestedUpdates)){
             if($update -isnot [hashtable]){throw 'Invalid client setting change.'}
             $file=[string]$update.file;$section=[string]$update.section;$key=[string]$update.key
             if($file -notin @('game','engine') -or -not $section.Trim() -or $section -match '[\[\]]' -or
@@ -36,7 +41,7 @@ function Convert-DuneBrowserClientSettings {
                 -not (Test-DuneGameConfigRawTextSafe $key) -or (Test-DuneGameConfigRawTargetBlocked -File $file -Section $section -Key $key)){
                 throw 'Invalid or blocked client INI target.'
             }
-            if($Request.reviewedRaw -ne $true){
+            if($Request.reviewedRaw -ne $true -and $mode -ne 'landclaim'){
                 $field=@($script:DuneGameConfigSchema|Where-Object {$_.File -eq $file -and $_.Section -ceq $section -and $_.Key -ceq $key -and $_.ClientApply -eq $true})
                 if($field.Count -ne 1 -or ($file -eq 'engine' -and -not $Request.engineEnabled)){throw 'This client setting is not approved for compatibility apply.'}
             }
@@ -80,6 +85,7 @@ function Convert-DuneBrowserClientSettings {
     $client.dir=$label;$client.dirResolved=$label;$client.dirExists=$Request.selected
     $client.default='%LOCALAPPDATA%\DuneSandbox\Saved\Config\Windows';$client.engineEnabled=$Request.engineEnabled
     $client.game=$bundles.game;$client.engine=$bundles.engine
+    $client.landclaimTimer=Get-DuneLandclaimTimerState -Raw $bundles.game.raw
     $result=@{ok=$true;client=$client;changes=$changes;applied=$updates.Count;removed=$(if($mode -eq 'disable-engine'){$updates.Count}else{0})}
     if($Request.download -eq $true -and $mode -ne 'inspect'){
         $result.download=New-DuneBrowserClientDownload -Request $Request -Changes $changes

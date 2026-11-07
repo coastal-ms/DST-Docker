@@ -1,6 +1,6 @@
 // GameConfig API — typed wrappers around /api/gameconfig/*
 import { api, withOnlinePlayerGuard } from './client'
-import { applyBrowserClientSettings, downloadBrowserClientFile, getBrowserClientInfo, setBrowserClientEngineEnabled } from './browserClientFiles'
+import { applyBrowserClientSettings, applyBrowserLandclaimTimer, downloadBrowserClientFile, getBrowserClientInfo, setBrowserClientEngineEnabled } from './browserClientFiles'
 import type {
   GameConfigSchemaResponse,
   GameConfigExperimentalCategoriesResponse,
@@ -229,17 +229,36 @@ export function openGameConfigClientFile(file: 'game' | 'engine' = 'game', dir?:
 
 // --- Land-claim (staking unit) extension timer ------------------------------
 
-export function getLandclaimTimer() {
-  return api<LandclaimTimerState>('/api/gameconfig/landclaim-timer')
+export async function getLandclaimTimer() {
+  const state = await api<LandclaimTimerState>('/api/gameconfig/landclaim-timer')
+  if (import.meta.env.VITE_DST_EDITION !== 'docker') return state
+  try {
+    const client = await getBrowserClientInfo()
+    return { ...state, client: { exists: client.game.exists, dirExists: client.dirExists, path: client.game.path, dir: client.dir,
+      enabled: false, seconds: '', formattedOk: false, ...client.landclaimTimer, browserDelivery: client.browserDelivery } }
+  } catch (e) { return { ...state, client: { ...state.client, reason: e instanceof Error ? e.message : String(e) } } }
 }
 
-export function saveLandclaimTimer(enabled: boolean, seconds: string) {
-  return withOnlinePlayerGuard(force =>
+export async function saveLandclaimTimer(enabled: boolean, seconds: string, includeClient = false) {
+  const docker = import.meta.env.VITE_DST_EDITION === 'docker'
+  if (docker && includeClient) await applyBrowserLandclaimTimer(enabled, seconds, true)
+  const result = await withOnlinePlayerGuard(force =>
     api<LandclaimTimerSaveResponse>(`/api/gameconfig/landclaim-timer${fq(force)}`, {
       method: 'PUT',
       body: JSON.stringify({ enabled, seconds }),
     }),
   )
+  if (!docker) return result
+  if (includeClient) {
+    try {
+      const client = await applyBrowserLandclaimTimer(enabled, seconds)
+      result.result.client = { ok: true, applied: client.applied > 0, delivery: client.delivery === 'download' || client.delivery === 'validated' ? client.delivery : undefined }
+    } catch (e) {
+      result.result.client = { ok: false, applied: false, reason: e instanceof Error ? e.message : String(e) }
+    }
+  }
+  try { return { ...result, ...await getLandclaimTimer() } }
+  catch { return { ...result, warning: 'The server timer was saved, but the refreshed status could not be loaded. Refresh before changing it again.' } }
 }
 
 export function getSpicefields() {

@@ -6,6 +6,7 @@ type Writer = { write(data: Blob | string | ArrayBuffer): Promise<void>; close()
 type Handle = { getFile(): Promise<File>; createWritable(): Promise<Writer> }
 type Directory = { name: string; getFileHandle(name: string, options?: { create: boolean }): Promise<Handle>; getDirectoryHandle(name: string, options: { create: boolean }): Promise<Directory> }
 type Snapshot = { raw: string; exists: boolean; file?: File }
+type TimerChange = { enabled: boolean; seconds: string }
 type Transform = { client: GameConfigClientInfo; changes: Partial<Record<Key, { before: string; after: string; created: boolean; applied: number }>>; applied: number; removed: number; download?: { filename: string; base64: string; files: number } | null }
 let directory: Directory | null = null
 let imported: Partial<Record<Key, File>> | null = null
@@ -30,7 +31,7 @@ async function readFiles(): Promise<Record<Key, Snapshot>> {
   return result
 }
 
-async function transform(mode: 'inspect' | 'apply' | 'disable-engine', before: Record<Key, Snapshot>, updates: GameConfigRawUpdate[] = [], reviewedRaw = false, engineEnabled = enabled(), download = false) {
+async function transform(mode: 'inspect' | 'apply' | 'disable-engine', before: Record<Key, Snapshot>, updates: GameConfigRawUpdate[] = [], reviewedRaw = false, engineEnabled = enabled(), download = false, timer?: TimerChange) {
   const files = Object.fromEntries(await Promise.all((['game', 'engine'] as const).map(async key => {
     const entry: { raw: string; exists: boolean; bytes?: string } = { raw: before[key].raw, exists: before[key].exists }
     if (download && before[key].file) {
@@ -42,7 +43,8 @@ async function transform(mode: 'inspect' | 'apply' | 'disable-engine', before: R
     return [key, entry]
   })))
   return api<Transform>('/api/docker/client-files/transform', { method: 'POST', body: JSON.stringify({
-    mode, selected: !!directory || !!imported, approved: mode !== 'inspect', directory: directory?.name ?? (imported ? 'Selected client files' : ''), engineEnabled, reviewedRaw, updates, download, files,
+    mode: timer ? 'landclaim' : mode, selected: !!directory || !!imported, approved: mode !== 'inspect', directory: directory?.name ?? (imported ? 'Selected client files' : ''), engineEnabled, reviewedRaw, updates, download, files,
+    ...(timer ? { timerEnabled: timer.enabled, timerSeconds: timer.seconds } : {}),
   }) })
 }
 
@@ -166,12 +168,13 @@ async function saveTransformed(result: Transform, before: Record<Key, Snapshot>,
   return backups
 }
 
-export async function applyBrowserClientSettings(updates: GameConfigRawUpdate[], validateOnly = false, reviewedRaw = true): Promise<GameConfigClientApplyResult> {
+export async function applyBrowserClientSettings(updates: GameConfigRawUpdate[], validateOnly = false, reviewedRaw = true, timer?: TimerChange): Promise<GameConfigClientApplyResult> {
   if (!directory && !imported) throw new Error('Choose this PC’s client config folder or files before applying local changes.')
   if (imported) {
     const revision = selectionRevision, before = await readFiles()
+    if (timer && !before.game.exists) throw new Error('Select the current Game.ini before preparing timer changes.')
     for (const update of updates) if (!before[update.file].exists) throw new Error(`Select the current ${names[update.file]} before preparing changes for it.`)
-    const result = await transform('apply', before, updates, reviewedRaw, enabled(), !validateOnly)
+    const result = await transform('apply', before, updates, reviewedRaw, enabled(), !validateOnly, timer)
     if (revision !== selectionRevision) throw new Error('The selected client files changed during review. Review them again.')
     await assertUnchanged(before, Object.keys(result.changes) as Key[])
     const generated = !validateOnly && downloadPackage(result)
@@ -181,11 +184,15 @@ export async function applyBrowserClientSettings(updates: GameConfigRawUpdate[],
   }
   if (!directory) throw new Error('Choose this PC’s client config folder before applying local changes.')
   const selectedDirectory = directory
-  const before = await readFiles(), result = await transform('apply', before, updates, reviewedRaw)
+  const before = await readFiles(), result = await transform('apply', before, updates, reviewedRaw, enabled(), false, timer)
   if (directory !== selectedDirectory) throw new Error('The selected client folder changed during review.')
   const backups = validateOnly ? {} : await saveTransformed(result, before, selectedDirectory)
   return { ok: true, path: names.game, paths: names, backup: backups.game ?? backups.engine ?? '', backups, created: false, applied: validateOnly ? 0 : result.applied,
     items: updates as GameConfigClientApplyItem[], client: validateOnly ? (await transform('inspect', before)).client : await getBrowserClientInfo() }
+}
+
+export function applyBrowserLandclaimTimer(enabled: boolean, seconds: string, validateOnly = false) {
+  return applyBrowserClientSettings([], validateOnly, true, { enabled, seconds })
 }
 
 export async function setBrowserClientEngineEnabled(value: boolean) {

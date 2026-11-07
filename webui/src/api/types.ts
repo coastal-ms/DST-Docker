@@ -426,6 +426,7 @@ export type GameConfigClientFileInfo = {
 // `engine` expose both client files for file-aware views and comparisons.
 export type GameConfigClientInfo = GameConfigClientFileInfo & {
   browserDelivery?: 'folder' | 'download' | 'unselected'
+  landclaimTimer?: { enabled: boolean; seconds: string; formattedOk: boolean; hasOverrides?: boolean }
   dir: string
   dirResolved: string
   dirExists: boolean
@@ -520,6 +521,8 @@ export type LandclaimTimerClientState = {
   seconds: string
   formattedOk: boolean
   hasOverrides?: boolean
+  browserDelivery?: 'folder' | 'download' | 'unselected'
+  reason?: string
 }
 
 export type LandclaimTimerState = {
@@ -530,12 +533,13 @@ export type LandclaimTimerState = {
 
 export type LandclaimTimerSaveResponse = {
   ok: boolean
+  warning?: string
   enabled: boolean
   seconds: string
   result: {
     ok: boolean
     server: { ok: boolean; path?: string; applied?: boolean; reason?: string }
-    client: { ok: boolean; path?: string; applied?: boolean; reason?: string }
+    client: { ok: boolean; path?: string; applied?: boolean; reason?: string; delivery?: 'download' | 'validated' }
   }
   server: LandclaimTimerServerState
   client: LandclaimTimerClientState

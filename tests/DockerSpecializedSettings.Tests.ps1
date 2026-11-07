@@ -87,4 +87,29 @@ Describe 'Native specialized settings retain shared behavior' {
         Mock Invoke-DuneDockerManager {@{ok=$false}}
         (Get-DuneDbContext).status|Should -Be 503
     }
+
+    It 'reads the native server timer without touching a Windows player file or SSH' {
+        Mock Resolve-DuneGameConfigPaths {@{game='/srv/UserSettings/UserGame.ini'}}
+        Mock Read-DuneDockerSettingsFile {@{raw="[/Script/DuneSandbox.BuildingSettings]`nm_StakingUnitExtensionDefaultTimes=2.5`nm_StakingUnitVerticalExtensionDefaultTimes=2.5`n"}}
+        Mock Get-DuneGameConfigClient {throw 'Server must not read a Windows client file.'}
+        $result=Get-DuneLandclaimTimer -Ip docker
+        $result.server.available|Should -BeTrue
+        $result.server.enabled|Should -BeTrue
+        $result.server.seconds|Should -Be '2.5'
+        $result.client.dirExists|Should -BeFalse
+        Should -Invoke Get-DuneGameConfigClient -Times 0
+    }
+
+    It 'saves timer changes only through the guarded server INI transport' {
+        Mock Resolve-DuneGameConfigPaths {@{game='/srv/UserSettings/UserGame.ini'}}
+        Mock Save-DuneGameConfigLocked {}
+        Mock Resolve-DuneGameConfigClientDir {throw 'Never resolve a player path in the container.'}
+        $result=Set-DuneLandclaimTimer -Ip docker -Enabled $true -Seconds '2.5'
+        $result.server.applied|Should -BeTrue
+        $result.client.applied|Should -BeFalse
+        Should -Invoke Save-DuneGameConfigLocked -Times 1 -Exactly -ParameterFilter {
+            $Ip -eq 'docker' -and @($Updates).Count -eq 2 -and $Updates[0].value -eq '2.5' -and @($Updates[0].arrayLines).Count -eq 10
+        }
+        Should -Invoke Resolve-DuneGameConfigClientDir -Times 0
+    }
 }

@@ -33,6 +33,7 @@ function Test-DuneDockerRouteQualified {
             '/api/gameconfig/time-of-day',
             '/api/gameconfig/deep-desert-pvp',
             '/api/gameconfig/base-backup-guard',
+            '/api/gameconfig/landclaim-timer',
             '/api/restart-schedule',
             '/api/map-spinup',
             '/api/installation',
@@ -151,7 +152,7 @@ function Test-DuneDockerRouteQualified {
             '/api/gameplay/players/reserve-recovery/rollback',
             '/api/gameplay/players/fill-base-water'
         )}
-        PUT {return $Path -in @('/api/commands/layout','/api/gameplay/item-packages','/api/gameconfig','/api/gameconfig/retail-server-settings','/api/gameconfig/retail-startup-sync','/api/gameconfig/deep-desert-pvp','/api/gameconfig/base-backup-guard','/api/restart-schedule')}
+        PUT {return $Path -in @('/api/commands/layout','/api/gameplay/item-packages','/api/gameconfig','/api/gameconfig/retail-server-settings','/api/gameconfig/retail-startup-sync','/api/gameconfig/deep-desert-pvp','/api/gameconfig/base-backup-guard','/api/gameconfig/landclaim-timer','/api/restart-schedule')}
         DELETE {return $Path -eq '/api/gameplay/item-packages'}
     }
     return $false

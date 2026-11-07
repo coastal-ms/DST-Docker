@@ -7,6 +7,7 @@ Describe 'Docker adapter routing boundary' {
         Test-DuneDockerRouteQualified -Method GET -Path '/api/docker/resources' | Should -BeTrue
         Test-DuneDockerRouteQualified -Method PUT -Path '/api/docker/resources' | Should -BeTrue
         Test-DuneDockerRouteQualified -Method POST -Path '/api/docker/resources' | Should -BeFalse
+        Test-DuneDockerRouteQualified -Method POST -Path '/api/gameconfig/landclaim-timer' | Should -BeFalse
     }
     It 'keeps native reads and typed mutations available' -TestCases @(
         @{Method='GET';Path='/api/status'},
@@ -28,6 +29,8 @@ Describe 'Docker adapter routing boundary' {
         @{Method='POST';Path='/api/gameconfig/time-of-day/stage'},
         @{Method='POST';Path='/api/gameconfig/time-of-day/restore'},
         @{Method='GET';Path='/api/gameconfig/deep-desert-pvp'},
+        @{Method='GET';Path='/api/gameconfig/landclaim-timer'},
+        @{Method='PUT';Path='/api/gameconfig/landclaim-timer'},
         @{Method='PUT';Path='/api/gameconfig/deep-desert-pvp'},
         @{Method='GET';Path='/api/gameconfig/base-backup-guard'},
         @{Method='PUT';Path='/api/gameconfig/base-backup-guard'}

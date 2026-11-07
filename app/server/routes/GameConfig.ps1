@@ -1096,6 +1096,10 @@ Register-DuneRoute -Method PUT -Path '/api/gameconfig/spicefields/{id}/spawning'
 Register-DuneRoute -Method GET -Path '/api/gameconfig/landclaim-timer' -Handler {
     param($req, $res, $routeParams, $body)
     try {
+        if($env:DST_HOSTING_BACKEND -eq 'docker'){
+            Write-DuneJson -Response $res -Body (Get-DuneLandclaimTimer -Ip docker)
+            return
+        }
         $ctx = Get-DuneGameConfigContext
         if ($ctx.ok) {
             Write-DuneJson -Response $res -Body (Get-DuneLandclaimTimer -Ip $ctx.ip)
@@ -1127,19 +1131,8 @@ Register-DuneRoute -Method PUT -Path '/api/gameconfig/landclaim-timer' -Handler 
         return
     }
 
-    $enabled = $false
-    if ($body.Contains('enabled')) { $enabled = [bool]$body['enabled'] }
-
-    $seconds = ''
-    if ($enabled) {
-        $secRaw = if ($body.Contains('seconds')) { "$($body['seconds'])".Trim() } else { '' }
-        $parsed = 0.0
-        if (-not [double]::TryParse($secRaw, [ref]$parsed) -or $parsed -le 0) {
-            Write-DuneError -Response $res -Status 400 -Message 'Enter a positive number of seconds for the land-claim timer.'
-            return
-        }
-        $seconds = $secRaw
-    }
+    try{$timer=Get-DuneLandclaimTimerRequestValues -Body $body;$enabled=$timer.enabled;$seconds=$timer.seconds}
+    catch{Write-DuneError -Response $res -Status 400 -Message $_.Exception.Message;return}
 
     try {
         $r      = Set-DuneLandclaimTimer -Ip $ctx.ip -Enabled $enabled -Seconds $seconds

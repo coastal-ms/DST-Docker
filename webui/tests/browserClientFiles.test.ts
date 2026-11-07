@@ -93,6 +93,25 @@ function selectedFile(name: string, text: string, bom = false) {
 }
 
 describe('Portable browser client downloads', () => {
+  it('uses the dedicated timer transform for a reviewed download and requires the selected Game.ini', async () => {
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: vi.fn(() => 'blob:fixture') })
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: vi.fn() })
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    request.mockImplementation(async (_path, init) => {
+      const body = JSON.parse(init.body)
+      if (body.mode === 'landclaim') {
+        expect(body).toMatchObject({ timerEnabled: true, timerSeconds: '2.5', approved: true, download: true, updates: [] })
+        expect(body.files.game.bytes).toBeTruthy()
+        return { client: client(), applied: 2, changes: { game: { after: 'updated timer' } }, download: { filename: 'DST-client-settings.zip', base64: btoa('fixture'), files: 1 } }
+      }
+      return { client: client(body.files.game.raw), changes: {} }
+    })
+    const module = await import('../src/api/browserClientFiles')
+    await module.selectBrowserClientFiles([selectedFile('Engine.ini', '[Manual]\nKeep=yes')])
+    await expect(module.applyBrowserLandclaimTimer(true, '2.5')).rejects.toThrow('Select the current Game.ini')
+    await module.selectBrowserClientFiles([selectedFile('Game.ini', '[Manual]\nKeep=original')])
+    expect(await module.applyBrowserLandclaimTimer(true, '2.5')).toMatchObject({ applied: 0, prepared: 2, delivery: 'download' })
+  })
   it('prepares a download with exact original bytes and never reports an installed change', async () => {
     const original = selectedFile('Game.ini', '[Manual]\r\nKeep=original\r\n', true)
     const create = vi.fn(() => 'blob:fixture')

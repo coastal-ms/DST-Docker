@@ -1,16 +1,53 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { LandclaimTimerCard } from '../../src/pages/gameconfig/LandclaimTimerCard'
 import { getLandclaimTimer, saveLandclaimTimer } from '../../src/api/gameconfig'
 import type { LandclaimTimerState } from '../../src/api/types'
+import { chooseBrowserClientFolder } from '../../src/api/browserClientFiles'
 vi.mock('../../src/api/gameconfig', () => ({ getLandclaimTimer: vi.fn(), saveLandclaimTimer: vi.fn() }))
+vi.mock('../../src/api/browserClientFiles', () => ({ chooseBrowserClientFolder: vi.fn() }))
 const state: LandclaimTimerState = {
   server: { available: true, enabled: true, seconds: '1', formattedOk: true },
   client: { exists: true, dirExists: true, path: 'fixture/Game.ini', dir: 'fixture', enabled: false, seconds: '', formattedOk: false },
   clientBlock: '',
 }
-afterEach(() => { cleanup(); vi.clearAllMocks(); localStorage.clear() })
+beforeEach(() => vi.stubEnv('VITE_DST_EDITION', ''))
+afterEach(() => { cleanup(); vi.clearAllMocks(); vi.unstubAllEnvs(); localStorage.clear() })
 describe('Land claim timer client retry', () => {
+  it('keeps Docker saves server-only until the user selects the player destination', async () => {
+    vi.stubEnv('VITE_DST_EDITION', 'docker')
+    vi.mocked(getLandclaimTimer).mockResolvedValue(state)
+    vi.mocked(saveLandclaimTimer).mockResolvedValue({ ...state, ok: true, enabled: true, seconds: '2',
+      result: { ok: true, server: { ok: true, applied: true }, client: { ok: true, applied: false } } })
+    render(<LandclaimTimerCard vmRunning />)
+    const input = await screen.findByRole('spinbutton')
+    fireEvent.change(input, { target: { value: '2' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Review timer changes', exact: true }))
+    expect(screen.getByRole('alertdialog')).toHaveTextContent('only; no player file will be changed')
+    fireEvent.click(screen.getByRole('button', { name: 'Save server file', exact: true }))
+    await waitFor(() => expect(saveLandclaimTimer).toHaveBeenCalledWith(true, '2', false))
+    expect(screen.queryByText(/Client Game.ini was not updated/)).not.toBeInTheDocument()
+  })
+
+  it('preserves the drafted timer when choosing player files and names a download honestly', async () => {
+    vi.stubEnv('VITE_DST_EDITION', 'docker')
+    const selected = { ...state, client: { ...state.client, browserDelivery: 'download' as const } }
+    vi.mocked(getLandclaimTimer).mockResolvedValue(selected)
+    vi.mocked(chooseBrowserClientFolder).mockResolvedValue({} as never)
+    vi.mocked(saveLandclaimTimer).mockResolvedValue({ ...selected, ok: true, enabled: true, seconds: '2',
+      result: { ok: true, server: { ok: true, applied: true }, client: { ok: true, applied: false, delivery: 'download' } } })
+    render(<LandclaimTimerCard vmRunning />)
+    const input = await screen.findByRole('spinbutton')
+    fireEvent.change(input, { target: { value: '2' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Choose player config', exact: true }))
+    await waitFor(() => expect(screen.getByLabelText(/Also prepare this PC’s player Game.ini download/)).toBeChecked())
+    expect(input).toHaveValue(2)
+    fireEvent.click(screen.getByRole('button', { name: 'Review timer changes', exact: true }))
+    expect(screen.getByRole('alertdialog')).toHaveTextContent('download is not installed automatically')
+    fireEvent.click(screen.getByRole('button', { name: 'Save server & Download player file', exact: true }))
+    await waitFor(() => expect(saveLandclaimTimer).toHaveBeenCalledWith(true, '2', true))
+    expect(await screen.findByRole('status')).toHaveTextContent('No player file was installed')
+  })
   it('names both targets and cancels without writing either file', async () => {
     vi.mocked(getLandclaimTimer).mockResolvedValue(state)
     render(<LandclaimTimerCard vmRunning />)
