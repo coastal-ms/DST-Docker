@@ -67,7 +67,7 @@ function Get-DuneMimeType {
 
 function Register-DuneRoute {
     param(
-        [Parameter(Mandatory)][ValidateSet('GET','POST','PUT','DELETE','PATCH')] [string]$Method,
+        [Parameter(Mandatory)][ValidateSet('GET','HEAD','POST','PUT','DELETE','PATCH')] [string]$Method,
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)][scriptblock]$Handler,
         # Inline routes run ON the listener thread instead of the handler pool.
@@ -77,11 +77,16 @@ function Register-DuneRoute {
         # Host-filesystem and host-execution surfaces must not be reachable through
         # LAN, mobile bridge, or tunnel requests, even when a proxy connects from
         # loopback. Enforcement happens before dispatch to the handler pool.
-        [switch]$LocalOnly
+        [switch]$LocalOnly,
+        # Binary transfers are consumed by the handler, only in a pooled worker.
+        [switch]$StreamBody
     )
     $sourceFile = ''
     try { $sourceFile = Split-Path -Leaf $MyInvocation.ScriptName } catch {}
-    $pattern = '^' + ([regex]::Escape($Path) -replace '\\\{([^/}]+)}', '(?<$1>[^/]+)') + '$'
+    if ($StreamBody -and $Inline) { throw 'Streaming routes require a pooled worker.' }
+    $escaped = [regex]::Escape($Path)
+    $escaped = $escaped -replace '\\\{([A-Za-z][A-Za-z0-9_]*)\\\*}', '(?<$1>.*)'
+    $pattern = '^' + ($escaped -replace '\\\{([^/}]+)}', '(?<$1>[^/]+)') + '$'
     $script:DuneRoutes.Add([pscustomobject]@{
         Method  = $Method
         Path    = $Path
@@ -89,6 +94,7 @@ function Register-DuneRoute {
         Handler = $Handler
         Inline  = [bool]$Inline
         LocalOnly = [bool]$LocalOnly
+        StreamBody = [bool]$StreamBody
         SourceFile = $sourceFile
         Classification = $null
     }) | Out-Null
@@ -526,7 +532,8 @@ function Invoke-DuneApiHandlerAsync {
         [Parameter(Mandatory)][scriptblock]$Handler,
         [Parameter(Mandatory)]$Request,
         [Parameter(Mandatory)]$Response,
-        [Parameter(Mandatory)][hashtable]$RouteParams
+        [Parameter(Mandatory)][hashtable]$RouteParams,
+        [bool]$StreamBody = $false
     )
 
     $loginGate = $null
@@ -565,7 +572,7 @@ function Invoke-DuneApiHandlerAsync {
     $ps = [powershell]::Create()
     $ps.RunspacePool = $script:DuneApiPool
     [void]$ps.AddScript({
-        param($handlerText, $req, $res, $routeParams, $ctx, $release)
+        param($handlerText, $req, $res, $routeParams, $ctx, $release, $streamBody)
         try {
             # Inject main-runspace server context into BOTH scopes. Functions
             # defined by the startup dot-sources read these as $script:X (which,
@@ -598,7 +605,7 @@ function Invoke-DuneApiHandlerAsync {
 
             # Read + parse the request body here (off the listener thread).
             $body = $null
-            if ($req.HasEntityBody) {
+            if ($req.HasEntityBody -and -not $streamBody) {
                 if ($req.ContentLength64 -gt 26214400) {   # 25 MB hard cap
                     Write-DuneError -Response $res -Status 413 -Message 'Request body too large.'
                     return
@@ -673,7 +680,7 @@ function Invoke-DuneApiHandlerAsync {
             # completion sweep calls the same helper defensively.
             Complete-DuneApiRelease -Release $release
         }
-    }).AddArgument($Handler.ToString()).AddArgument($Request).AddArgument($Response).AddArgument($RouteParams).AddArgument($script:DuneApiCtx).AddArgument($release)
+    }).AddArgument($Handler.ToString()).AddArgument($Request).AddArgument($Response).AddArgument($RouteParams).AddArgument($script:DuneApiCtx).AddArgument($release).AddArgument($StreamBody)
 
     try {
         $handle = $ps.BeginInvoke()
@@ -1478,7 +1485,11 @@ function Invoke-DuneContext {
                 # Non-inline routes dispatch to the handler pool so a slow handler
                 # can't block the accept loop. The worker reads the body itself.
                 if ($script:DuneApiPoolEnabled -and -not $r.Inline) {
-                    Invoke-DuneApiHandlerAsync -Handler $r.Handler -Request $req -Response $res -RouteParams $routeParams
+                    Invoke-DuneApiHandlerAsync -Handler $r.Handler -Request $req -Response $res -RouteParams $routeParams -StreamBody ([bool]$r.StreamBody)
+                    return
+                }
+                if ($r.StreamBody) {
+                    Write-DuneError -Response $res -Status 503 -Message 'File transfer service is temporarily unavailable.'
                     return
                 }
                 if ($rawPath -eq '/api/portal-auth/login' -and -not $script:DuneApiPoolEnabled) {

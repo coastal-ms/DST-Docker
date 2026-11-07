@@ -3,6 +3,37 @@ import re
 from urllib.parse import quote
 
 IMAGE = 'filebrowser/filebrowser@sha256:a469ea076d4a1b4b1d86a41d130f2f536cd9da996a2b1fb39c0d7635f9d89b9a'
+BASE_URL = '/api/docker/file-browser'
+
+
+def endpoint(state, engine):
+    """Never forward a browser request to a port taken from unverified state."""
+    entry = state.get('fileBrowser')
+    if not entry or not entry.get('id'):
+        return {'available': False}
+    observed = engine.assert_owned(entry['id'], state['id'], 'file-browser')
+    expected_port = state['profile']['gamePortBase'] + 1005
+    host = observed.get('HostConfig') or {}
+    config = observed.get('Config') or {}
+    expected_mounts = saved_mounts(state, engine)
+    if (entry.get('port') != expected_port or entry.get('baseUrl') != BASE_URL
+            or entry.get('mounts') != expected_mounts
+            or config.get('Image') != IMAGE or config.get('User') != '1000:1000'
+            or config.get('Cmd') != command()
+            or host.get('PortBindings') != {'80/tcp': [{'HostIp': '127.0.0.1', 'HostPort': str(expected_port)}]}
+            or not host.get('ReadonlyRootfs') or host.get('NetworkMode') != state['worldPlan']['network']):
+        return {'available': False, 'refreshRequired': True}
+    actual_mounts = {(m.get('Destination'), m.get('Name')) for m in observed.get('Mounts', [])}
+    if actual_mounts != {(m['Target'], m['Source']) for m in expected_mounts} | {('/database', 'dst-' + state['id'] + '-file-browser')}:
+        raise ValueError('File Browser storage does not match this world.')
+    running = observed['State']['Status'] == 'running'
+    return {'available': running, 'port': expected_port if running else None}
+
+
+def command():
+    return ['--noauth', '--disableExec=true', '--followExternalSymlinks=false',
+            '--root=/srv', '--database=/database/filebrowser.db', '--address=0.0.0.0', '--port=80',
+            '--baseURL=' + BASE_URL]
 
 
 def saved_mounts(state, engine):
@@ -55,8 +86,7 @@ def create(state, engine, mounts):
     spec = {
         'Image': IMAGE, 'User': '1000:1000',
         'Labels': {'io.dst.managed': 'true', 'io.dst.project': project, 'io.dst.component': 'file-browser'},
-        'Cmd': ['--noauth', '--disableExec=true', '--followExternalSymlinks=false',
-                '--root=/srv', '--database=/database/filebrowser.db', '--address=0.0.0.0', '--port=80'],
+        'Cmd': command(),
         'ExposedPorts': {'80/tcp': {}},
         'HostConfig': {
             'NetworkMode': network, 'ReadonlyRootfs': True,

@@ -60,9 +60,10 @@ function Get-DuneLinks {
         $director=@($reply.data.services | Where-Object { $_.component-eq'director' }) | Select-Object -First 1
         $running=$director.state-eq'running'
         $browser=$reply.data.fileBrowser
+        $filesReady=@($reply.data.services | Where-Object { $_.component-eq'game-1' -and $_.phase-eq'prepared' }).Count -gt 0
         return @{
             vmRunning=$false; bgRunning=$running
-            fileBrowser=@{available=[bool]$browser.available;url=$(if($browser.available){'http://127.0.0.1:{0}/' -f [int]$browser.port}else{$null});reason=$(if($browser.available){$null}else{'File Browser is not running.'})}
+            fileBrowser=@{available=$filesReady;url=$(if($filesReady){'/api/docker/file-browser/'}else{$null});reason=$(if($filesReady){$null}else{'Prepare Hagga Basin saved files before opening File Browser.'})}
             director=@{available=$running;url=$(if($running){'http://127.0.0.1:{0}/' -f [int]$reply.data.plan.ports.director}else{$null});reason=$(if($running){$null}else{'Battlegroup not running'})}
         }
     }

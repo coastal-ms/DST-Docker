@@ -485,7 +485,7 @@ export function Dashboard() {
                         rel="noreferrer"
                         className="text-xs text-text-dim font-mono hover:text-accent truncate block"
                       >
-                        {row.link.url}
+                        {new URL(row.link.url, window.location.href).href}
                       </a>
                     ) : (
                       <div className="text-xs text-text-dim italic">{row.link.reason ?? 'Unavailable'}</div>
@@ -495,7 +495,7 @@ export function Dashboard() {
                     <button
                       className="btn-secondary"
                       disabled={!row.link.url}
-                      onClick={() => row.link.url && copyToClipboard(row.link.url)}
+                      onClick={() => row.link.url && copyToClipboard(new URL(row.link.url, window.location.href).href)}
                       title="Copy URL"
                     >
                       <Icon name="Copy" size={14} />

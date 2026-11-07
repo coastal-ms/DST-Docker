@@ -27,6 +27,13 @@ beforeEach(() => { vi.useFakeTimers(); getLinks.mockReset(); localStorage.clear(
 afterEach(() => { cleanup(); vi.useRealTimers() })
 
 describe('dashboard web interfaces after VM startup', () => {
+  it('displays a same-origin Docker File Browser link as an address that can be copied', async () => {
+    getLinks.mockResolvedValue({ ...ready, fileBrowser: { available: true, url: '/api/docker/file-browser/', reason: null } })
+    render(<Dashboard />)
+    await act(async () => { await Promise.resolve() })
+    const address = new URL('/api/docker/file-browser/', window.location.href).href
+    expect(screen.getByText(address).getAttribute('href')).toBe('/api/docker/file-browser/')
+  })
   it('identifies the last received status after a failed refresh and clears that warning after recovery', async () => {
     getLinks.mockResolvedValue(ready)
     snapshot.value = { ts: '2026-11-05T20:00:00Z' }

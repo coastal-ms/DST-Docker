@@ -2,6 +2,7 @@
 # still run in the shared dispatcher; this gate only selects native adapters.
 function Test-DuneDockerRouteQualified {
     param([string]$Method,[string]$Path)
+    if($Path.StartsWith('/api/docker/file-browser/',[StringComparison]::Ordinal) -and $Method -in @('GET','HEAD','POST','PUT','PATCH','DELETE')){return $true}
     if($Path -eq '/api/docker/setup'){return $true}
     if($Method -eq 'POST' -and $Path -in @('/api/docker/owner/setup','/api/portal-auth/login','/api/portal-auth/logout','/api/portal-auth/change-password')){return $true}
     if($Path -eq '/api/docker/resources' -and $Method -in @('GET','PUT')){return $true}

@@ -1,3 +1,10 @@
+foreach ($fileBrowserMethod in @('GET','HEAD','POST','PUT','PATCH','DELETE')) {
+    Register-DuneRoute -Method $fileBrowserMethod -Path '/api/docker/file-browser/{path*}' -StreamBody -Handler {
+        param($req,$res,$routeParams,$body)
+        Invoke-DuneDockerFileBrowser -Request $req -Response $res
+    }
+}
+
 Register-DuneRoute -Method POST -Path '/api/docker/client-files/transform' -Handler {
     param($req,$res,$routeParams,$body)
     if($env:DST_HOSTING_BACKEND -ne 'docker'){Write-DuneError -Response $res -Status 404 -Message 'Docker hosting is not enabled.';return}

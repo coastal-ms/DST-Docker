@@ -617,16 +617,24 @@ def set_startup_settings(state,engine,values):
 def prepare_file_browser(state,engine):
     mounts=file_browser.saved_mounts(state,engine)
     entry=state.get('fileBrowser')
-    if entry and entry.get('mounts')!=mounts:
+    if entry and (entry.get('mounts')!=mounts or entry.get('baseUrl')!=file_browser.BASE_URL):
         engine.lifecycle(entry['id'],state['id'],'stop')
         engine.assert_owned(entry['id'],state['id'],'file-browser')
         engine.request('POST','/containers/'+entry['id']+'/rename?name=dst-'+state['id']+'-file-browser-previous-'+secrets.token_hex(4))
         state.pop('fileBrowser');save(state);entry=None
     if not entry:
         identifier=file_browser.create(state,engine,mounts)
-        entry={'id':identifier,'mounts':mounts,'port':state['profile']['gamePortBase']+1005}
+        entry={'id':identifier,'mounts':mounts,'port':state['profile']['gamePortBase']+1005,'baseUrl':file_browser.BASE_URL}
         state['fileBrowser']=entry;save(state)
     engine.lifecycle(entry['id'],state['id'],'start')
+    deadline=time.monotonic()+12
+    while True:
+        observed=engine.assert_owned(entry['id'],state['id'],'file-browser')
+        health=observed.get('State',{}).get('Health',{}).get('Status')
+        if observed['State']['Status']=='running' and health=='healthy':break
+        if observed['State']['Status'] not in {'running','created'} or time.monotonic()>=deadline:
+            raise ValueError('File Browser did not become ready. Reopen it from the dashboard to retry.')
+        time.sleep(0.2)
 
 
 def prepare_map_observers(state,engine):
@@ -1132,6 +1140,7 @@ def dispatch(request, engine=None):
     with LOCK:
         state = project_state()
         if action == 'status': return public_state(state, engine)
+        if action == 'files.endpoint': return file_browser.endpoint(state, engine)
         if action == 'assets.version': return installed_version()
         if action=='memory.policy':return {'enabled':state.get('memoryBalancingEnabled',True)}
         if action=='resources.get':return resource_policy.snapshot(state,engine)
@@ -1147,6 +1156,10 @@ def dispatch(request, engine=None):
             raise ValueError('Recover the interrupted server update before starting another operation.')
         if state.get('pendingMemoryChange') and action!='maps.memory':raise ValueError('Finish the pending map memory allocation first.')
         if state.get('pendingResourceChange') and action!='resources.set':raise ValueError('Finish the pending resource allocation first.')
+        if action == 'files.open':
+            prepare_file_browser(state, engine)
+            return file_browser.endpoint(state, engine)
+        if action == 'files.write-access': return file_browser.endpoint(state, engine)
         if action=='resources.set':return set_resources(state,engine,request)
         if action=='memory.policy.set':
             if type(request.get('enabled')) is not bool:raise ValueError('Supply a JSON boolean for memory balancing.')

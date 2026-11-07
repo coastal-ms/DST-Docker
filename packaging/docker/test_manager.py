@@ -19,6 +19,43 @@ class FakeEngine:
 
 
 class ManagerTests(unittest.TestCase):
+    def test_file_browser_read_can_be_observed_but_open_and_writes_obey_operation_guards(self):
+        for guard in ({'operation':{'phase':'running'}},{'pendingResourceChange':{'map':'Survival_1'}},
+                      {'restore':{'phase':'recovery-required'}}):
+            state={'id':'a'*32,**guard}
+            with patch.object(manager,'project_state',return_value=state),patch.object(manager.file_browser,'endpoint',return_value={'available':True,'port':29782}) as endpoint,patch.object(manager,'prepare_file_browser') as prepare:
+                self.assertEqual(manager.dispatch({'action':'files.endpoint'},FakeEngine())['port'],29782)
+                for action in ('files.open','files.write-access'):
+                    with self.assertRaises(ValueError):manager.dispatch({'action':action},FakeEngine())
+                self.assertEqual(endpoint.call_count,1);prepare.assert_not_called()
+
+    def test_open_prepares_only_the_file_helper_then_returns_verified_endpoint(self):
+        with patch.object(manager,'project_state',return_value={'id':'a'*32}),patch.object(manager,'prepare_file_browser') as prepare,patch.object(manager.file_browser,'endpoint',return_value={'available':True,'port':29782}) as endpoint:
+            engine=FakeEngine();reply=manager.dispatch({'action':'files.open'},engine)
+            self.assertEqual(reply['port'],29782);prepare.assert_called_once();endpoint.assert_called_once()
+            self.assertEqual(engine.execs,[])
+
+    def test_file_helper_waits_for_health_without_touching_game_lifecycle(self):
+        state={'id':'a'*32,'profile':{'gamePortBase':28777}}
+        engine=Mock(spec=manager.Engine)
+        engine.assert_owned.side_effect=[{'State':{'Status':'running','Health':{'Status':'starting'}}},
+                                         {'State':{'Status':'running','Health':{'Status':'healthy'}}}]
+        with patch.object(manager.file_browser,'saved_mounts',return_value=[]),patch.object(manager.file_browser,'create',return_value='browser'),patch.object(manager,'save'),patch.object(manager.time,'sleep'):
+            manager.prepare_file_browser(state,engine)
+        engine.lifecycle.assert_called_once_with('browser',state['id'],'start')
+        self.assertEqual(state['fileBrowser']['baseUrl'],manager.file_browser.BASE_URL)
+
+    def test_legacy_file_helper_is_stopped_and_retained_while_saved_and_database_mounts_survive(self):
+        mounts=[{'Source':'owned-saved','Target':'/srv'}]
+        state={'id':'a'*32,'profile':{'gamePortBase':28777},'fileBrowser':{'id':'old','mounts':mounts,'port':29782}}
+        engine=Mock(spec=manager.Engine);engine.assert_owned.return_value={'State':{'Status':'running','Health':{'Status':'healthy'}}}
+        with patch.object(manager.file_browser,'saved_mounts',return_value=mounts),patch.object(manager.file_browser,'create',return_value='new') as create,patch.object(manager,'save'):
+            manager.prepare_file_browser(state,engine)
+        self.assertEqual(engine.lifecycle.call_args_list[0].args,('old',state['id'],'stop'))
+        self.assertEqual(engine.lifecycle.call_args_list[1].args,('new',state['id'],'start'))
+        self.assertEqual(engine.request.call_count,1);self.assertIn('/rename?',engine.request.call_args.args[1])
+        create.assert_called_once_with(state,engine,mounts)
+
     def test_journal_write_is_synced_before_replacing_the_previous_record(self):
         target=self.root/'journal.json';target.write_text('previous')
         with patch.object(manager.os,'fsync',side_effect=OSError('qualification sync failure')):

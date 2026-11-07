@@ -2,6 +2,7 @@ from pathlib import Path
 import sys
 import unittest
 from unittest.mock import Mock
+from copy import deepcopy
 sys.path.insert(0,str(Path(__file__).parent))
 import file_browser
 
@@ -49,6 +50,42 @@ class FileBrowserTests(unittest.TestCase):
         self.assertIn('--disableExec=true',spec['Cmd'])
         self.assertIn('--followExternalSymlinks=false',spec['Cmd'])
         self.assertNotIn('/var/run/docker.sock',str(spec))
+        self.assertIn('--baseURL=/api/docker/file-browser',spec['Cmd'])
+
+    def prepared_endpoint(self):
+        mounts=file_browser.saved_mounts(self.state,self.engine)
+        self.state['fileBrowser']={'id':'browser','mounts':mounts,'port':29782,'baseUrl':file_browser.BASE_URL}
+        observed={'Config':{'Image':file_browser.IMAGE,'User':'1000:1000','Cmd':file_browser.command()},
+                  'HostConfig':{'PortBindings':{'80/tcp':[{'HostIp':'127.0.0.1','HostPort':'29782'}]},
+                                'ReadonlyRootfs':True,'NetworkMode':self.state['worldPlan']['network']},
+                  'Mounts':[{'Destination':m['Target'],'Name':m['Source']} for m in mounts]+[
+                      {'Destination':'/database','Name':'dst-'+self.project+'-file-browser'}],
+                  'State':{'Status':'running'}}
+        prior=self.engine.assert_owned.side_effect
+        self.engine.assert_owned.side_effect=lambda identifier,project,component:deepcopy(observed) if component=='file-browser' else prior(identifier,project,component)
+        return observed
+
+    def test_endpoint_only_returns_verified_owned_loopback_target(self):
+        self.prepared_endpoint()
+        self.assertEqual(file_browser.endpoint(self.state,self.engine),{'available':True,'port':29782})
+
+    def test_unprepared_endpoint_does_not_start_or_create_anything(self):
+        self.assertEqual(file_browser.endpoint(self.state,self.engine),{'available':False})
+        self.engine.request.assert_not_called()
+
+    def test_endpoint_rejects_changed_binding_image_command_mounts_and_stopped_helper(self):
+        for mutation in ('port','binding','image','command','mounts','stopped'):
+            with self.subTest(mutation=mutation):
+                observed=self.prepared_endpoint()
+                if mutation=='port':self.state['fileBrowser']['port']=8088
+                if mutation=='binding':observed['HostConfig']['PortBindings']['80/tcp'][0]['HostIp']='0.0.0.0'
+                if mutation=='image':observed['Config']['Image']='other-image'
+                if mutation=='command':observed['Config']['Cmd']=[]
+                if mutation=='mounts':observed['Mounts'].append({'Destination':'/host','Name':'foreign'})
+                if mutation=='stopped':observed['State']['Status']='exited'
+                if mutation=='mounts':
+                    with self.assertRaisesRegex(ValueError,'storage'):file_browser.endpoint(self.state,self.engine)
+                else:self.assertFalse(file_browser.endpoint(self.state,self.engine)['available'])
 
 
 if __name__=='__main__':unittest.main()
