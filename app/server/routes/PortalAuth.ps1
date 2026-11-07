@@ -13,16 +13,26 @@ Register-DuneRoute -Method GET -Path '/api/portal-auth/status' -Inline -Handler 
     $auth = if ($enabled) { Get-DunePortalSessionAuth -Request $req } else { @{ ok = $false } }
     $localLaunch = $false
     try { $localLaunch = Test-DuneAccountModeLaunchAccess -Request $req } catch {}
+    $ownerSetup=$false;$bootstrapAuthorized=$false
+    if($env:DST_HOSTING_BACKEND -eq 'docker'){
+        $ownerSetup=(Get-DuneDockerOwnerSetupState).required
+        $bootstrapAuthorized=Test-DuneLaunchToken -Request $req
+    }
     Write-DuneJson -Response $res -Body @{
         accountLoginEnabled = $enabled
         authenticated = ([bool]$auth.ok -or $localLaunch)
         mustChangePassword = [bool]$auth.mustChangePassword
         account = if ($auth.ok) { Get-DunePortalPublicAccount $auth.account } else { $null }
+        ownerSetupRequired = $ownerSetup
+        bootstrapAuthorized = ($ownerSetup -and $bootstrapAuthorized)
     }
 }
 
 Register-DuneRoute -Method POST -Path '/api/portal-auth/login' -Handler {
     param($req, $res, $routeParams, $body)
+    if($env:DST_HOSTING_BACKEND -eq 'docker' -and -not (Test-DunePortalRequestOrigin -Request $req)){
+        Write-DuneError -Response $res -Status 403 -Message 'Request origin rejected.';return
+    }
     if (-not (Test-DunePortalAccountModeEnabled)) {
         Write-DuneError -Response $res -Status 404 -Message 'Not found.'
         return
@@ -45,7 +55,7 @@ Register-DuneRoute -Method POST -Path '/api/portal-auth/login' -Handler {
         return
     }
     Revoke-DunePortalSessionToken -Token (Get-DunePortalCookieToken $req)
-    Set-DunePortalSessionCookie -Response $res -Token $result.token -RememberMe:$rememberMe
+    Set-DunePortalSessionCookie -Response $res -Token $result.token -RememberMe:$rememberMe -Request $req
     Write-DuneJson -Response $res -Body @{
         ok = $true
         accountLoginEnabled = $true
@@ -59,7 +69,7 @@ Register-DuneRoute -Method POST -Path '/api/portal-auth/logout' -Inline -Handler
     param($req, $res, $routeParams, $body)
     $token = Get-DunePortalCookieToken $req
     if ($token) { Revoke-DunePortalSessionToken -Token $token }
-    Clear-DunePortalSessionCookie $res
+    Clear-DunePortalSessionCookie $res -Request $req
     Write-DuneJson -Response $res -Body @{ ok = $true }
 }
 
@@ -77,7 +87,7 @@ Register-DuneRoute -Method POST -Path '/api/portal-auth/change-password' -Inline
             -CurrentPassword ([string](Get-DunePortalBodyValue $body 'currentPassword')) `
             -NewPassword ([string](Get-DunePortalBodyValue $body 'newPassword')) `
             -RememberMe:([bool]$auth.rememberMe)
-        Set-DunePortalSessionCookie -Response $res -Token $issued.token -RememberMe:([bool]$auth.rememberMe)
+        Set-DunePortalSessionCookie -Response $res -Token $issued.token -RememberMe:([bool]$auth.rememberMe) -Request $req
         Write-DuneJson -Response $res -Body @{ ok = $true; mustChangePassword = $false }
     } catch {
         Write-DuneError -Response $res -Status 400 -Message $_.Exception.Message

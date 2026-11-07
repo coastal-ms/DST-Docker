@@ -40,15 +40,18 @@ function Convert-DuneBrowserClientSettings {
                 $field=@($script:DuneGameConfigSchema|Where-Object {$_.File -eq $file -and $_.Section -ceq $section -and $_.Key -ceq $key -and $_.ClientApply -eq $true})
                 if($field.Count -ne 1 -or ($file -eq 'engine' -and -not $Request.engineEnabled)){throw 'This client setting is not approved for compatibility apply.'}
             }
+            $clean=@{file=$file;section=$section;key=$key}
             if($update.ContainsKey('arrayLines')){
                 $lines=@($update.arrayLines)
                 if($lines.Count -gt 1024){throw 'Too many client INI array entries.'}
                 foreach($line in $lines){if($line -isnot [string] -or -not (Test-DuneGameConfigRawTextSafe $line) -or -not (Test-DuneGameConfigArrayLineMatchesKey -Line $line -Key $key)){throw 'Invalid client INI array entry.'}}
-                $updates.Add(@{file=$file;section=$section;key=$key;arrayLines=$lines;arrayRemove=($lines.Count -eq 0)})
-            }else{
-                if($update.value -isnot [string] -or -not (Test-DuneGameConfigRawTextSafe $update.value)){throw 'Invalid client INI scalar value.'}
-                $updates.Add(@{file=$file;section=$section;key=$key;value=$update.value;remove=($update.remove -eq $true -or [string]::IsNullOrWhiteSpace($update.value))})
+                $clean.arrayLines=$lines;$clean.arrayRemove=($lines.Count -eq 0)
             }
+            if($update.ContainsKey('value') -or -not $update.ContainsKey('arrayLines')){
+                if($update.value -isnot [string] -or -not (Test-DuneGameConfigRawTextSafe $update.value)){throw 'Invalid client INI scalar value.'}
+                $clean.value=$update.value;$clean.remove=($update.remove -eq $true -or [string]::IsNullOrWhiteSpace($update.value))
+            }
+            $updates.Add($clean)
         }
     }
     $bundles=@{};$changes=@{};$quoted=Get-DuneGameConfigQuotedKeys

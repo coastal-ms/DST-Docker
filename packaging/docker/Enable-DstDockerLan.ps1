@@ -2,7 +2,7 @@
 [CmdletBinding(SupportsShouldProcess)]
 param(
     [Parameter(Mandatory)][string]$ListenAddress,
-    [ValidateRange(1024,65535)][int]$Port = 18765,
+    [ValidateRange(1024,65535)][int]$Port = 8088,
     [ValidatePattern('^[A-Za-z0-9_.-]+$')][string]$Distribution = 'Ubuntu'
 )
 $ErrorActionPreference = 'Stop'

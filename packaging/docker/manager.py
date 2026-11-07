@@ -533,7 +533,7 @@ def start_services(state,engine,publish_gateway=True):
     for component in ['text-router','director']+(['gateway'] if publish_gateway else [])+['game-'+str(partition) for partition in sorted(selected)]:
         if component.startswith('game-') and state.get('resourcePolicy'):
             game=next(row for row in state['worldPlan']['games'] if row['partition']==int(component[5:]))
-            engine.set_component_cpu(state['services'][component]['id'],state['id'],component,state.get('mapCpuOverrides',{}).get(game['map'],1))
+            engine.set_component_cpu(state['services'][component]['id'],state['id'],component,state.get('mapCpuOverrides',{}).get(game['map']))
         engine.lifecycle(state['services'][component]['id'],state['id'],'start')
     prepare_map_observers(state,engine)
     prepare_file_browser(state,engine)
@@ -695,7 +695,7 @@ def control_map(state,engine,partition,running,force=False,automatic=False):
             engine.upload_component_files(identifier,state['id'],component,files)
             entry['phase']='prepared';save(state)
         if state.get('resourcePolicy'):
-            engine.set_component_cpu(entry['id'],state['id'],component,state.get('mapCpuOverrides',{}).get(game['map'],1))
+            engine.set_component_cpu(entry['id'],state['id'],component,state.get('mapCpuOverrides',{}).get(game['map']))
         engine.lifecycle(entry['id'],state['id'],'start')
         state.setdefault('mapTargets',{})[component]='running';save(state)
         manual_floor()
@@ -742,7 +742,8 @@ def restart_map(state,engine,partition,force=False):
 
 def set_resources(state,engine,request):
     change=resource_policy.validate_change(state,request,resource_policy.host_capacity())
-    if state.get('pendingResourceChange') and state['pendingResourceChange']!=change:
+    pending=state.get('pendingResourceChange')
+    if pending and {key:value for key,value in pending.items() if key!='cpuCount'}!=change:
         raise ValueError('Retry the pending resource allocation before choosing different values.')
     if state.get('desiredState')=='running':raise ValueError('Stop the battlegroup before changing its resource allocations.')
     entries=[]
@@ -757,7 +758,7 @@ def set_resources(state,engine,request):
     for component,identifier,allocation in entries:
         engine.set_component_memory(identifier,state['id'],component,int(allocation['memoryGiB']*1024**3))
         engine.set_component_cpu(identifier,state['id'],component,allocation['cpus'])
-    state['resourcePolicy']={key:change[key] for key in ('memoryGiB','cpuCount')}
+    state['resourcePolicy']={'memoryGiB':change['memoryGiB']}
     state['mapMemoryOverrides']={item['map']:int(item['memoryGiB']*1024**3) for item in change['maps']}
     state['mapCpuOverrides']={item['map']:item['cpus'] for item in change['maps']}
     for row in state.get('worldPlan',{}).get('maps',[]):row['memoryBytes']=state['mapMemoryOverrides'][row['map']]

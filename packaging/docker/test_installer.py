@@ -12,7 +12,7 @@ if not TEMPLATE.exists():TEMPLATE=Path('/installer-template')
 
 def archive(extra=None):
     output=io.BytesIO()
-    files={'bin/dst-docker':b'#!/bin/sh\nprintf "portal fixture started\\n"\n','compose.yaml':b'name: fixture\nservices: {}\n','packaging/docker/Dockerfile':b'FROM scratch\n'}
+    files={'bin/dst-docker':b'#!/bin/sh\nprintf "portal fixture started %s\\n" "$*"\n','compose.yaml':b'name: fixture\nservices: {}\n','packaging/docker/Dockerfile':b'FROM scratch\n'}
     with tarfile.open(fileobj=output,mode='w:gz') as target:
         for name,data in files.items():
             entry=tarfile.TarInfo(name);entry.size=len(data);entry.mode=0o755 if name.startswith('bin/') else 0o644;target.addfile(entry,io.BytesIO(data))
@@ -59,6 +59,26 @@ esac
         second=self.run_installer('--prepare-only','--prefix',str(prefix));self.assertEqual(second.returncode,0,second.stderr)
         self.assertEqual(json.loads((prefix/'installation.json').read_text())['operatorNote'],'preserve me')
         self.assertEqual(len(list((prefix/'releases').iterdir())),1)
+
+    def test_selected_console_port_survives_prepare_and_is_consumed_by_start(self):
+        self.bundle();prefix=self.root/'installation'
+        result=self.run_installer('--prepare-only','--prefix',str(prefix),'--port','9090')
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(json.loads((prefix/'installation.json').read_text())['pendingConsolePort'],9090)
+        result=self.run_installer('--prefix',str(prefix))
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertIn('portal fixture started up --port 9090',result.stdout)
+        self.assertNotIn('pendingConsolePort',json.loads((prefix/'installation.json').read_text()))
+        result=self.run_installer('--prefix',str(prefix))
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertNotIn('--port',result.stdout)
+
+    def test_invalid_console_ports_fail_before_install_or_docker_changes(self):
+        for port in ['0','80','65536','8088;bad','not-a-port','08088']:
+            result=self.run_installer('--port',port,'--prefix',str(self.root/'installation'))
+            self.assertNotEqual(result.returncode,0)
+            self.assertIn('console port',result.stderr)
+        self.assertFalse((self.root/'installation').exists());self.assertFalse(self.log.exists())
 
     def test_prepared_source_directories_are_readable_by_the_nonroot_container_user(self):
         self.bundle();prefix=self.root/'installation'

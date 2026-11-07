@@ -49,6 +49,22 @@ Describe 'Browser-selected client INI transformation' {
         $result.client.engine.effective.ContainsKey('ConsoleVariables||Vehicle.MaxVehiclesPerPlayer')|Should -BeFalse
         $result.client.engine.effective['ConsoleVariables||Manual.Other']|Should -BeExactly 'preserved'
     }
+    It 'preserves both scalar and array parts of a reviewed staking-timer update and clears both on disable' {
+        $script:request.reviewedRaw=$true
+        $script:request.updates=Build-DuneLandclaimUpdates -Enabled $true -Seconds '2.5' -File game
+        $enabled=Convert-DuneBrowserClientSettings -Request $script:request
+        $state=Get-DuneLandclaimTimerState -Raw $enabled.client.game.raw
+        $state.enabled|Should -BeTrue
+        $state.formattedOk|Should -BeTrue
+        $state.seconds|Should -Be '2.5'
+        $enabled.client.game.effective['Manual||Keep']|Should -Be 'unchanged'
+        $script:request.files.game.raw=$enabled.client.game.raw
+        $removals=Build-DuneLandclaimUpdates -Enabled $false -Seconds '' -File game
+        $script:request.updates=@(foreach($item in $removals){@{file=$item.file;section=$item.section;key=$item.key;value='';arrayLines=@()}})
+        $disabled=Convert-DuneBrowserClientSettings -Request $script:request
+        (Get-DuneLandclaimTimerState -Raw $disabled.client.game.raw).hasOverrides|Should -BeFalse
+        $disabled.client.game.effective['Manual||Keep']|Should -Be 'unchanged'
+    }
 }
 
 Describe 'Portable client settings download' {

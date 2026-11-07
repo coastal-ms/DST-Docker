@@ -16,6 +16,9 @@ function Get-DunePortalAuthDirectory {
     if (-not (Test-Path -LiteralPath $dir)) {
         New-Item -ItemType Directory -Path $dir -Force | Out-Null
     }
+    if($IsLinux -and $env:DST_HOSTING_BACKEND -eq 'docker'){
+        [IO.File]::SetUnixFileMode($dir,[IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserWrite -bor [IO.UnixFileMode]::UserExecute)
+    }
     return $dir
 }
 
@@ -79,6 +82,9 @@ function Write-DunePortalJson {
     $tmp = "$Path.$([guid]::NewGuid().ToString('N')).tmp"
     try {
         $Value | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $tmp -Encoding UTF8 -Force
+        if($IsLinux -and $env:DST_HOSTING_BACKEND -eq 'docker'){
+            [IO.File]::SetUnixFileMode($tmp,[IO.UnixFileMode]::UserRead -bor [IO.UnixFileMode]::UserWrite)
+        }
         if (Test-Path -LiteralPath $Path) {
             $preserve = $false
             try {
@@ -409,15 +415,17 @@ function Get-DunePortalCookieToken {
 }
 
 function Set-DunePortalSessionCookie {
-    param($Response, [string]$Token, [bool]$RememberMe = $false)
+    param($Response, [string]$Token, [bool]$RememberMe = $false, $Request=$null)
     $cookie = "$($script:DunePortalCookieName)=$Token; Path=/"
     if ($RememberMe) { $cookie += "; Max-Age=$($script:DunePortalRememberDays * 86400)" }
-    $Response.Headers['Set-Cookie'] = "$cookie; Secure; HttpOnly; SameSite=Strict"
+    $secure=if($env:DST_HOSTING_BACKEND -eq 'docker' -and $Request -and $Request.Url.Scheme -eq 'http'){''}else{'; Secure'}
+    $Response.Headers['Set-Cookie'] = "$cookie$secure; HttpOnly; SameSite=Strict"
 }
 
 function Clear-DunePortalSessionCookie {
-    param($Response)
-    $Response.Headers['Set-Cookie'] = "$($script:DunePortalCookieName)=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Secure; HttpOnly; SameSite=Strict"
+    param($Response,$Request=$null)
+    $secure=if($env:DST_HOSTING_BACKEND -eq 'docker' -and $Request -and $Request.Url.Scheme -eq 'http'){''}else{'; Secure'}
+    $Response.Headers['Set-Cookie'] = "$($script:DunePortalCookieName)=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT$secure; HttpOnly; SameSite=Strict"
 }
 
 function Get-DunePortalSessionAuth {
@@ -531,6 +539,17 @@ function Test-DunePortalRequestOrigin {
     if (-not $origin) { return $false }
     try {
         $originUri = [uri]$origin
+        if($env:DST_HOSTING_BACKEND -eq 'docker'){
+            # HttpListener may report the container's listen port after Docker
+            # port translation. Host retains the browser's original authority.
+            $authority=[string]$Request.Headers['Host']
+            if(-not $authority){$authority=$Request.Url.Authority}
+            $expected=[uri]("$($Request.Url.Scheme)://${authority}/")
+            return (-not $expected.UserInfo -and $expected.AbsolutePath -eq '/' -and -not $expected.Query -and -not $expected.Fragment -and
+                $originUri.Scheme -in @('http','https') -and $originUri.Scheme -ceq $expected.Scheme -and
+                $originUri.Authority -ieq $expected.Authority -and -not $originUri.UserInfo -and
+                $originUri.AbsolutePath -eq '/' -and -not $originUri.Query -and -not $originUri.Fragment)
+        }
         if ($originUri.Scheme -ne 'https' -or -not $originUri.Host -or $originUri.UserInfo -or
             $originUri.AbsolutePath -ne '/' -or $originUri.Query -or $originUri.Fragment) {
             return $false

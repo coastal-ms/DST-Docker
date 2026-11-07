@@ -55,12 +55,17 @@ class Engine:
             raise EngineError('The Docker map memory allocation could not be verified.')
 
     def set_component_cpu(self, identifier, project, component, cpus):
-        if not re.fullmatch(r'game-[0-9]+', component) or type(cpus) not in (int,float) or not .25 <= cpus <= 1024:
+        if not re.fullmatch(r'game-[0-9]+', component) or (cpus is not None and (type(cpus) not in (int,float) or not .25 <= cpus <= 1024)):
             raise ValueError('Invalid map CPU allocation.')
-        self.assert_owned(identifier, project, component)
-        quota = int(cpus * 1_000_000_000)
-        self.request('POST', '/containers/' + identifier + '/update', {'NanoCpus': quota})
-        if self.assert_owned(identifier, project, component)['HostConfig']['NanoCpus'] != quota:
+        observed=self.assert_owned(identifier, project, component)
+        # Docker treats NanoCpus=0 as "unchanged", so that API cannot clear a
+        # saved cap. Use the reversible CFS quota API for optional DST caps.
+        if observed.get('HostConfig',{}).get('NanoCpus',0):
+            raise EngineError('This map has a legacy CPU cap. Refresh its stopped adapter before changing CPU limits.')
+        quota = -1 if cpus is None else int(cpus * 100_000)
+        self.request('POST', '/containers/' + identifier + '/update', {'CpuPeriod':100_000,'CpuQuota':quota})
+        actual=self.assert_owned(identifier, project, component)['HostConfig']
+        if actual.get('CpuQuota')!=quota or actual.get('CpuPeriod')!=100_000 or actual.get('NanoCpus',0):
             raise EngineError('The Docker map CPU allocation could not be verified.')
 
     def create_asset_stage_job(self, project, operation, build, assets_volume):

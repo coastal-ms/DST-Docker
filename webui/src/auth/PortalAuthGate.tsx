@@ -1,5 +1,6 @@
 import { createContext, lazy, Suspense, useContext, useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { Icon } from '../components/Icon'
+import { api } from '../api/client'
 import {
   changePortalPassword,
   getPortalAuthStatus,
@@ -35,6 +36,33 @@ function AuthFrame({ title, subtitle, children }: { title: string; subtitle: str
       </section>
     </main>
   )
+}
+
+function OwnerSetup({ onSuccess }: { onSuccess: (status: PortalAuthStatus) => void }) {
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
+  const [confirmation, setConfirmation] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  async function submit(event: FormEvent) {
+    event.preventDefault(); setError('')
+    if (password !== confirmation) { setError('Passwords do not match.'); return }
+    setBusy(true)
+    try { onSuccess(await api<PortalAuthStatus>('/api/docker/owner/setup', { method: 'POST', body: JSON.stringify({ username, password }) })) }
+    catch (e) { setError(e instanceof Error ? e.message : 'Owner setup failed.') }
+    finally { setBusy(false) }
+  }
+  return <AuthFrame title="Create your DST owner account" subtitle="First setup · choose your own sign-in details">
+    <form onSubmit={submit} autoComplete="on" className="space-y-4">
+      <p className="text-sm text-text-muted">This account controls your Docker installation. After setup, open the IP address and port in any browser and sign in.</p>
+      {error && <p role="alert" className="text-danger">{error}</p>}
+      <label className="block text-sm">Owner username<input className="mt-1 w-full rounded-lg border border-border bg-surface-2 px-3 py-2" name="username" autoComplete="username" minLength={3} maxLength={64} required value={username} onChange={e => setUsername(e.target.value)} /></label>
+      <label className="block text-sm">Password<input className="mt-1 w-full rounded-lg border border-border bg-surface-2 px-3 py-2" type="password" name="password" autoComplete="new-password" minLength={12} maxLength={128} required value={password} onChange={e => setPassword(e.target.value)} /></label>
+      <label className="block text-sm">Confirm password<input className="mt-1 w-full rounded-lg border border-border bg-surface-2 px-3 py-2" type="password" name="confirmation" autoComplete="new-password" minLength={12} maxLength={128} required value={confirmation} onChange={e => setConfirmation(e.target.value)} /></label>
+      <p className="text-xs text-text-muted">Use 12–128 characters. Your password is stored as a salted hash.</p>
+      <button className="btn-primary w-full justify-center" type="submit" disabled={busy}>{busy ? 'Creating owner…' : 'Create owner account'}</button>
+    </form>
+  </AuthFrame>
 }
 
 function Login({ onSuccess }: { onSuccess: (status: PortalAuthStatus) => void }) {
@@ -182,6 +210,14 @@ export function PortalAuthGate({ children }: { children: ReactNode }) {
   }
   if (!status) {
     return <div className="min-h-full flex items-center justify-center text-text-muted"><Icon name="Loader2" className="animate-spin mr-2" /> Checking access...</div>
+  }
+  if (import.meta.env.VITE_DST_EDITION === 'docker' && status.ownerSetupRequired) {
+    return status.bootstrapAuthorized ? <OwnerSetup onSuccess={setStatus} />
+      : <AuthFrame title="First owner setup required" subtitle="Finish setup on the Docker host">
+        <p className="text-sm text-text-muted">Open the private sign-in link printed by the installer to create your owner account. You can then sign in here using the IP address and port.</p>
+        <p className="mt-3 text-sm text-text-muted">On the host, <code>sh bin/dst-docker url</code> shows the current private link.</p>
+        <button className="btn-secondary mt-4" onClick={() => void refresh()}>Check again</button>
+      </AuthFrame>
   }
   if (!status.accountLoginEnabled) return <>{children}</>
   if (!status.authenticated) return <Login onSuccess={setStatus} />

@@ -198,13 +198,23 @@ class EngineTests(unittest.TestCase):
 class CpuAllocationTests(unittest.TestCase):
     def test_cpu_update_is_owned_and_read_back(self):
         class Client(engine.Engine):
-            def __init__(self):self.quota=0;self.calls=[]
-            def assert_owned(self,identifier,project,component):return {'HostConfig':{'NanoCpus':self.quota}}
-            def request(self,method,path,body):self.calls.append((method,path,body));self.quota=body['NanoCpus']
+            def __init__(self):self.config={'NanoCpus':0};self.calls=[]
+            def assert_owned(self,identifier,project,component):return {'HostConfig':self.config}
+            def request(self,method,path,body):self.calls.append((method,path,body));self.config.update(body)
         client=Client();client.set_component_cpu('owned','a'*32,'game-1',1.5)
-        self.assertEqual(client.calls,[('POST','/containers/owned/update',{'NanoCpus':1_500_000_000})])
+        self.assertEqual(client.calls,[('POST','/containers/owned/update',{'CpuPeriod':100_000,'CpuQuota':150_000})])
+        client.set_component_cpu('owned','a'*32,'game-1',None)
+        self.assertEqual(client.calls[-1],('POST','/containers/owned/update',{'CpuPeriod':100_000,'CpuQuota':-1}))
+        client.set_component_cpu('owned','a'*32,'game-1',.5)
+        self.assertEqual(client.config['CpuQuota'],50_000)
         for value in [True,0,float('nan'),float('inf')]:
             with self.assertRaises(ValueError):client.set_component_cpu('owned','a'*32,'game-1',value)
+
+    def test_legacy_nano_cpu_caps_are_not_silently_reported_as_cleared(self):
+        class Client(engine.Engine):
+            def assert_owned(self,*args):return {'HostConfig':{'NanoCpus':500_000_000}}
+            def request(self,*args):raise AssertionError('Cannot clear a legacy NanoCpus cap in place.')
+        with self.assertRaisesRegex(engine.EngineError,'legacy CPU cap'):Client().set_component_cpu('owned','a'*32,'game-1',None)
 
     def test_failed_readback_is_not_reported_as_success(self):
         class Client(engine.Engine):

@@ -15,6 +15,8 @@ export interface PortalAuthStatus {
   authenticated: boolean
   mustChangePassword: boolean
   account: PortalAccount | null
+  ownerSetupRequired?: boolean
+  bootstrapAuthorized?: boolean
 }
 
 export function getPortalAuthStatus(): Promise<PortalAuthStatus> {

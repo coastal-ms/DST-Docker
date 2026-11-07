@@ -21,6 +21,7 @@ COPY app/ ./app/
 COPY dune-server.ps1 dune-server.config.example LICENSE NOTICE ./
 COPY --from=web /src/webui/dist/ ./webui/dist/
 COPY packaging/docker/healthcheck.ps1 /opt/dst/healthcheck.ps1
+COPY packaging/docker/set-console-port.ps1 /opt/dst/packaging/docker/set-console-port.ps1
 COPY packaging/docker/database.py /opt/dst/packaging/docker/database.py
 COPY packaging/docker/manager-client.py /opt/dst/packaging/docker/manager-client.py
 COPY packaging/docker/settings_client.py /opt/dst/packaging/docker/settings_client.py
@@ -31,4 +32,4 @@ ENV HOME=/home/dst XDG_CONFIG_HOME=/data/config XDG_STATE_HOME=/data/state XDG_C
 USER 10001:10001
 HEALTHCHECK --interval=20s --timeout=10s --start-period=60s --retries=3 CMD ["pwsh", "-NoLogo", "-NoProfile", "-File", "/opt/dst/healthcheck.ps1"]
 ENTRYPOINT ["pwsh", "-NoLogo", "-NoProfile", "-File", "/opt/dst/app/DuneServer-Linux.ps1"]
-CMD ["--headless", "--port", "18765"]
+CMD ["--headless"]

@@ -85,3 +85,13 @@ Register-DuneRoute -Method POST -Path '/api/docker/setup' -Handler {
     $result = Invoke-DuneDockerManager -Request $request
     Write-DuneJson -Response $res -Body $result
 }
+Register-DuneRoute -Method POST -Path '/api/docker/owner/setup' -Handler {
+    param($req,$res,$routeParams,$body)
+    try{
+        if($body -isnot [hashtable] -or $body.username -isnot [string] -or $body.password -isnot [string]){throw 'Enter an owner username and password.'}
+        $result=New-DuneDockerOwner -Username $body.username -Password $body.password -Request $req
+        Set-DunePortalSessionCookie -Response $res -Token $result.token -Request $req
+        Write-DuneJson -Response $res -Body @{accountLoginEnabled=$true;authenticated=$true;mustChangePassword=$false;ownerSetupRequired=$false;
+            account=(Get-DunePortalPublicAccount $result.account)}
+    }catch{Write-DuneError -Response $res -Status 400 -Message $_.Exception.Message}
+}

@@ -8,20 +8,34 @@ const snapshot = {
   memoryGiB: 24, cpuCount: 8, serviceReserveGiB: 2, reservedMemoryGiB: 0, reservedCpus: 0,
   host: { memoryBytes: 32 * 1024 ** 3, availableBytes: 30 * 1024 ** 3, cpus: 8 },
   worldRunning: false, pending: false,
-  maps: [{ map: 'Survival_1', memoryGiB: 12, cpus: 2, initialInstances: 1 }],
+  maps: [{ map: 'Survival_1', memoryGiB: 12, cpus: null, initialInstances: 1 }],
 }
 beforeEach(() => { localStorage.clear(); request.mockResolvedValue(structuredClone(snapshot)) })
 afterEach(() => { cleanup(); vi.clearAllMocks() })
 
-it('saves the chosen budget and map limits through the resource endpoint', async () => {
+it('saves per-map RAM with shared CPU and no editable total CPU budget', async () => {
   render(<DockerResourcesCard />)
   await screen.findByLabelText('Survival_1 RAM')
-  fireEvent.change(screen.getByLabelText('Server RAM budget (GiB)'), { target: { value: '20' } })
+  expect(screen.queryByLabelText('Game CPU budget')).not.toBeInTheDocument()
+  expect(screen.queryByLabelText('Server RAM budget (GiB)')).not.toBeInTheDocument()
+  expect(screen.queryByLabelText('Survival_1 CPUs')).not.toBeInTheDocument()
   fireEvent.change(screen.getByLabelText('Survival_1 RAM'), { target: { value: '14' } })
   fireEvent.click(screen.getByRole('button', { name: 'Save allocations' }))
   await waitFor(() => expect(request).toHaveBeenCalledWith('/api/docker/resources', expect.objectContaining({ method: 'PUT' })))
   const options = request.mock.calls.find(call => call[1]?.method === 'PUT')![1]
-  expect(JSON.parse(options.body)).toMatchObject({ memoryGiB: 20, cpuCount: 8, maps: [{ map: 'Survival_1', memoryGiB: 14, cpus: 2 }] })
+  expect(JSON.parse(options.body)).toMatchObject({ memoryGiB: 24, maps: [{ map: 'Survival_1', memoryGiB: 14, cpus: null }] })
+  expect(JSON.parse(options.body)).not.toHaveProperty('cpuCount')
+})
+
+it('lets users opt into a per-map CPU cap and clear it back to shared', async () => {
+  render(<DockerResourcesCard />)
+  await screen.findByLabelText('Survival_1 RAM')
+  fireEvent.click(screen.getByLabelText('Show optional per-map CPU limits'))
+  fireEvent.change(screen.getByLabelText('Survival_1 CPUs'), { target: { value: '2' } })
+  fireEvent.change(screen.getByLabelText('Survival_1 CPUs'), { target: { value: '' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Save allocations' }))
+  await waitFor(() => expect(request).toHaveBeenCalledWith('/api/docker/resources', expect.objectContaining({ method: 'PUT' })))
+  expect(JSON.parse(request.mock.calls.find(call => call[1]?.method === 'PUT')![1].body).maps[0].cpus).toBeNull()
 })
 
 it('requires an explicit battlegroup stop before allocations can be changed', async () => {

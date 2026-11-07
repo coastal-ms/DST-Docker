@@ -935,7 +935,8 @@ function Start-DuneHttpServer {
         [Parameter(Mandatory)][string]$DistRoot,
         [int]$PreferredPort = 47823,
         [string]$Token = '',
-        [string]$BindAddress = '127.0.0.1'
+        [string]$BindAddress = '127.0.0.1',
+        [switch]$StrictPort
     )
 
     $script:DuneDistRoot = (Resolve-Path -LiteralPath $DistRoot).Path
@@ -947,7 +948,8 @@ function Start-DuneHttpServer {
     # Find a free port starting at $PreferredPort.
     $port = $PreferredPort
     $listener = $null
-    while ($port -lt ($PreferredPort + 50)) {
+    $lastPort=if($StrictPort){$PreferredPort}else{$PreferredPort+49}
+    while ($port -le $lastPort) {
         try {
             $l = [System.Net.HttpListener]::new()
             $prefix = Get-DuneHttpListenerPrefix -BindAddress $BindAddress -Port $port -Token $Token
@@ -963,7 +965,8 @@ function Start-DuneHttpServer {
         }
     }
     if (-not $listener) {
-        throw "Could not bind HTTP listener in range $PreferredPort..$($PreferredPort + 49)"
+        if($StrictPort){throw "Console port $PreferredPort is unavailable. Choose another port with: sh bin/dst-docker port <port>"}
+        throw "Could not bind HTTP listener in range $PreferredPort..$lastPort"
     }
     $script:DuneListener = $listener
     if (Get-Command Write-DuneLog -ErrorAction SilentlyContinue) {
@@ -1372,7 +1375,7 @@ function Invoke-DuneContext {
         $launchAccess = $false
         $isLocalRequest = Test-DuneLocalOnlyRequest -Request $req
 
-        $isPortalAuthBody = $rawPath.StartsWith('/api/portal-auth/') -or $rawPath.StartsWith('/api/remote-access/portal-account')
+        $isPortalAuthBody = $rawPath.StartsWith('/api/portal-auth/') -or $rawPath.StartsWith('/api/remote-access/portal-account') -or $rawPath -eq '/api/docker/owner/setup'
         if ($isPortalAuthBody -and $req.HasEntityBody -and
             ($req.ContentLength64 -lt 0 -or $req.ContentLength64 -gt 4096)) {
             Write-DuneError -Response $res -Status 413 -Message 'Request body too large.'
@@ -1384,7 +1387,7 @@ function Invoke-DuneContext {
                 $launchAccess = Test-DuneAccountModeLaunchAccess -Request $req
                 try { $portalSessionAuth = Get-DunePortalSessionAuth -Request $req } catch { $portalSessionAuth = @{ ok = $false } }
                 if (-not $launchAccess -and -not $portalSessionAuth.ok) {
-                    Clear-DunePortalSessionCookie $res
+                    Clear-DunePortalSessionCookie $res -Request $req
                     Write-DuneError -Response $res -Status 401 -Message 'Authentication required.'
                     return
                 }

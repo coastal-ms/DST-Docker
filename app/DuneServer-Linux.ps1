@@ -108,6 +108,10 @@ Write-DuneStartupLog 'Bootstrap entered (Linux)'
 $script:DuneHeadlessMode = $false
 $script:DuneOpenBrowser  = $null   # null = auto-decide
 $script:DunePreferredPort = 8765
+if($env:DST_HOSTING_BACKEND -eq 'docker'){
+    . (Join-Path $PSScriptRoot 'server/lib/DockerConsole.ps1')
+    $script:DunePreferredPort=Get-DuneDockerConsolePort
+}
 
 for ($i = 0; $i -lt $args.Count; $i++) {
     switch -Regex ($args[$i]) {
@@ -275,7 +279,7 @@ try {
     if ($env:DST_HOSTING_BACKEND -eq 'docker') {
         $bindAddress = if ($env:DST_HTTP_BIND_ADDRESS) { $env:DST_HTTP_BIND_ADDRESS } else { '0.0.0.0' }
     }
-    Start-DuneHttpServer -DistRoot $script:DistRoot -PreferredPort $script:DunePreferredPort -Token $script:LaunchToken -BindAddress $bindAddress
+    Start-DuneHttpServer -DistRoot $script:DistRoot -PreferredPort $script:DunePreferredPort -Token $script:LaunchToken -BindAddress $bindAddress -StrictPort:($env:DST_HOSTING_BACKEND -eq 'docker')
 } finally {
     if ($browserJob) {
         try { Stop-Job -Job $browserJob -ErrorAction SilentlyContinue } catch {}

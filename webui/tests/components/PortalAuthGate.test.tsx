@@ -16,10 +16,42 @@ function jsonResponse(body: unknown, status = 200) {
 afterEach(() => {
   cleanup()
   vi.restoreAllMocks()
+  vi.unstubAllEnvs()
   sessionStorage.clear()
 })
 
 describe('PortalAuthGate', () => {
+  it('shows first-owner guidance on a bare Docker IP without exposing setup or admin content', async () => {
+    vi.stubEnv('VITE_DST_EDITION', 'docker')
+    vi.spyOn(globalThis, 'fetch').mockImplementation(() => jsonResponse({ accountLoginEnabled: false, authenticated: false, ownerSetupRequired: true, bootstrapAuthorized: false }))
+    render(<PortalAuthGate><div>Private dashboard</div></PortalAuthGate>)
+    expect(await screen.findByRole('heading', { name: 'First owner setup required' })).toBeInTheDocument()
+    expect(screen.queryByText('Private dashboard')).not.toBeInTheDocument()
+    expect(screen.queryByText(/Could not load your DST setup/)).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Create owner account' })).not.toBeInTheDocument()
+  })
+
+  it('lets an authorized Docker host choose an owner password and checks confirmation before posting', async () => {
+    vi.stubEnv('VITE_DST_EDITION', 'docker')
+    const mock = vi.spyOn(globalThis, 'fetch')
+      .mockImplementationOnce(() => jsonResponse({ accountLoginEnabled: false, authenticated: false, ownerSetupRequired: true, bootstrapAuthorized: true }))
+      .mockImplementationOnce(() => jsonResponse({ accountLoginEnabled: true, authenticated: true, ownerSetupRequired: false, account: { role: 'owner', username: 'FixtureOwner' } }))
+    const user = userEvent.setup()
+    render(<PortalAuthGate><div>Private dashboard</div></PortalAuthGate>)
+    await screen.findByRole('heading', { name: 'Create your DST owner account' })
+    await user.type(screen.getByLabelText('Owner username'), 'FixtureOwner')
+    await user.type(screen.getByLabelText('Password', { exact: true }), 'synthetic-password')
+    await user.type(screen.getByLabelText('Confirm password'), 'different-password')
+    await user.click(screen.getByRole('button', { name: 'Create owner account' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Passwords do not match')
+    expect(mock).toHaveBeenCalledTimes(1)
+    await user.clear(screen.getByLabelText('Confirm password'))
+    await user.type(screen.getByLabelText('Confirm password'), 'synthetic-password')
+    await user.click(screen.getByRole('button', { name: 'Create owner account' }))
+    expect(await screen.findByText('Private dashboard')).toBeInTheDocument()
+    expect(mock.mock.calls[1][0]).toBe('/api/docker/owner/setup')
+    expect(JSON.parse((mock.mock.calls[1][1] as RequestInit).body as string)).toEqual({ username: 'FixtureOwner', password: 'synthetic-password' })
+  })
   it('routes an authenticated Player to their portal instead of requested admin content', async () => {
     vi.spyOn(globalThis, 'fetch').mockImplementationOnce(() => jsonResponse({
       accountLoginEnabled: true, authenticated: true, mustChangePassword: false,

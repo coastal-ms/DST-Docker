@@ -14,6 +14,7 @@ task_source=''
 task_archive=''
 task_prepare_only=0
 task_check_only=0
+task_port=''
 task_sudo=()
 task_docker=()
 
@@ -24,7 +25,7 @@ trap 'printf "DST installation stopped while %s. Existing Docker volumes were no
 usage() {
   cat <<'HELP'
 DST Docker installer (Linux x86_64 / Windows WSL)
-  bash dst-install [--prefix DIRECTORY] [--check] [--prepare-only]
+  bash dst-install [--prefix DIRECTORY] [--port PORT] [--check] [--prepare-only]
   bash bin/dst-install --source CHECKOUT [--prefix DIRECTORY]
   bash bin/dst-install --source-archive FILE [--prefix DIRECTORY]
 
@@ -32,13 +33,14 @@ The packaged installer contains its own DST source. Development mode accepts
 a committed checkout or a local source archive. --check only reports prerequisites;
 --prepare-only installs prerequisites and source without starting the portal.
 Configuration, game data and official packages remain in Docker volumes.
+The console defaults to port 8088. --port selects another port (1024..65535).
 HELP
 }
 while (($#)); do
   case "$1" in
-    --prefix|--source|--source-archive)
+    --prefix|--source|--source-archive|--port)
       (($# >= 2)) || fail "Missing value for $1."
-      case "$1" in --prefix) task_root=$2;; --source) task_source=$2;; --source-archive) task_archive=$2;; esac
+      case "$1" in --prefix) task_root=$2;; --source) task_source=$2;; --source-archive) task_archive=$2;; --port) task_port=$2;; esac
       shift 2;;
     --check) task_check_only=1; shift;;
     --prepare-only) task_prepare_only=1; shift;;
@@ -46,6 +48,9 @@ while (($#)); do
     *) fail "Unknown option: $1";;
   esac
 done
+if [[ -n "$task_port" ]]; then
+  [[ "$task_port" =~ ^[1-9][0-9]{3,4}$ ]] && ((task_port >= 1024 && task_port <= 65535)) || fail 'Choose a console port between 1024 and 65535.'
+fi
 [[ "$(uname -s)" == Linux ]] || fail 'Run this command in Linux or your WSL Ubuntu terminal.'
 [[ "$(uname -m)" == x86_64 ]] || fail 'The official game server needs Linux x86_64.'
 [[ -n "$task_root" && "$task_root" = /* && "$task_root" != / ]] || fail 'Choose an absolute Linux installation directory.'
@@ -146,10 +151,10 @@ fi
 task_actual_sha=$(sha256sum "$task_temp/source.tar" | cut -d ' ' -f 1)
 if [[ -n "$task_package_sha" && "$task_package_sha" != "$task_actual_sha" ]]; then fail 'The bundled source checksum did not match. No portal was started.'; fi
 task_package_sha=$task_actual_sha
-python3 - "$task_temp/source.tar" "$task_root" "$task_package_sha" "$task_package_revision" <<'PY'
+python3 - "$task_temp/source.tar" "$task_root" "$task_package_sha" "$task_package_revision" "$task_port" <<'PY'
 import json,os,shutil,sys,tarfile,uuid
 from pathlib import Path,PurePosixPath
-archive,root,digest,revision=sys.argv[1:];root=Path(root)
+archive,root,digest,revision,port=sys.argv[1:];root=Path(root)
 if '..' in root.parts:raise SystemExit('The install directory must not contain parent-directory traversal.')
 if any(part.is_symlink() for part in (root,*root.parents)):raise SystemExit('The install directory and its parents must not be symlinks.')
 root=root.resolve()
@@ -195,17 +200,22 @@ with tarfile.open(archive) as source:
         except BaseException:
             shutil.rmtree(stage);raise
 previous.update(preparedSha256=digest,preparedRevision=revision)
+if port:previous['pendingConsolePort']=int(port)
 temporary=root/('.installation-'+uuid.uuid4().hex+'.tmp');temporary.write_text(json.dumps(previous));temporary.chmod(0o600);temporary.replace(manifest)
 PY
 task_release="$task_root/releases/$task_package_sha"
 if ((task_prepare_only)); then printf 'DST source prepared at %s\nNo containers were started.\n' "$task_release"; exit 0; fi
 printf '[4/5] Downloading the official package and starting the portal\n'
 task_stage='building and starting the portal'
-"${task_docker[@]}" bash "$task_release/bin/dst-docker" up
+task_port=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("pendingConsolePort",""))' "$task_root/installation.json")
+task_port_args=()
+if [[ -n "$task_port" ]]; then task_port_args=(--port "$task_port"); fi
+"${task_docker[@]}" bash "$task_release/bin/dst-docker" up "${task_port_args[@]}"
 python3 - "$task_root" "$task_package_sha" <<'PY'
 import json,sys,uuid
 from pathlib import Path
 root=Path(sys.argv[1]);path=root/'installation.json';state=json.loads(path.read_text());state['activeSha256']=sys.argv[2]
+state.pop('pendingConsolePort',None)
 temporary=root/('.installation-'+uuid.uuid4().hex+'.tmp');temporary.write_text(json.dumps(state));temporary.chmod(0o600);temporary.replace(path)
 link=root/'current'
 if link.exists() and not link.is_symlink():raise SystemExit('The current release pointer needs review.')
