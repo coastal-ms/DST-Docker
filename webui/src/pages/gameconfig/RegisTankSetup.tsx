@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { api, PlayerGuardCancelledError, withOnlinePlayerGuard } from '../../api/client'
 import { completeDockerCommand } from '../../api/dockerCommand'
 
-type TankState = { enabled: boolean; supported: boolean; legacyPending?: boolean; pending?: boolean; recoveryRequired?: boolean; updateSupported?: boolean; message?: string }
+type TankState = { enabled: boolean; supported: boolean; legacyPending?: boolean; pending?: boolean; recoveryRequired?: boolean; updateSupported?: boolean; operationId?: string; message?: string }
 
 export function RegisTankSetup({ vmRunning, stopped, onBusyChange }: { vmRunning: boolean; stopped: boolean; onBusyChange?: (busy: boolean) => void }) {
   const docker = import.meta.env.VITE_DST_EDITION === 'docker'
@@ -12,10 +12,22 @@ export function RegisTankSetup({ vmRunning, stopped, onBusyChange }: { vmRunning
   const [message, setMessage] = useState('')
   useEffect(() => {
     let current = true; setState(null); setError('')
-    if (vmRunning) api<TankState>('/api/gameconfig/regis-tanks')
-      .then(result => { if (current) setState(result) })
-      .catch(e => { if (current) setError(e instanceof Error ? e.message : String(e)) })
-    return () => { current = false }
+    let following = false
+    if (vmRunning) void (async () => {
+      try {
+        const result = await api<TankState>('/api/gameconfig/regis-tanks')
+        if (!current) return
+        setState(result)
+        if (docker && result.operationId) {
+          following = true; setBusy(true); onBusyChange?.(true)
+          try { await completeDockerCommand(result.operationId) }
+          catch (e) { if (current) setError(e instanceof Error ? e.message : String(e)) }
+          if (current) setState(await api<TankState>('/api/gameconfig/regis-tanks'))
+        }
+      } catch (e) { if (current) setError(e instanceof Error ? e.message : String(e)) }
+      finally { if (current && following) { setBusy(false); onBusyChange?.(false) } }
+    })()
+    return () => { current = false; if (following) { setBusy(false); onBusyChange?.(false) } }
   }, [vmRunning, stopped])
 
   async function toggle(recover = false) {
@@ -42,12 +54,17 @@ export function RegisTankSetup({ vmRunning, stopped, onBusyChange }: { vmRunning
   }
 
   async function updateWithTanks() {
-    if (busy || !state?.supported) return
-    if (!window.confirm('Update the server with Tank support? DST will stop the battlegroup, disable Tank support, update, and restore support before restarting. If the new build is unsupported, it will stay stopped.')) return
+    if (busy || !state?.supported || state.pending || (docker && !state.updateSupported)) return
+    if (!window.confirm(docker ? 'Update the server with Tank support? DST will check the new build, back up the world, and prepare verified Tank compatibility before starting maps. An already stopped battlegroup stays stopped.' : 'Update the server with Tank support? DST will stop the battlegroup, disable Tank support, update, and restore support before restarting. If the new build is unsupported, it will stay stopped.')) return
     setBusy(true); onBusyChange?.(true); setError(''); setMessage('')
     try {
-      await withOnlinePlayerGuard(force => api(`/api/commands/run/update-with-tanks${force ? '?force=true' : ''}`, { method: 'POST' }))
-      setMessage('Tank update launched. Follow its progress in the command window. The battlegroup stays stopped if Tank support cannot be restored.')
+      const result = await withOnlinePlayerGuard(force => api<{operationId?: string}>(`/api/commands/run/update-with-tanks${force ? '?force=true' : ''}`, { method: 'POST' }))
+      if (docker) {
+        if (!result.operationId) throw new Error('The Tank update identity is unavailable. Check server status before trying again.')
+        await completeDockerCommand(result.operationId)
+        setState(await api<TankState>('/api/gameconfig/regis-tanks'))
+        setMessage('The Tank update completed. Check Server Overview for readiness.')
+      } else setMessage('Tank update launched. Follow its progress in the command window. The battlegroup stays stopped if Tank support cannot be restored.')
     } catch (e) {
       if (!(e instanceof PlayerGuardCancelledError)) setError(e instanceof Error ? e.message : String(e))
     } finally { setBusy(false); onBusyChange?.(false) }
@@ -59,7 +76,7 @@ export function RegisTankSetup({ vmRunning, stopped, onBusyChange }: { vmRunning
       {state && <span className="text-xs text-text-muted">{state.enabled ? 'Enabled' : 'Disabled'}</span>}
     </div>
     <p className="text-xs text-text-muted">Optional Tank support. Normal server starts and updates do not enable it.</p>
-    <p className="text-xs text-text-muted">{docker ? 'Tanks use a custom Hagga server image. Disable support before a normal update. Update with Tank support is not available for Docker yet.' : 'Tanks use a custom server image outside Funcom’s normal update path. Disable support before a normal update, or use Update with Tank support to handle the steps together. The new build must be supported by DST.'}</p>
+    <p className="text-xs text-text-muted">Tanks use a custom server image outside Funcom’s normal update path. Disable support before a normal update, or use Update with Tank support to handle the steps together. The new build must be supported by DST.</p>
     {state?.legacyPending && <p role="alert" className="text-sm text-warning">Previous automatic Tank support is now off. The existing image will be removed at the next server start or update. To keep saved Tanks, stop the battlegroup and enable Tank support before then.</p>}
     <p className="text-xs text-text-muted">Starting the official server with Tank support disabled can remove saved Tanks.</p>
     <p className="text-xs text-text-muted">{!vmRunning ? (docker ? 'Connect to the Docker manager to check Tank support.' : 'Start the VM to check Tank support.') : !state ? (error ? 'Tank status unavailable.' : 'Checking server build…') : !state.supported ? 'Tank support is unavailable for this server build.' : state.enabled ? 'Grant Tanks from Players → Actions → Vehicle → Regis Tanks.' : 'Enable only if you want to use Regis Tanks.'}</p>
@@ -69,7 +86,7 @@ export function RegisTankSetup({ vmRunning, stopped, onBusyChange }: { vmRunning
       {busy ? 'Applying…' : state.enabled ? 'Disable Tank support' : 'Enable Tank support'}
     </button>}
     {state && !stopped && <p className="text-xs text-text-muted">Stop the battlegroup before changing Tank support.</p>}
-    {state && !docker && <button className="btn btn-secondary" disabled={busy || !state.supported} onClick={() => void updateWithTanks()}>Update with Tank support</button>}
+    {state && (!docker || state.updateSupported) && <button className="btn btn-secondary" disabled={busy || !!state.pending || !state.supported} onClick={() => void updateWithTanks()}>Update with Tank support</button>}
     {message && <p role="status" className="text-sm text-text-muted">{message}</p>}
     {error && <p role="alert" className="text-sm text-danger">{error}</p>}
   </section>

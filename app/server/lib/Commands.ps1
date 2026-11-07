@@ -53,14 +53,14 @@ $script:DuneCommands = @(
 
 function Get-DuneCommandCatalogue {
     $dockerLabels=@{start='Start Battlegroup';stop='Stop Battlegroup';restart='Restart Battlegroup';
-        'apply-inis'='Apply Server Settings & Restart';update='Update Server';
+        'apply-inis'='Apply Server Settings & Restart';update='Update Server';'update-with-tanks'='Update with Tank support';
         'logs-export'='Export Battlegroup Logs';'operator-logs-export'='Export Management Logs'}
     foreach($command in $script:DuneCommands){
         if($command.Hidden){continue}
         if($env:DST_HOSTING_BACKEND -ne 'docker'){$command;continue}
         if(-not $dockerLabels.ContainsKey($command.Name)){continue}
         $copy=$command.Clone();$copy.Label=$dockerLabels[$command.Name];$copy.Mode='Docker';$copy.Requires='none'
-        $copy.Section=if($command.Name -eq 'update'){'Server updates'}elseif($command.Name -like '*logs-export'){'Tools'}else{'Battlegroup'}
+        $copy.Section=if($command.Name -in @('update','update-with-tanks')){'Server updates'}elseif($command.Name -like '*logs-export'){'Tools'}else{'Battlegroup'}
         $copy
     }
 }
@@ -82,7 +82,7 @@ function Get-DuneCommandAvailability {
         if ($State.operation.phase -eq 'running') { return @{available=$false;reason='A server operation is running'} }
         if ($State.regisPending -and $Command.Name -notin @('stop','shutdown','logs-export','operator-logs-export')) { return @{available=$false;reason='Restore the pending Tank change in Server Settings first'} }
         if ($State.maintenance -and $Command.Name -notin @('logs-export','operator-logs-export') -and -not ($Command.Name -eq 'update' -and $State.updateRecovery)) { return @{available=$false;reason='Server maintenance recovery is active'} }
-        if ($Command.Name -notin @('start','stop','restart','startup','shutdown','reboot','apply-inis','update','logs-export','operator-logs-export')) { return @{available=$false;reason='Docker adapter is not available yet'} }
+        if ($Command.Name -notin @('start','stop','restart','startup','shutdown','reboot','apply-inis','update','update-with-tanks','logs-export','operator-logs-export')) { return @{available=$false;reason='Docker adapter is not available yet'} }
         if (-not $State.prepared) { return @{available=$false;reason='Complete Docker Setup first'} }
         if ($Command.Name -in @('start','startup') -and $State.desiredState -eq 'running') { return @{available=$false;reason='Battlegroup already running'} }
         if ($Command.Name -in @('stop','shutdown','restart','reboot','apply-inis') -and $State.desiredState -ne 'running') { return @{available=$false;reason='Battlegroup is stopped'} }
@@ -208,7 +208,7 @@ function Get-DuneDefaultCommandLayout {
     if($env:DST_HOSTING_BACKEND -eq 'docker'){
         $dockerSections=@(@(),@(),@())
         $dockerSections[0]=@('start','stop','restart','apply-inis')
-        $dockerSections[1]=@('update')
+        $dockerSections[1]=@('update','update-with-tanks')
         $dockerSections[2]=@('logs-export','operator-logs-export')
         return @{sectionNames=@('Battlegroup','Server updates','Tools');sections=$dockerSections}
     }

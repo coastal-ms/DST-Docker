@@ -9,6 +9,8 @@ import time
 import uuid
 import asset_updates
 import service_generations
+import regis_artifacts
+import regis_compatibility
 from core_services import service_specs,game_spec
 from connection_services import queue_spec
 from engine import EngineError
@@ -151,7 +153,7 @@ class NativeUpdate:
         for partition in sorted(parts):
             spec=game_spec(plan,partition,credentials,bridge,{})
             for volume in spec['volumes']:volume['mustBeNew']=False
-            specs['game-'+str(partition)]=spec
+            specs['game-'+str(partition)]=regis_compatibility.apply_image_policy(self.s,partition,spec,plan=plan)
         self.s['worldPlan']=plan;self.s['directorIni']=ini
         self.s['classicAutomaticMaps']=classic_automatic_maps(template['world']['spec']['utilities']['director']['spec']['configFiles']['files']['director.ini'])
         def persist(value):
@@ -176,9 +178,27 @@ class NativeUpdate:
             # No restart/rollback is inferred from an observation timeout.
             time.sleep(3)
 
-    def apply(self,build,allow_online=False):
-        if not isinstance(build,str) or not re.fullmatch(r'[0-9]{1,18}',build) or type(allow_online) is not bool:raise ValueError('Invalid update request.')
-        if (self.s.get('regisSupport') or {}).get('enabled') or self.s.get('pendingRegisChange'):
+    def validate_tank_plan(self,plan):
+        official=plan['images']['game']['image']
+        match=re.fullmatch(r'registry\.funcom\.com/funcom/self-hosting/seabass-server:([0-9]+)-0-shipping',official)
+        if not match or match[1] not in regis_artifacts.BUILDS:
+            raise ValueError('The new server build has no accepted Tank recipe. The current world was not stopped or updated.')
+        recipe=json.loads((regis_artifacts.RECIPES/(match[1]+'.json')).read_text())
+        regis_artifacts.validate_recipe(recipe,match[1])
+        if recipe.get('baseImage')!=official or not re.fullmatch(r'sha256:[a-f0-9]{64}',recipe.get('baseDigest','')):
+            raise ValueError('The new server Tank recipe identity needs review before updating.')
+
+    def prepare_tanks(self,plan):
+        self.phase('preparing-tank-image')
+        self.e.ensure_package_image(plan['images']['game']['archive'],plan['images']['game']['image'])
+        self.s['worldPlan']=plan;self.m.save(self.s)
+        image=regis_artifacts.Builder(self.s,self.e,self.m.STATE,self.m.save).prepare()
+        regis_artifacts.inspect_compatibility_image(self.e,self.s['id'],plan['images']['game']['image'],image)
+        self.s['regisSupport']={'enabled':True,'image':image,'selectedAt':time.time()};self.m.save(self.s)
+
+    def apply(self,build,allow_online=False,with_tanks=False):
+        if not isinstance(build,str) or not re.fullmatch(r'[0-9]{1,18}',build) or type(allow_online) is not bool or type(with_tanks) is not bool:raise ValueError('Invalid update request.')
+        if self.s.get('pendingRegisChange') or ((self.s.get('regisSupport') or {}).get('enabled') and not with_tanks):
             raise ValueError('Disable Tank compatibility in Server Settings before a normal server update. Saved Tanks require compatibility; nothing was stopped or updated.')
         previous_run=self.s.get('updateRun')
         if previous_run and previous_run['phase'] not in TERMINAL:raise ValueError('Recover the previous update before starting another.')
@@ -186,7 +206,7 @@ class NativeUpdate:
         if any(e['phase'] in {'preparing','running'} or e.get('verification',{}).get('phase') in {'preparing','running'} for e in self.s.get('backups',{}).values()):raise ValueError('Wait for the active backup operation before updating.')
         if (self.s.get('assetUpdate') or {}).get('phase') in {'applied','rolled-back','failed'}:
             self.s.setdefault('assetUpdateHistory',[]).append(self.s.pop('assetUpdate'))
-        self.s['updateRun']={'id':self.s['operation']['id'],'phase':'staging','build':build,'startedAt':time.time()};self.m.save(self.s)
+        self.s['updateRun']={'id':self.s['operation']['id'],'phase':'staging','build':build,'withTanks':with_tanks,'startedAt':time.time()};self.m.save(self.s)
         try:
             if not self.s.get('assetUpdate'):asset_updates.start_stage(self.s,self.e,build,self.m.save)
             while True:
@@ -201,15 +221,18 @@ class NativeUpdate:
             root=Path('/assets/staged')/update['id'];template=read_template(root/'server/scripts/setup/templates/world-template.yaml')
             report=json.loads((root/'install-state.json').read_text())
             plan=plan_world(self.s['id'],self.s['profile'],template,report,self.s['database'],self.s.get('mapMemoryOverrides'))
+            if with_tanks:self.validate_tank_plan(plan)
             if any(int(name[5:]) not in {r['partition'] for r in plan['games']} for name in self.s['services'] if name.startswith('game-')):raise ValueError('An installed map was removed from this package; review its saved data before updating.')
             status=self.m.public_state(self.s,self.e)
             if not allow_online and any(r.get('players')!=0 for r in status['services'] if r['component'].startswith('game-') and r['state']=='running'):raise ValueError('Players connected or occupancy became unknown while staging. Review the update again.')
             keys=('worldPlan','profile','services','connections','mapTargets','manualPins','classicAutomaticMaps','partitionPlan')
             previous={key:copy.deepcopy(self.s[key]) for key in keys if key in self.s}
+            for key in ('regisSupport','regisPreparation'):previous[key]=copy.deepcopy(self.s.get(key))
             previous['desiredState']=self.s.get('desiredState','stopped')
             previous['directorIni']=self.e.read_director_config(self.s['services']['director']['id'],self.s['id']).decode('utf-8')
             self.phase('stopping',previous=previous,stopStarted=True);self.maintenance(True);self.m.stop_services(self.s,self.e)
             self.backup();self.phase('activating-package');self.s['assetUpdate']['phase']='activating';self.m.save(self.s);self.switch('activate')
+            if with_tanks:self.prepare_tanks(plan)
             self.migrate()
             self.phase('checking-partitions');self.sql(partition_upgrade_sql(template['partitions']))
             self.s['partitionPlan']={'sha256':template['sha256'],'rows':template['partitions']};self.m.save(self.s)
@@ -246,6 +269,13 @@ class NativeUpdate:
             if self.run.get(key):
                 observed=self.owned_job(self.run[key],component)
                 if observed['State']['Status'] not in {'created','exited','dead'}:self.wait_job(self.run[key],component,success=False)
+        if self.run.get('withTanks'):
+            preparation=self.s.get('regisPreparation') or {}
+            previous_preparation=self.run['previous'].get('regisPreparation') or {}
+            if preparation.get('id')!=previous_preparation.get('id') and preparation.get('job'):
+                observed=self.owned_job(preparation['job'],'regis-generate')
+                if observed['State']['Status'] not in {'created','exited','dead'}:
+                    self.wait_job(preparation['job'],'regis-generate',success=False)
         self.m.stop_services(self.s,self.e);self.demote()
         if not self.s.get('generationChange') and self.run.get('generationId'):
             old=next((r for r in reversed(self.s.get('generationHistory',[])) if r['id']==self.run['generationId']),None)

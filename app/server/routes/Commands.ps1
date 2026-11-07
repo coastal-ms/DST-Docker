@@ -159,10 +159,10 @@ Register-DuneRoute -Method POST -Path '/api/commands/run/{name}' -Handler {
 
     try {
         if ($env:DST_HOSTING_BACKEND -eq 'docker') {
-            if($name -eq 'update'){
+            if($name -in @('update','update-with-tanks')){
                 $allowOnline=$false
                 try{$allowOnline=($req.QueryString['force'] -in @('1','true','yes'))}catch{}
-                $reply=Start-DuneDockerFuncomUpdate -AllowOnline $allowOnline -Recover:([bool]$state.updateRecovery)
+                $reply=Start-DuneDockerFuncomUpdate -AllowOnline $allowOnline -Recover:([bool]$state.updateRecovery) -WithTanks:($name -eq 'update-with-tanks')
                 if(-not $reply.ok){Write-DuneError -Response $res -Status 409 -Message $reply.error;return}
                 Write-DuneJson -Response $res -Body @{ok=$true;name=$name;mode='Docker';operationId=$reply.data.operation.id;started=(Get-Date).ToString('o')}
                 return

@@ -15,6 +15,12 @@ Describe 'Native manual update and recorded recovery dispatch' {
         $reply.ok|Should -BeTrue
         Should -Invoke Invoke-DuneDockerManager -Times 1 -ParameterFilter {$Request.action -eq 'updates.apply' -and $Request.expectedBuild -ceq '121' -and $Request.allowOnline -eq $true}
     }
+    It 'only selects Tank preservation with an explicit request' {
+        Start-DuneDockerFuncomUpdate | Out-Null
+        Start-DuneDockerFuncomUpdate -WithTanks | Out-Null
+        Should -Invoke Invoke-DuneDockerManager -Times 1 -ParameterFilter {$Request.action -eq 'updates.apply' -and $Request.withTanks -eq $false}
+        Should -Invoke Invoke-DuneDockerManager -Times 1 -ParameterFilter {$Request.action -eq 'updates.apply' -and $Request.withTanks -eq $true}
+    }
     It 'does not start an update on a metadata outage or downgrade' -TestCases @(
         @{version=@{ok=$false;message='Metadata unavailable'}},
         @{version=@{ok=$true;installedBuild='122';latestBuild='121'}}

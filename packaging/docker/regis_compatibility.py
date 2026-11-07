@@ -50,8 +50,13 @@ def status(state, engine):
     policy = state.get('regisSupport') or {}
     pending = state.get('pendingRegisChange')
     reply = {'enabled': policy.get('enabled') is True, 'supported': False, 'legacyPending': False,
-             'updateSupported': False, 'recoveryRequired': bool(pending and state.get('operation', {}).get('phase') != 'running'),
+             'updateSupported': True, 'recoveryRequired': bool(pending and state.get('operation', {}).get('phase') != 'running'),
              'pending': bool(pending), 'phase': (pending or {}).get('phase'), 'message': ''}
+    operation = state.get('operation') or {}
+    follows_update = ((operation.get('action') == 'updates.apply' and operation.get('withTanks')) or
+                      (operation.get('action') == 'updates.recover' and (state.get('updateRun') or {}).get('withTanks')))
+    if (operation.get('action') in {'regis.set', 'regis.recover'} or follows_update) and operation.get('phase') == 'running':
+        reply['operationId'] = operation['id']
     if not state.get('worldPlan') or not hagga_components(state):
         reply['message'] = 'Prepare Hagga Basin in Docker Setup before choosing Tank support.'
         return reply
@@ -65,7 +70,7 @@ def status(state, engine):
         reply['message'] = ('Tank preparation is in progress.' if not reply['recoveryRequired'] else
                             'The Tank change needs recovery. Stop the world, then restore the previous Tank setting here.')
     elif reply['enabled']:
-        reply['message'] = 'Tank compatibility is selected. Disable it before a normal server update; saved Tanks require compatibility.'
+        reply['message'] = 'Tank compatibility is selected. Use Update with Tank support to retain compatibility during an update; saved Tanks require it.'
     else:
         reply['message'] = 'Tank compatibility is disabled.'
     return reply

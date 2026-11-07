@@ -9,6 +9,36 @@ vi.mock('../src/api/client', () => ({ api: request, PlayerGuardCancelledError: c
 beforeEach(() => { vi.stubEnv('VITE_DST_EDITION', '') })
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.resetAllMocks(); vi.unstubAllEnvs() })
 
+it('resumes progress after opening the page during a persisted Docker preparation', async () => {
+  vi.stubEnv('VITE_DST_EDITION', 'docker')
+  let finish!: () => void
+  complete.mockReturnValue(new Promise<void>(resolve => { finish = resolve }))
+  request.mockResolvedValueOnce({ enabled: false, supported: true, pending: true, operationId: 'existing' })
+    .mockResolvedValueOnce({ enabled: true, supported: true, pending: false })
+  const busy = vi.fn()
+  render(<RegisTankSetup vmRunning stopped onBusyChange={busy} />)
+  await waitFor(() => expect(complete).toHaveBeenCalledWith('existing'))
+  expect(screen.getByRole('button', { name: 'Applying…' })).toBeDisabled()
+  finish()
+  await screen.findByRole('button', { name: 'Disable Tank support' })
+  expect(request.mock.calls.every(call => call.length === 1)).toBe(true)
+  expect(busy.mock.calls).toEqual([[true], [false]])
+})
+
+it('follows the Docker Tank update operation through completion without opening a command window', async () => {
+  vi.stubEnv('VITE_DST_EDITION', 'docker')
+  vi.spyOn(window, 'confirm').mockReturnValue(true)
+  request.mockResolvedValueOnce({ enabled: true, supported: true, updateSupported: true })
+    .mockResolvedValueOnce({ operationId: 'tank-update' })
+    .mockResolvedValueOnce({ enabled: true, supported: true, updateSupported: true })
+  complete.mockResolvedValue({ complete: true })
+  render(<RegisTankSetup vmRunning stopped />)
+  fireEvent.click(await screen.findByRole('button', { name: 'Update with Tank support' }))
+  await screen.findByText('The Tank update completed. Check Server Overview for readiness.')
+  expect(complete).toHaveBeenCalledWith('tank-update')
+  expect(request.mock.calls[1]).toEqual(['/api/commands/run/update-with-tanks', { method: 'POST' }])
+})
+
 it('waits for the persisted Docker operation before reporting enabled', async () => {
   vi.stubEnv('VITE_DST_EDITION', 'docker')
   let finish!: () => void

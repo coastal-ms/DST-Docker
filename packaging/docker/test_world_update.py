@@ -120,3 +120,77 @@ class TransactionTests(unittest.TestCase):
         self.s['desiredState']='stopped';self.rt.running=False;self.rt.gateway=False
         result=self.controller.apply('121')
         self.assertFalse(result['running']);self.assertFalse(self.rt.running);self.assertFalse(self.rt.gateway)
+
+    def tank_update(self):
+        self.s['regisSupport']={'enabled':True,'image':'old-tank-image'}
+        def prepare(plan):
+            self.assertFalse(self.rt.running);self.assertFalse(self.rt.gateway)
+            self.assertEqual(self.rt.package,'new');self.assertEqual(self.rt.schema,'old')
+            self.s['regisSupport']={'enabled':True,'image':'new-tank-image'}
+        self.controller.prepare_tanks=prepare
+        self.controller.validate_tank_plan=lambda plan:None
+
+    def test_tank_update_prepares_compatibility_before_migration_and_preserves_opt_in(self):
+        self.tank_update()
+        result=self.controller.apply('121',with_tanks=True)
+        self.assertTrue(result['updated']);self.assertTrue(self.s['updateRun']['withTanks'])
+        self.assertEqual(self.s['regisSupport']['image'],'new-tank-image')
+        self.assertEqual(self.s['updateRun']['previous']['regisSupport']['image'],'old-tank-image')
+
+    def test_unsupported_tank_build_aborts_before_stopping_or_backup(self):
+        self.tank_update()
+        self.controller.validate_tank_plan=lambda plan:(_ for _ in ()).throw(ValueError('unsupported Tank recipe'))
+        with self.assertRaisesRegex(ValueError,'unsupported Tank recipe'):self.controller.apply('121',with_tanks=True)
+        self.assertTrue(self.rt.running);self.assertTrue(self.rt.gateway)
+        self.assertEqual(self.s['regisSupport']['image'],'old-tank-image');self.assertEqual(self.s['backups'],{})
+        self.assertEqual(self.s['updateRun']['phase'],'failed-preflight')
+
+    def test_failed_tank_generation_restores_original_package_and_compatibility_without_migrating(self):
+        self.tank_update()
+        self.controller.prepare_tanks=lambda plan:(_ for _ in ()).throw(ValueError('Tank utility failed'))
+        with self.assertRaisesRegex(ValueError,'previous version was restored'):self.controller.apply('121',with_tanks=True)
+        self.assertEqual(self.rt.package,'old');self.assertEqual(self.rt.schema,'old');self.assertEqual(self.rt.restores,0)
+        self.assertEqual(self.s['regisSupport']['image'],'old-tank-image');self.assertTrue(self.rt.running)
+
+    def test_migration_failure_restores_old_tank_policy_with_old_database_and_containers(self):
+        self.tank_update();self.rt.fault='migration'
+        with self.assertRaisesRegex(ValueError,'previous version was restored'):self.controller.apply('121',with_tanks=True)
+        self.assertEqual(self.s['regisSupport']['image'],'old-tank-image');self.assertEqual(self.rt.restores,1)
+        self.assertEqual(self.rt.package,'old');self.assertEqual(self.rt.generation,'old');self.assertTrue(self.rt.running)
+
+    def test_stopped_tank_update_never_starts_a_game(self):
+        self.tank_update();self.s['desiredState']='stopped';self.rt.running=False;self.rt.gateway=False
+        self.assertFalse(self.controller.apply('121',with_tanks=True)['running'])
+        self.assertFalse(self.rt.running);self.assertFalse(self.rt.gateway)
+        self.assertEqual(self.s['regisSupport']['image'],'new-tank-image')
+
+    def test_tank_flag_requires_a_json_boolean_before_any_update_journal(self):
+        for value in ('true',1,None):
+            with self.assertRaisesRegex(ValueError,'Invalid update request'):self.controller.apply('121',with_tanks=value)
+            self.assertNotIn('updateRun',self.s)
+
+    def test_tank_plan_preflight_accepts_only_a_packaged_recipe_and_official_game_tag(self):
+        recipes=Path(__file__).resolve().parents[2]/'app/resources/regis-tanks'
+        with patch.object(world_update.regis_artifacts,'RECIPES',recipes):
+            world_update.NativeUpdate.validate_tank_plan(self.controller,{'images':{'game':{'image':'registry.funcom.com/funcom/self-hosting/seabass-server:2173753-0-shipping'}}})
+            for image in ('registry.funcom.com/funcom/self-hosting/seabass-server:9999999-0-shipping','custom/game:2173753'):
+                with self.assertRaisesRegex(ValueError,'no accepted Tank recipe'):
+                    world_update.NativeUpdate.validate_tank_plan(self.controller,{'images':{'game':{'image':image}}})
+
+    def test_update_generation_applies_verified_tank_image_only_to_hagga_without_saved_defaults(self):
+        plan={'network':'owned-network','games':[{'partition':1,'map':'Survival_1'},{'partition':8,'map':'DeepDesert_1'}],
+              'maps':[{'partitions':[1,8],'initialReplicas':2}]}
+        self.s['regisSupport']={'enabled':True,'image':'sha256:'+'e'*64}
+        self.s['updateRun']={'id':'c'*32,'phase':'preparing-components','previous':{'directorIni':'source','services':{'game-1':{}} ,'worldPlan':{},'profile':{}}}
+        self.controller.m.read_credentials=lambda state:{'tls':{'ca.pem':b'ca','cert.pem':b'cert'}}
+        self.controller.e.request=lambda *args:{'IPAM':{'Config':[{'Gateway':'172.30.0.1'}]}}
+        template={'world':{'spec':{'utilities':{'director':{'spec':{'configFiles':{'files':{'director.ini':'source'}}}}}}}}
+        def game_spec(plan,partition,credentials,bridge,defaults):
+            self.assertEqual(defaults,{})
+            return {'volumes':[],'files':{}}
+        def replace(state,engine,specs,*args,**kwargs):
+            self.assertEqual(specs['game-1']['regis_image'],'sha256:'+'e'*64)
+            self.assertNotIn('regis_image',specs['game-8'])
+        with patch.object(world_update,'queue_spec',return_value={}),patch.object(world_update,'service_specs',return_value={'director':{'files':{'Tools/Battlegroups/Director/BattlegroupDirector/director_config.ini':{}}}}),patch.object(world_update,'game_spec',side_effect=game_spec),patch.object(world_update,'native_director_ini',return_value='native'),patch.object(world_update,'classic_automatic_maps',return_value=[]),patch.object(world_update.service_generations,'replace_generation',side_effect=replace):
+            self.s['connections']={'rmq-game':{}}
+            world_update.NativeUpdate.prepare_generation(self.controller,template,plan)

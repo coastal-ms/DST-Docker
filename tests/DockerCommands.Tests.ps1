@@ -12,13 +12,13 @@ Describe 'Docker command catalogue and saved layout' {
     AfterEach {$env:DST_HOSTING_BACKEND=$script:savedBackend}
     It 'provides one canonical action with native labels and three flat default sections' {
         $commands=@(Get-DuneCommandCatalogue)
-        $commands.Count | Should -Be 7
+        $commands.Count | Should -Be 8
         @($commands | Where-Object {$_.Name -in @('startup','shutdown','reboot','start-vm','ssh')}).Count | Should -Be 0
         @($commands | Where-Object {$_.Mode -ne 'Docker' -or $_.Requires -ne 'none'}).Count | Should -Be 0
         $layout=Get-DuneCommandLayout
         ($layout.sectionNames -join '|') | Should -Be 'Battlegroup|Server updates|Tools'
         ($layout.sections[0] -join '|') | Should -Be 'start|stop|restart|apply-inis'
-        ($layout.sections[1] -join '|') | Should -Be 'update'
+        ($layout.sections[1] -join '|') | Should -Be 'update|update-with-tanks'
         ($layout.sections[2] -join '|') | Should -Be 'logs-export|operator-logs-export'
         ($layout.sections[0][0] -is [string]) | Should -BeTrue
         (Get-DuneCommandByName 'start').Mode | Should -Be 'Console'
@@ -32,7 +32,7 @@ Describe 'Docker command catalogue and saved layout' {
         $layout.sections[1] | Should -Contain 'stop'
         $layout.sections[2] | Should -Contain 'restart'
         $all=@($layout.sections | ForEach-Object {$_})
-        $all.Count | Should -Be 7
+        $all.Count | Should -Be 8
         $all | Should -Not -Contain 'ssh'
         $all | Should -Not -Contain 'start-vm'
         $layout.sections[1] | Should -Contain 'update'

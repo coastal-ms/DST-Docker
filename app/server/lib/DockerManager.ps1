@@ -53,12 +53,12 @@ function Get-DuneDockerFuncomUpdateStatus {
 }
 
 function Start-DuneDockerFuncomUpdate {
-    param([bool]$AllowOnline=$false,[switch]$Recover)
+    param([bool]$AllowOnline=$false,[switch]$Recover,[switch]$WithTanks)
     if($Recover){return Invoke-DuneDockerManager -Request @{action='updates.recover'}}
     $version=Get-DuneDockerFuncomUpdateStatus -Persist
     if(-not $version.ok){return @{ok=$false;error=$version.message}}
     if([long]$version.latestBuild -lt [long]$version.installedBuild){return @{ok=$false;error='The public build is older than this installation. Automatic downgrade was blocked.'}}
-    return Invoke-DuneDockerManager -Request @{action='updates.apply';expectedBuild=[string]$version.latestBuild;allowOnline=$AllowOnline}
+    return Invoke-DuneDockerManager -Request @{action='updates.apply';expectedBuild=[string]$version.latestBuild;allowOnline=$AllowOnline;withTanks=[bool]$WithTanks}
 }
 
 function Get-DuneDockerStatus {

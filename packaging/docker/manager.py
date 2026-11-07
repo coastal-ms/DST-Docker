@@ -1121,7 +1121,7 @@ def run_operation(state,engine,request):
         elif action=='regis.recover':state['operation']['result']=regis_compatibility.Compatibility(state,engine,sys.modules[__name__]).recover()
         elif action=='logs.export':state['operation']['result']=export_logs(state,engine,request.get('scope'),state['operation']['id'])
         elif action=='updates.stage':state['operation']['result']=asset_updates.start_stage(state,engine,request.get('expectedBuild'),save)
-        elif action=='updates.apply':state['operation']['result']=world_update.NativeUpdate(state,engine,sys.modules[__name__]).apply(request.get('expectedBuild'),request.get('allowOnline',False))
+        elif action=='updates.apply':state['operation']['result']=world_update.NativeUpdate(state,engine,sys.modules[__name__]).apply(request.get('expectedBuild'),request.get('allowOnline',False),request.get('withTanks',False))
         elif action=='updates.recover':world_update.NativeUpdate(state,engine,sys.modules[__name__]).recover()
         elif action=='rmq.publish':state['operation']['result']=publish_commands(state,engine,request.get('fields'),request.get('authToken'),request.get('spacingMilliseconds',0))
         elif action=='scale.prepare':prepare_scaler(state,engine)
@@ -1198,7 +1198,7 @@ def dispatch(request, engine=None):
                       'services.prepare','services.start','services.stop','services.restart','services.refresh-core-adapters','scale.prepare','maps.start','maps.stop','maps.restart','maps.observers.prepare','files.prepare','settings.prepare','regis.set','regis.recover','logs.export','updates.stage','updates.apply','updates.recover','rmq.publish','games.refresh-adapters','backups.create','backups.verify','backups.restore'}:
             if action=='regis.set' and (type(request.get('enabled')) is not bool or type(request.get('acknowledgeStoredTanks',False)) is not bool):
                 raise ValueError('Supply JSON booleans for Tank support and the stored-Tank acknowledgement.')
-            if action=='updates.apply' and (not isinstance(request.get('expectedBuild'),str) or not re.fullmatch(r'[0-9]{1,18}',request['expectedBuild']) or type(request.get('allowOnline',False)) is not bool):raise ValueError('Supply a valid build and JSON boolean online-player authorization.')
+            if action=='updates.apply' and (not isinstance(request.get('expectedBuild'),str) or not re.fullmatch(r'[0-9]{1,18}',request['expectedBuild']) or type(request.get('allowOnline',False)) is not bool or type(request.get('withTanks',False)) is not bool):raise ValueError('Supply a valid build and JSON boolean online-player and Tank authorization.')
             if 'publishGateway' in request and (action!='services.start' or type(request['publishGateway']) is not bool):raise ValueError('Only a typed start can select gateway publication.')
             if action=='logs.export' and request.get('scope') not in {'battlegroup','operator'}:raise ValueError('Choose battlegroup or operator logs.')
             if 'requestId' in request:
@@ -1207,6 +1207,7 @@ def dispatch(request, engine=None):
                 if any(entry.get('phase') in {'preparing','running'} or entry.get('verification',{}).get('phase') in {'preparing','running'} for entry in state.get('backups',{}).values()):
                     raise OperationBusyError('A backup or restore rehearsal is still running.')
             state['operation']={'id':uuid.uuid4().hex,'action':action,'phase':'running','startedAt':time.time()}
+            if action=='updates.apply':state['operation']['withTanks']=request.get('withTanks',False)
             if 'requestId' in request:
                 state['operation']['requestId']=request['requestId']
                 if action=='updates.apply':state['operation']['expectedBuild']=request['expectedBuild']
