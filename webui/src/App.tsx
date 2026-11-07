@@ -21,7 +21,9 @@ const DockerConsole = lazy(() => import('./pages/docker/DockerConsole'))
 
 const WORKSPACE_ROUTES = WORKSPACE_MANIFEST.map(workspace => ({
   ...workspace,
-  Component: lazy(workspace.load),
+  Component: lazy(import.meta.env.VITE_DST_EDITION === 'docker' && workspace.id === 'settings'
+    ? () => import('./pages/docker/DockerSettingsPage')
+    : workspace.load),
 }))
 
 const LEGACY_ROUTES = LEGACY_ROUTE_MANIFEST.map(route => ({

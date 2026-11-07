@@ -54,6 +54,15 @@ class Engine:
         if observed['HostConfig']['Memory']!=amount or observed['HostConfig']['MemorySwap']!=amount:
             raise EngineError('The Docker map memory allocation could not be verified.')
 
+    def set_component_cpu(self, identifier, project, component, cpus):
+        if not re.fullmatch(r'game-[0-9]+', component) or type(cpus) not in (int,float) or not .25 <= cpus <= 1024:
+            raise ValueError('Invalid map CPU allocation.')
+        self.assert_owned(identifier, project, component)
+        quota = int(cpus * 1_000_000_000)
+        self.request('POST', '/containers/' + identifier + '/update', {'NanoCpus': quota})
+        if self.assert_owned(identifier, project, component)['HostConfig']['NanoCpus'] != quota:
+            raise EngineError('The Docker map CPU allocation could not be verified.')
+
     def create_asset_stage_job(self, project, operation, build, assets_volume):
         if not re.fullmatch(r'[a-f0-9]{32}', project) or not re.fullmatch(r'[a-f0-9]{32}', operation) or not re.fullmatch(r'[0-9]{1,18}', build):
             raise ValueError('Invalid official update stage.')

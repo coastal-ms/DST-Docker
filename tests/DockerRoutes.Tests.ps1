@@ -3,6 +3,11 @@ BeforeAll {
     Import-DstLib 'DockerRoutes.ps1'
 }
 Describe 'Docker adapter routing boundary' {
+    It 'allows only typed resource reads and updates' {
+        Test-DuneDockerRouteQualified -Method GET -Path '/api/docker/resources' | Should -BeTrue
+        Test-DuneDockerRouteQualified -Method PUT -Path '/api/docker/resources' | Should -BeTrue
+        Test-DuneDockerRouteQualified -Method POST -Path '/api/docker/resources' | Should -BeFalse
+    }
     It 'keeps native reads and typed mutations available' -TestCases @(
         @{Method='GET';Path='/api/status'},
         @{Method='GET';Path='/api/links'},

@@ -8,7 +8,11 @@ sh bin/dst-docker up
 
 Open the authenticated URL printed when the application is ready. Windows users open that URL in their normal browser. Installation and execution stay inside Linux; this path does not download or run the DST Windows installer.
 
-The private preview builds DST from this checkout. The first build downloads the Linux base images and frontend dependencies. It runs the application as a non-root user, keeps its filesystem read-only, and persists configuration, state and cache in named volumes. The current browser listener is host-local on port 18765 (or the next available port); remote access is a later milestone. It uses Linux host networking and is not a Docker Desktop/macOS package.
+The private preview builds DST from this checkout. The first build downloads the Linux base images and frontend dependencies. It runs the application as a non-root user, keeps its filesystem read-only, and persists configuration, state and cache in named volumes. The browser listener accepts the Linux host's IPv4 addresses on port 18765 (or the next available port), and the launcher prints authenticated links for those addresses as well as localhost. Authentication and host-only action restrictions remain enforced. Set `DST_HTTP_BIND_ADDRESS=127.0.0.1` before launching to restrict access to localhost. It uses Linux host networking and is not a Docker Desktop/macOS package.
+
+On Windows with WSL NAT networking, the WSL address works from Windows; access through the Windows machine's LAN address additionally needs a Windows forwarding rule. Linux hosts and WSL mirrored networking use their reachable host address directly. A host firewall must permit the selected port for other devices to connect.
+
+For WSL NAT, `packaging/docker/Enable-DstDockerLan.ps1` configures a specific Windows LAN address and console port from administrator Windows PowerShell. Run it with `-ListenAddress <Windows-LAN-IP>` after the portal starts; `-WhatIf` previews its exact changes. It leaves other forwarding rules intact, limits its firewall rule to the private local subnet, and can be rerun to refresh a changed WSL address.
 
 ```sh
 sh bin/dst-docker status
@@ -20,6 +24,8 @@ sh bin/dst-docker down
 Stopping removes the portal containers, preserving named data volumes. Owned game services are managed separately through the portal. Existing Windows/Hyper-V servers remain separate. The local launch token persists in protected configuration across application restarts; retrieve the link with `url`.
 
 ## Current behavior
+
+- Settings includes Docker resources in the familiar DST layout: a persistent server RAM budget, a game CPU budget, and searchable per-map RAM/CPU limits. Allocations are changed with the battlegroup stopped; saving never stops it implicitly. Each map instance receives verified Docker memory and CPU limits. Startup and demand scaling enforce the combined map budgets with a 2 GiB service reserve, while leaving 2 GiB host headroom. These budgets govern this DST installation; they do not resize WSL or change the host's physical hardware. Interrupted allocation changes remain pending for an explicit retry.
 
 - The existing DST shell, navigation, Server Overview and Players layout connect to the Linux backend. Docker setup occupies the existing Setup Wizard location. The separate early Docker dashboard remains an internal development scaffold.
 - Authenticated DST API and browser client, with Linux startup and shared product version.

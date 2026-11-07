@@ -4,6 +4,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends openssl && rm -
 RUN pip install --no-cache-dir PyYAML==6.0.3
 RUN groupadd --gid 10001 dst && mkdir -p /control /projects && chgrp dst /control && chmod 750 /control
 COPY packaging/docker/engine.py packaging/docker/manager.py /opt/dst-manager/
+COPY packaging/docker/resource_policy.py /opt/dst-manager/resource_policy.py
 COPY packaging/docker/migration-job.py /opt/dst-manager/migration-job.py
 COPY packaging/docker/backup-job.py /opt/dst-manager/backup-job.py
 COPY packaging/docker/restore-job.py /opt/dst-manager/restore-job.py

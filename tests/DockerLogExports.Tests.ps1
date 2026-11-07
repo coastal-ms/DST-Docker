@@ -18,8 +18,8 @@ Describe 'Native memory mode request validation' {
         Mock Write-DuneJson {}
     }
     AfterEach {$env:DST_HOSTING_BACKEND=$script:oldBackend}
-    It 'uses a local-only route and typed boolean setter' {
-        $route=$script:routes['PUT /api/docker/memory-balancing'];$route.local|Should -BeTrue
+    It 'allows the authenticated owner surface over LAN and retains a typed boolean setter' {
+        $route=$script:routes['PUT /api/docker/memory-balancing'];$route.local|Should -BeFalse
         & $route.handler $null $null @{} @{enabled=$false}
         Should -Invoke Invoke-DuneDockerManager -Times 1 -ParameterFilter {$Request.action -eq 'memory.policy.set' -and $Request.enabled -eq $false}
         Should -Invoke Write-DuneJson -Times 1 -ParameterFilter {$Body.enabled -eq $false}

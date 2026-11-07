@@ -50,6 +50,9 @@ function setState(patch: Partial<Snapshot>) {
 }
 
 async function run(force = false): Promise<void> {
+  // The Docker edition has its own installation source. Never offer a Windows
+  // EXE update to the Linux browser console.
+  if (import.meta.env.VITE_DST_EDITION === 'docker') return
   if (inflight) return
   inflight = true
   setState({ loading: true, error: null })

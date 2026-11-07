@@ -128,6 +128,7 @@ function Test-DunePortalOwnerOnlyPath {
     }
 
     foreach ($prefix in @(
+        '/api/docker',
         '/api/gameconfig',
         '/api/db',
         '/api/sietches',
@@ -915,15 +916,33 @@ function Test-DuneAccountModeLaunchAccess {
 
 # ---------- Main loop ----------------------------------------------------------
 
+function Get-DuneHttpListenerPrefix {
+    param([string]$BindAddress = '127.0.0.1', [int]$Port, [string]$Token = '')
+    $address = $null
+    if (-not [Net.IPAddress]::TryParse($BindAddress, [ref]$address) -or
+        $address.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork) {
+        throw 'The HTTP bind address must be an IPv4 address.'
+    }
+    if (-not [Net.IPAddress]::IsLoopback($address) -and [string]::IsNullOrWhiteSpace($Token)) {
+        throw 'An authenticated launch credential is required for network access.'
+    }
+    $hostName = if ($address.Equals([Net.IPAddress]::Any)) { '+' } else { $address.ToString() }
+    return "http://${hostName}:$Port/"
+}
+
 function Start-DuneHttpServer {
     param(
         [Parameter(Mandatory)][string]$DistRoot,
         [int]$PreferredPort = 47823,
-        [string]$Token = ''
+        [string]$Token = '',
+        [string]$BindAddress = '127.0.0.1'
     )
 
     $script:DuneDistRoot = (Resolve-Path -LiteralPath $DistRoot).Path
     $script:DuneToken    = $Token
+    # Validate once before trying ports; invalid network configuration must not
+    # be mistaken for a busy port. Local-only route checks remain independent.
+    [void](Get-DuneHttpListenerPrefix -BindAddress $BindAddress -Port $PreferredPort -Token $Token)
 
     # Find a free port starting at $PreferredPort.
     $port = $PreferredPort
@@ -931,11 +950,12 @@ function Start-DuneHttpServer {
     while ($port -lt ($PreferredPort + 50)) {
         try {
             $l = [System.Net.HttpListener]::new()
-            $prefix = "http://127.0.0.1:$port/"
+            $prefix = Get-DuneHttpListenerPrefix -BindAddress $BindAddress -Port $port -Token $Token
             $l.Prefixes.Add($prefix)
             $l.Start()
             $listener = $l
-            $script:DunePrefixUrl = $prefix
+            # Health checks and internal workers always use a concrete local URL.
+            $script:DunePrefixUrl = "http://127.0.0.1:$port/"
             break
         } catch {
             try { $l.Close() } catch {}

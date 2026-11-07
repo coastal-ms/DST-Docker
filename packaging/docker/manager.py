@@ -30,6 +30,7 @@ from log_export import export_logs
 import asset_updates
 import service_generations
 import world_update
+import resource_policy
 import sys
 
 STATE = Path('/projects')
@@ -497,6 +498,7 @@ def prepare_services(state,engine):
 
 
 def start_services(state,engine,publish_gateway=True):
+    if state.get('pendingResourceChange'):raise ValueError('Finish the pending resource allocation before starting the world.')
     if type(publish_gateway) is not bool:raise ValueError('The gateway publication choice must be a JSON boolean.')
     if not publish_gateway and state.get('services',{}).get('gateway'):
         gateway=engine.assert_owned(state['services']['gateway']['id'],state['id'],'gateway')
@@ -512,6 +514,7 @@ def start_services(state,engine,publish_gateway=True):
     initial={partition for item in state['worldPlan']['maps'] for partition in item['partitions'][:item['initialReplicas']]}
     selected={int(name.removeprefix('game-')) for name in state['services'] if name.startswith('game-')
               and state.get('mapTargets',{}).get(name,'running' if int(name.removeprefix('game-')) in initial else 'stopped')=='running'}
+    resource_policy.admit(state,engine,selected)
     for component,entry in state['services'].items():
         if component.startswith('game-') and int(component.removeprefix('game-')) not in selected:continue
         observed=engine.assert_owned(entry['id'],state['id'],component)
@@ -528,6 +531,9 @@ def start_services(state,engine,publish_gateway=True):
     prepare_connections(state,engine)
     if state.get('scaler',{}).get('phase')=='prepared':engine.lifecycle(state['scaler']['id'],state['id'],'start')
     for component in ['text-router','director']+(['gateway'] if publish_gateway else [])+['game-'+str(partition) for partition in sorted(selected)]:
+        if component.startswith('game-') and state.get('resourcePolicy'):
+            game=next(row for row in state['worldPlan']['games'] if row['partition']==int(component[5:]))
+            engine.set_component_cpu(state['services'][component]['id'],state['id'],component,state.get('mapCpuOverrides',{}).get(game['map'],1))
         engine.lifecycle(state['services'][component]['id'],state['id'],'start')
     prepare_map_observers(state,engine)
     prepare_file_browser(state,engine)
@@ -649,6 +655,7 @@ def control_map(state,engine,partition,running,force=False,automatic=False):
             return public_state(state,engine)
         if entry and entry.get('phase')!='prepared':raise ValueError('This map has an interrupted preparation to review.')
         budget=next(row['memoryBytes'] for row in plan['maps'] if row['map']==game['map'])
+        resource_policy.admit(state,engine,[partition])
         counters={line.split(':',1)[0]:int(line.split(':',1)[1].strip().split()[0])*1024 for line in Path('/proc/meminfo').read_text().splitlines() if ':' in line and line.split(':',1)[1].strip().split()[0].isdigit()}
         reserved=budget
         for name,row in state.get('services',{}).items():
@@ -667,6 +674,8 @@ def control_map(state,engine,partition,running,force=False,automatic=False):
             entry.update(id=identifier,phase='configuring');save(state)
             engine.upload_component_files(identifier,state['id'],component,files)
             entry['phase']='prepared';save(state)
+        if state.get('resourcePolicy'):
+            engine.set_component_cpu(entry['id'],state['id'],component,state.get('mapCpuOverrides',{}).get(game['map'],1))
         engine.lifecycle(entry['id'],state['id'],'start')
         state.setdefault('mapTargets',{})[component]='running';save(state)
         manual_floor()
@@ -711,7 +720,35 @@ def restart_map(state,engine,partition,force=False):
     return {'noop':False,'restarted':1}
 
 
+def set_resources(state,engine,request):
+    change=resource_policy.validate_change(state,request,resource_policy.host_capacity())
+    if state.get('pendingResourceChange') and state['pendingResourceChange']!=change:
+        raise ValueError('Retry the pending resource allocation before choosing different values.')
+    if state.get('desiredState')=='running':raise ValueError('Stop the battlegroup before changing its resource allocations.')
+    entries=[]
+    for component,entry in state.get('services',{}).items():
+        if not component.startswith('game-'):continue
+        observed=engine.assert_owned(entry['id'],state['id'],component)
+        if observed['State']['Status'] not in {'created','exited'}:raise ValueError('Every map must finish stopping before resource changes.')
+        row=next(row for row in state['worldPlan']['maps'] if int(component[5:]) in row['partitions'])
+        allocation=next(item for item in change['maps'] if item['map']==row['map'])
+        entries.append((component,entry['id'],allocation))
+    state['pendingResourceChange']=change;save(state)
+    for component,identifier,allocation in entries:
+        engine.set_component_memory(identifier,state['id'],component,int(allocation['memoryGiB']*1024**3))
+        engine.set_component_cpu(identifier,state['id'],component,allocation['cpus'])
+    state['resourcePolicy']={key:change[key] for key in ('memoryGiB','cpuCount')}
+    state['mapMemoryOverrides']={item['map']:int(item['memoryGiB']*1024**3) for item in change['maps']}
+    state['mapCpuOverrides']={item['map']:item['cpus'] for item in change['maps']}
+    for row in state.get('worldPlan',{}).get('maps',[]):row['memoryBytes']=state['mapMemoryOverrides'][row['map']]
+    if state.get('worldPlan'):
+        state['worldPlan']['initialMemoryBytes']=sum(row['memoryBytes']*row['initialReplicas'] for row in state['worldPlan']['maps'])
+    state.pop('pendingResourceChange');save(state)
+    return resource_policy.snapshot(state,engine)
+
+
 def set_map_memory(state,engine,map_name,gib):
+    if state.get('resourcePolicy'):raise ValueError('Use Docker resources in Settings to update the map size within its server budget.')
     if type(gib) is not int or not 1<=gib<=128:raise ValueError('Choose an integer memory allocation between 1 and 128 GiB.')
     rows=[row for row in state.get('worldPlan',{}).get('maps',[]) if row['map']==map_name]
     if len(rows)!=1:raise ValueError('Choose a map in the installed world.')
@@ -1076,6 +1113,7 @@ def dispatch(request, engine=None):
         if action == 'status': return public_state(state, engine)
         if action == 'assets.version': return installed_version()
         if action=='memory.policy':return {'enabled':state.get('memoryBalancingEnabled',True)}
+        if action=='resources.get':return resource_policy.snapshot(state,engine)
         if action=='scale.get':
             if not state.get('worldId') or not state.get('worldPlan'):raise ValueError('The world is not prepared.')
             return scale_snapshot(state,read_template(),(STATE/'dune-app.password').read_text())
@@ -1087,6 +1125,8 @@ def dispatch(request, engine=None):
         if state.get('updateRun') and state['updateRun']['phase'] not in world_update.TERMINAL and action not in {'updates.recover','logs.export'}:
             raise ValueError('Recover the interrupted server update before starting another operation.')
         if state.get('pendingMemoryChange') and action!='maps.memory':raise ValueError('Finish the pending map memory allocation first.')
+        if state.get('pendingResourceChange') and action!='resources.set':raise ValueError('Finish the pending resource allocation first.')
+        if action=='resources.set':return set_resources(state,engine,request)
         if action=='memory.policy.set':
             if type(request.get('enabled')) is not bool:raise ValueError('Supply a JSON boolean for memory balancing.')
             if not request['enabled']:

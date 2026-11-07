@@ -8,7 +8,7 @@ This is the private development repository for DST's Docker hosting option. It r
 
 The intended setup is: install WSL on Windows, open Ubuntu, run one DST install command, then finish setup in the browser. Native Linux users will run the same install command directly.
 
-That self-contained installer is being qualified. There is no stable installer download command yet. The current development setup below uses the launcher included in this repository.
+The self-contained installer has passed isolated Ubuntu dependency installation and browser startup. Wider clean-machine, upgrade and game acceptance remain in progress. There is no stable installer download command yet. The private development setup below can use the installer directly from a committed checkout.
 
 ## Windows: prepare WSL
 
@@ -45,14 +45,16 @@ Then get the private Docker branch and start DST:
 ```sh
 git clone --branch codex/docker-edition https://github.com/coastal-ms/DST-Docker.git
 cd DST-Docker
-sh bin/dst-docker up
+bash bin/dst-install --source "$PWD"
 ```
 
-The first run downloads the official Linux server package, builds the DST images, and starts the portal. Let it finish; download and build time depend on your connection and hardware.
+The installer prepares missing prerequisites on supported Ubuntu/Debian hosts, extracts a verified source snapshot, downloads the official Linux server package, builds the DST images, and starts the portal. Let it finish; download and build time depend on your connection and hardware. It preserves existing Docker data and does not remove another container runtime to resolve a conflict.
 
 ## Open the portal
 
 When startup completes, the terminal prints an authenticated browser link. Open that complete link in your normal browser. Windows users can use their Windows browser; it does not need to run inside the WSL terminal.
+
+The launcher prints links for the Linux host's IP addresses as well as localhost. In WSL NAT mode, its Linux address works from Windows. To use the Windows machine's LAN address, run `packaging/docker/Enable-DstDockerLan.ps1 -ListenAddress <Windows-LAN-IP>` from administrator Windows PowerShell after the console starts. Use `-WhatIf` to preview the specific forwarding and private-LAN firewall rule. Rerun it if WSL receives a new address.
 
 Complete the Setup Wizard in the portal. Enter your Funcom service token there, configure the world, and start the server. Keep the token out of repository files and chat.
 
@@ -77,6 +79,12 @@ sh bin/dst-docker down    # Stop the portal containers
 Use the portal's normal server controls to stop or restart the game world. The launcher's `down` command stops the portal containers; game services are managed separately.
 
 Configuration, databases, game saves, and official packages persist in Docker volumes. Stopping the portal does not delete those volumes.
+
+## Control server resources
+
+Open **Settings → Docker resources** to review the RAM and CPUs available to the Linux host, choose a server RAM budget and game CPU budget, and set RAM/CPU limits for each map instance. The familiar map names are searchable.
+
+Stop the battlegroup before applying different allocations. Saving never stops it implicitly. DST verifies each container limit, persists the allocations and checks the combined map budgets before startup or demand scaling. The RAM budget reserves 2 GiB for supporting services, with another 2 GiB left for the host. These controls manage this installation's game allocations within the Linux host's limits; they do not resize WSL itself.
 
 ## Development scope
 

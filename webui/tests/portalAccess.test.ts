@@ -5,6 +5,13 @@ import { canAccessCommand } from '../src/auth/commandAccess'
 import { LEGACY_ROUTE_MANIFEST } from '../src/platform/routes'
 
 describe('Browser Portal role access', () => {
+  it('allows Docker setup for authenticated remote owners while retaining Windows host-only setup', () => {
+    expect(resolvePortalAccess(false, true, 'owner', true).canAccessSetup).toBe(true)
+    expect(resolvePortalAccess(false, true, 'admin', true).canAccessSetup).toBe(false)
+    expect(resolvePortalAccess(false, true, 'player', true).canAccessSetup).toBe(false)
+    expect(resolvePortalAccess(false, true, null, true).canAccessSetup).toBe(false)
+    expect(resolvePortalAccess(false, true, 'owner').canAccessSetup).toBe(false)
+  })
   it('gives remote Owners full portal access except host-only Setup', () => {
     expect(resolvePortalAccess(false, true, 'owner')).toEqual({
       isPlayer: false,

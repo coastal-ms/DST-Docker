@@ -3,6 +3,24 @@ BeforeAll {
     . (Join-Path (Get-DstRepoRoot) 'app\server\HttpServer.ps1')
 }
 
+Describe 'HTTP listener network binding' {
+    It 'keeps the default listener on loopback' {
+        Get-DuneHttpListenerPrefix -Port 18765 | Should -Be 'http://127.0.0.1:18765/'
+    }
+    It 'binds network interfaces only with an authenticated launch credential' {
+        Get-DuneHttpListenerPrefix -BindAddress '0.0.0.0' -Port 18765 -Token 'fixture-only' | Should -Be 'http://+:18765/'
+        Get-DuneHttpListenerPrefix -BindAddress '192.0.2.10' -Port 18765 -Token 'fixture-only' | Should -Be 'http://192.0.2.10:18765/'
+        { Get-DuneHttpListenerPrefix -BindAddress '0.0.0.0' -Port 18765 } | Should -Throw '*credential*'
+        { Get-DuneHttpListenerPrefix -BindAddress '192.0.2.10' -Port 18765 -Token ' ' } | Should -Throw '*credential*'
+    }
+    It 'rejects malformed addresses and host-prefix injection' -TestCases @(
+        @{Address='0.0.0.0/extra'}, @{Address='+'}, @{Address='localhost'}, @{Address='::'}
+    ) {
+        param($Address)
+        { Get-DuneHttpListenerPrefix -BindAddress $Address -Port 18765 -Token 'fixture-only' } | Should -Throw '*IPv4*'
+    }
+}
+
 Describe 'HTTP local-only request enforcement' {
     It 'accepts IPv4 loopback without proxy headers' {
         $request = [pscustomobject]@{
@@ -50,6 +68,9 @@ Describe 'HTTP local-only request enforcement' {
 
     It 'classifies host configuration and filesystem APIs as Owner-only' {
         foreach ($path in @(
+            '/api/docker/resources',
+            '/api/docker/setup',
+            '/api/docker/memory-balancing',
             '/api/gameconfig',
             '/api/gameconfig/experimental/categories',
             '/api/db/info',

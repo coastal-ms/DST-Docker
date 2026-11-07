@@ -6,7 +6,7 @@ Register-DuneRoute -Method POST -Path '/api/docker/client-files/transform' -Loca
     catch{Write-DuneError -Response $res -Status 400 -Message $_.Exception.Message}
 }
 
-Register-DuneRoute -Method GET -Path '/api/docker/memory-balancing' -LocalOnly -Handler {
+Register-DuneRoute -Method GET -Path '/api/docker/memory-balancing' -Handler {
     param($req,$res,$routeParams,$body)
     if($env:DST_HOSTING_BACKEND -ne 'docker'){Write-DuneError -Response $res -Status 404 -Message 'Docker hosting is not enabled.';return}
     $reply=Invoke-DuneDockerManager -Request @{action='memory.policy'}
@@ -14,7 +14,7 @@ Register-DuneRoute -Method GET -Path '/api/docker/memory-balancing' -LocalOnly -
     Write-DuneJson -Response $res -Body $reply.data
 }
 
-Register-DuneRoute -Method PUT -Path '/api/docker/memory-balancing' -LocalOnly -Handler {
+Register-DuneRoute -Method PUT -Path '/api/docker/memory-balancing' -Handler {
     param($req,$res,$routeParams,$body)
     if($env:DST_HOSTING_BACKEND -ne 'docker'){Write-DuneError -Response $res -Status 404 -Message 'Docker hosting is not enabled.';return}
     if($body -isnot [hashtable] -or $body.enabled -isnot [bool]){Write-DuneError -Response $res -Status 400 -Message 'Supply a JSON boolean for memory balancing.';return}
@@ -37,14 +37,31 @@ Register-DuneRoute -Method GET -Path '/api/docker/log-exports/{id}' -LocalOnly -
     Write-DuneFile -Response $res -Path $path
 }
 
-Register-DuneRoute -Method GET -Path '/api/docker/setup' -LocalOnly -Handler {
+Register-DuneRoute -Method GET -Path '/api/docker/resources' -Handler {
+    param($req,$res,$routeParams,$body)
+    if($env:DST_HOSTING_BACKEND -ne 'docker'){Write-DuneError -Response $res -Status 404 -Message 'Docker hosting is not enabled.';return}
+    $reply=Invoke-DuneDockerManager -Request @{action='resources.get'}
+    if(-not $reply.ok){Write-DuneError -Response $res -Status 503 -Message $reply.error;return}
+    Write-DuneJson -Response $res -Body $reply.data
+}
+
+Register-DuneRoute -Method PUT -Path '/api/docker/resources' -Handler {
+    param($req,$res,$routeParams,$body)
+    if($env:DST_HOSTING_BACKEND -ne 'docker'){Write-DuneError -Response $res -Status 404 -Message 'Docker hosting is not enabled.';return}
+    if($body -isnot [hashtable]){Write-DuneError -Response $res -Status 400 -Message 'Supply the server resource allocations.';return}
+    $reply=Invoke-DuneDockerManager -Request @{action='resources.set';memoryGiB=$body.memoryGiB;cpuCount=$body.cpuCount;maps=$body.maps}
+    if(-not $reply.ok){Write-DuneError -Response $res -Status 409 -Message $reply.error;return}
+    Write-DuneJson -Response $res -Body $reply.data
+}
+
+Register-DuneRoute -Method GET -Path '/api/docker/setup' -Handler {
     param($req, $res, $routeParams, $body)
     if ($env:DST_HOSTING_BACKEND -ne 'docker') { Write-DuneError -Response $res -Status 404 -Message 'Docker hosting is not enabled.'; return }
     $result = Invoke-DuneDockerManager -Request @{action='status'}
     Write-DuneJson -Response $res -Body $result
 }
 
-Register-DuneRoute -Method POST -Path '/api/docker/setup' -LocalOnly -Handler {
+Register-DuneRoute -Method POST -Path '/api/docker/setup' -Handler {
     param($req, $res, $routeParams, $body)
     if ($env:DST_HOSTING_BACKEND -ne 'docker') { Write-DuneError -Response $res -Status 404 -Message 'Docker hosting is not enabled.'; return }
     $action = [string]$body.action

@@ -195,4 +195,22 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(client.calls,[])
 
 
+class CpuAllocationTests(unittest.TestCase):
+    def test_cpu_update_is_owned_and_read_back(self):
+        class Client(engine.Engine):
+            def __init__(self):self.quota=0;self.calls=[]
+            def assert_owned(self,identifier,project,component):return {'HostConfig':{'NanoCpus':self.quota}}
+            def request(self,method,path,body):self.calls.append((method,path,body));self.quota=body['NanoCpus']
+        client=Client();client.set_component_cpu('owned','a'*32,'game-1',1.5)
+        self.assertEqual(client.calls,[('POST','/containers/owned/update',{'NanoCpus':1_500_000_000})])
+        for value in [True,0,float('nan'),float('inf')]:
+            with self.assertRaises(ValueError):client.set_component_cpu('owned','a'*32,'game-1',value)
+
+    def test_failed_readback_is_not_reported_as_success(self):
+        class Client(engine.Engine):
+            def assert_owned(self,*args):return {'HostConfig':{'NanoCpus':0}}
+            def request(self,*args):return {}
+        with self.assertRaisesRegex(engine.EngineError,'verified'):Client().set_component_cpu('owned','a'*32,'game-1',1)
+
+
 if __name__=='__main__': unittest.main()

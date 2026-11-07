@@ -1,0 +1,217 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
+
+# Packaging replaces this marker with a checksum-bound source payload. The
+# resulting single shell file also works when passed to bash through a pipe.
+# DST_EMBEDDED_SOURCE
+task_package_sha=${task_package_sha:-}
+task_package_revision=${task_package_revision:-}
+task_stage='checking prerequisites'
+task_temp=''
+task_root="${XDG_DATA_HOME:-$HOME/.local/share}/dst-docker"
+task_source=''
+task_archive=''
+task_prepare_only=0
+task_check_only=0
+task_sudo=()
+task_docker=()
+
+fail() { printf 'DST: %s\n' "$*" >&2; exit 1; }
+cleanup() { if [[ "$task_temp" == /tmp/dst-installer.* && -d "$task_temp" && ! -L "$task_temp" ]]; then rm -rf -- "$task_temp"; fi; }
+trap cleanup EXIT
+trap 'printf "DST installation stopped while %s. Existing Docker volumes were not removed.\n" "$task_stage" >&2' ERR
+usage() {
+  cat <<'HELP'
+DST Docker installer (Linux x86_64 / Windows WSL)
+  bash dst-install [--prefix DIRECTORY] [--check] [--prepare-only]
+  bash bin/dst-install --source CHECKOUT [--prefix DIRECTORY]
+  bash bin/dst-install --source-archive FILE [--prefix DIRECTORY]
+
+The packaged installer contains its own DST source. Development mode accepts
+a committed checkout or a local source archive. --check only reports prerequisites;
+--prepare-only installs prerequisites and source without starting the portal.
+Configuration, game data and official packages remain in Docker volumes.
+HELP
+}
+while (($#)); do
+  case "$1" in
+    --prefix|--source|--source-archive)
+      (($# >= 2)) || fail "Missing value for $1."
+      case "$1" in --prefix) task_root=$2;; --source) task_source=$2;; --source-archive) task_archive=$2;; esac
+      shift 2;;
+    --check) task_check_only=1; shift;;
+    --prepare-only) task_prepare_only=1; shift;;
+    -h|--help) usage; exit 0;;
+    *) fail "Unknown option: $1";;
+  esac
+done
+[[ "$(uname -s)" == Linux ]] || fail 'Run this command in Linux or your WSL Ubuntu terminal.'
+[[ "$(uname -m)" == x86_64 ]] || fail 'The official game server needs Linux x86_64.'
+[[ -n "$task_root" && "$task_root" = /* && "$task_root" != / ]] || fail 'Choose an absolute Linux installation directory.'
+[[ ! "$task_root" =~ ^/mnt/[a-zA-Z](/|$) ]] || fail 'Choose a folder inside Linux, such as ~/.local/share/dst-docker, rather than a Windows drive.'
+[[ -z "$task_source" || -z "$task_archive" ]] || fail 'Choose either a checkout or an archive.'
+
+printf '[1/5] Checking Linux and Docker\n'
+task_has_cli=0; task_has_compose=0; task_has_python=0; task_daemon=0
+if command -v python3 >/dev/null 2>&1; then task_has_python=1; fi
+if command -v docker >/dev/null 2>&1; then
+  task_has_cli=1
+  if docker compose version >/dev/null 2>&1; then task_has_compose=1; fi
+  if docker info --format '{{.OSType}}' >/dev/null 2>&1; then task_daemon=1; fi
+fi
+if ((task_check_only)); then
+  printf 'Linux architecture: x86_64\nDocker CLI: %s\nCompose plugin: %s\nDocker accessible: %s\nPython: %s\n' "$task_has_cli" "$task_has_compose" "$task_daemon" "$task_has_python"
+  printf 'Install directory: %s\nNo packages, files or containers changed.\n' "$task_root"
+  exit 0
+fi
+if ((EUID != 0)); then
+  if command -v sudo >/dev/null 2>&1; then task_sudo=(sudo); fi
+fi
+task_need_apt=0
+if ((!task_has_cli || !task_has_python)); then task_need_apt=1; fi
+if [[ -n "$task_source" ]] && ! command -v git >/dev/null 2>&1; then task_need_apt=1; fi
+printf '[2/5] Preparing dependencies\n'
+if ((task_need_apt)); then
+  if ((EUID != 0 && ${#task_sudo[@]} == 0)); then fail 'sudo is required to install the missing prerequisites.'; fi
+  [[ -f /etc/os-release ]] || fail 'Install Docker Engine, Compose and Python, then run the installer again.'
+  # This file belongs to the operating system, not the downloaded package.
+  . /etc/os-release
+  case "${ID:-}:${VERSION_CODENAME:-}" in
+    ubuntu:jammy|ubuntu:noble|ubuntu:resolute|ubuntu:stonking|debian:bookworm|debian:trixie) ;;
+    *) fail 'Automatic dependency setup supports current Ubuntu/Debian releases. Install Docker Engine, Compose and Python, then rerun on another Linux distribution.';;
+  esac
+  command -v apt-get >/dev/null 2>&1 || fail 'apt-get is unavailable.'
+  if ((${#task_sudo[@]})); then sudo -v; fi
+  task_stage='installing prerequisites'
+  "${task_sudo[@]}" apt-get update
+  task_packages=(ca-certificates curl python3)
+  if [[ -n "$task_source" ]]; then task_packages+=(git); fi
+  "${task_sudo[@]}" apt-get install -y "${task_packages[@]}"
+  if ((!task_has_cli)); then
+    # Never remove another container runtime to make an installation fit.
+    for task_package in docker.io docker-compose docker-compose-v2 docker-doc docker-buildx podman-docker containerd runc; do
+      if [[ "$(dpkg-query -W -f='${Status}' "$task_package" 2>/dev/null || true)" == 'install ok installed' ]]; then
+        fail "Existing package $task_package needs review before installing Docker CE. It was not removed."
+      fi
+    done
+    task_stage='configuring the official Docker repository'
+    "${task_sudo[@]}" install -m 0755 -d /etc/apt/keyrings
+    if [[ ! -f /etc/apt/sources.list.d/docker.sources && ! -f /etc/apt/sources.list.d/docker.list ]]; then
+      "${task_sudo[@]}" curl -fsSL "https://download.docker.com/linux/$ID/gpg" -o /etc/apt/keyrings/docker.asc
+      "${task_sudo[@]}" chmod a+r /etc/apt/keyrings/docker.asc
+      printf 'Types: deb\nURIs: https://download.docker.com/linux/%s\nSuites: %s\nComponents: stable\nArchitectures: %s\nSigned-By: /etc/apt/keyrings/docker.asc\n' \
+        "$ID" "${UBUNTU_CODENAME:-$VERSION_CODENAME}" "$(dpkg --print-architecture)" | "${task_sudo[@]}" tee /etc/apt/sources.list.d/docker.sources >/dev/null
+    fi
+    "${task_sudo[@]}" apt-get update
+    "${task_sudo[@]}" apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+  fi
+fi
+docker compose version >/dev/null 2>&1 || fail 'Docker is present but its Compose plugin is unavailable. Install the matching Compose plugin and rerun; the existing Docker installation was left intact.'
+# This hosting adapter intentionally operates only on the local Linux engine.
+task_endpoint=$(docker context inspect --format '{{.Endpoints.docker.Host}}')
+[[ "$task_endpoint" == unix:///var/run/docker.sock && -z "${DOCKER_HOST:-}" ]] || fail 'Select the local Linux Docker Engine at /var/run/docker.sock before installing.'
+if ! docker info --format '{{.OSType}}' >/dev/null 2>&1; then
+  if ((${#task_sudo[@]})) && sudo docker info --format '{{.OSType}}' >/dev/null 2>&1; then task_docker=(sudo)
+  else
+    if ((EUID != 0 && ${#task_sudo[@]} == 0)); then fail 'Docker is unavailable to this user. Start the local engine and grant Docker access, then rerun.'; fi
+    [[ "$(ps -p 1 -o comm= | tr -d ' ')" == systemd ]] || fail 'Docker is not running. Enable systemd in this WSL distribution, restart the distribution, and rerun. Instructions: https://learn.microsoft.com/windows/wsl/systemd'
+    "${task_sudo[@]}" systemctl enable --now docker
+    if ((${#task_sudo[@]})); then task_docker=(sudo); fi
+  fi
+fi
+[[ "$("${task_docker[@]}" docker info --format '{{.OSType}}')" == linux ]] || fail 'A Linux Docker Engine is required.'
+[[ "$("${task_docker[@]}" docker context inspect --format '{{.Endpoints.docker.Host}}')" == unix:///var/run/docker.sock ]] || fail 'The privileged Docker context is not the local Linux engine.'
+task_engine_os=$("${task_docker[@]}" docker info --format '{{.OperatingSystem}}')
+[[ "$task_engine_os" != *'Docker Desktop'* ]] || fail 'Use Docker Engine inside Linux/WSL for this hosting preview; Docker Desktop hosting is not qualified.'
+task_engine_api=$("${task_docker[@]}" docker version --format '{{.Server.APIVersion}}')
+[[ "$task_engine_api" =~ ^1\.([0-9]+)$ && "${BASH_REMATCH[1]}" -ge 45 ]] || fail 'Docker Engine 26 or newer is required for shared UserSettings volume subdirectories.'
+
+printf '[3/5] Installing DST source\n'
+task_stage='preparing the source package'
+task_temp=$(mktemp -d -t dst-installer.XXXXXXXX)
+if [[ -n "$task_source" ]]; then
+  [[ -d "$task_source" ]] || fail 'The selected checkout does not exist.'
+  task_package_revision=$(git -C "$task_source" rev-parse --verify HEAD)
+  git -C "$task_source" archive --format=tar.gz HEAD > "$task_temp/source.tar"
+elif [[ -n "$task_archive" ]]; then
+  [[ -f "$task_archive" ]] || fail 'The source archive does not exist.'
+  cp -- "$task_archive" "$task_temp/source.tar"
+  task_package_revision=local-archive
+elif declare -F dst_embedded_source >/dev/null; then
+  dst_embedded_source > "$task_temp/source.tar"
+else
+  fail 'This development entry point needs --source CHECKOUT or --source-archive FILE. The packaged installer includes its own source.'
+fi
+task_actual_sha=$(sha256sum "$task_temp/source.tar" | cut -d ' ' -f 1)
+if [[ -n "$task_package_sha" && "$task_package_sha" != "$task_actual_sha" ]]; then fail 'The bundled source checksum did not match. No portal was started.'; fi
+task_package_sha=$task_actual_sha
+python3 - "$task_temp/source.tar" "$task_root" "$task_package_sha" "$task_package_revision" <<'PY'
+import json,os,shutil,sys,tarfile,uuid
+from pathlib import Path,PurePosixPath
+archive,root,digest,revision=sys.argv[1:];root=Path(root)
+if '..' in root.parts:raise SystemExit('The install directory must not contain parent-directory traversal.')
+if any(part.is_symlink() for part in (root,*root.parents)):raise SystemExit('The install directory and its parents must not be symlinks.')
+root=root.resolve()
+if len(root.parts)>=3 and root.parts[1]=='mnt' and len(root.parts[2])==1 and root.parts[2].isalpha():raise SystemExit('Choose an installation directory inside Linux rather than a Windows drive.')
+if root.exists() and any(root.iterdir()) and not (root/'installation.json').is_file():raise SystemExit('The install directory is not a recognized DST installation; it was left intact.')
+with tarfile.open(archive) as source:
+    members=source.getmembers();names=set();total=0
+    for member in members:
+        path=PurePosixPath(member.name)
+        if path.is_absolute() or '..' in path.parts or not path.parts or path.parts[0] in {'.git','.env'} or not (member.isfile() or member.isdir()):raise SystemExit('The package contains an unsupported archive entry.')
+        if member.name in names:raise SystemExit('The package contains duplicate archive entries.')
+        names.add(member.name);total+=member.size
+    if total>512*1024**2 or len(members)>20000:raise SystemExit('The source package exceeds its limits.')
+    if not {'bin/dst-docker','compose.yaml','packaging/docker/Dockerfile'}.issubset(names):raise SystemExit('The package is missing required DST files.')
+    root.mkdir(parents=True,exist_ok=True)
+    manifest=root/'installation.json'
+    if manifest.exists():previous=json.loads(manifest.read_text())
+    else:
+        previous={'format':1}
+        initial=root/('.installation-'+uuid.uuid4().hex+'.tmp');initial.write_text(json.dumps(previous));initial.chmod(0o600);initial.replace(manifest)
+    if previous.get('format')!=1:raise SystemExit('The installation metadata format needs review.')
+    releases=root/'releases'
+    if releases.is_symlink():raise SystemExit('The release directory must not be a symlink.')
+    releases.mkdir(exist_ok=True);target=releases/digest
+    if target.exists():
+        if target.is_symlink() or (target/'.dst-source-sha256').read_text().strip()!=digest:raise SystemExit('The existing release needs review.')
+    else:
+        stage=releases/('.preparing-'+uuid.uuid4().hex);stage.mkdir(mode=0o700)
+        try:
+            for member in members:
+                output=stage/member.name
+                if member.isdir():output.mkdir(parents=True,exist_ok=True)
+                else:
+                    output.parent.mkdir(parents=True,exist_ok=True)
+                    with source.extractfile(member) as incoming,output.open('xb') as outgoing:shutil.copyfileobj(incoming,outgoing)
+                    output.chmod(0o755 if member.mode&0o111 else 0o644)
+            # The installer's private umask must not make source directories
+            # unreadable after Docker COPY changes their owner to root. Runtime
+            # containers deliberately run as an unprivileged service user.
+            for directory in stage.rglob('*'):
+                if directory.is_dir():directory.chmod(0o755)
+            (stage/'.dst-source-sha256').write_text(digest+'\n');stage.replace(target)
+        except BaseException:
+            shutil.rmtree(stage);raise
+previous.update(preparedSha256=digest,preparedRevision=revision)
+temporary=root/('.installation-'+uuid.uuid4().hex+'.tmp');temporary.write_text(json.dumps(previous));temporary.chmod(0o600);temporary.replace(manifest)
+PY
+task_release="$task_root/releases/$task_package_sha"
+if ((task_prepare_only)); then printf 'DST source prepared at %s\nNo containers were started.\n' "$task_release"; exit 0; fi
+printf '[4/5] Downloading the official package and starting the portal\n'
+task_stage='building and starting the portal'
+"${task_docker[@]}" bash "$task_release/bin/dst-docker" up
+python3 - "$task_root" "$task_package_sha" <<'PY'
+import json,sys,uuid
+from pathlib import Path
+root=Path(sys.argv[1]);path=root/'installation.json';state=json.loads(path.read_text());state['activeSha256']=sys.argv[2]
+temporary=root/('.installation-'+uuid.uuid4().hex+'.tmp');temporary.write_text(json.dumps(state));temporary.chmod(0o600);temporary.replace(path)
+link=root/'current'
+if link.exists() and not link.is_symlink():raise SystemExit('The current release pointer needs review.')
+candidate=root/('.current-'+uuid.uuid4().hex);candidate.symlink_to('releases/'+sys.argv[2],target_is_directory=True);candidate.replace(link)
+PY
+printf '[5/5] DST is ready\nUse the authenticated browser link printed above.\n'
+printf 'Later: '
+if ((${#task_docker[@]})); then printf '%q ' "${task_docker[@]}"; fi
+printf 'bash %q/bin/dst-docker [up|url|status|logs|down]\n' "$task_root/current"

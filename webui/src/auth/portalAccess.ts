@@ -7,12 +7,13 @@ export function resolvePortalAccess(
   localViewer: boolean,
   accountLoginEnabled: boolean,
   role: PortalAccountRole,
+  dockerEdition = false,
 ) {
   return {
     isPlayer: accountLoginEnabled && role === 'player',
     canAccessOwnerSurfaces: localViewer || !accountLoginEnabled || role === 'owner',
     canAccessServerUpdates: role !== 'player' && (localViewer || role === 'owner' || role === 'admin'),
-    canAccessSetup: localViewer,
+    canAccessSetup: localViewer || (dockerEdition && (!accountLoginEnabled || role === 'owner')),
   }
 }
 
@@ -23,5 +24,6 @@ export function usePortalAccess() {
     isLocalViewer(),
     portalAuth?.status.accountLoginEnabled === true,
     role,
+    import.meta.env.VITE_DST_EDITION === 'docker',
   )
 }

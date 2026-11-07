@@ -4,6 +4,10 @@ task_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$task_root"
 command -v docker >/dev/null 2>&1 || { echo 'Docker is required. Run this inside Linux or your WSL distribution.' >&2; exit 1; }
 docker compose version >/dev/null
+portal_links() {
+  docker compose exec -T dst cat /data/state/DuneServer/last-url.txt |
+    python3 packaging/docker/portal_urls.py $(hostname -I 2>/dev/null || true)
+}
 case "${1:-up}" in
   up)
     docker compose -f packaging/docker/compose.assets.yaml build
@@ -17,7 +21,7 @@ case "${1:-up}" in
     while [ "$task_attempt" -lt 30 ]; do
       if docker compose exec -T dst pwsh -NoLogo -NoProfile -File /opt/dst/healthcheck.ps1 >/dev/null 2>&1; then
         printf '\nOpen DST in your browser:\n'
-        docker compose exec -T dst cat /data/state/DuneServer/last-url.txt
+        portal_links
         exit 0
       fi
       task_attempt=$((task_attempt + 1))
@@ -26,7 +30,7 @@ case "${1:-up}" in
     echo 'DST has not become ready. Inspect: sh bin/dst-docker logs' >&2
     exit 1
     ;;
-  url) docker compose exec -T dst cat /data/state/DuneServer/last-url.txt ;;
+  url) portal_links ;;
   status) docker compose ps ;;
   logs) docker compose logs --tail=80 ;;
   down) docker compose down ;;

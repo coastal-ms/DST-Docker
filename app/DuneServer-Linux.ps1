@@ -271,7 +271,11 @@ Write-DuneLog "Serving from: $script:DistRoot"
 Write-DuneLog "Headless: $script:DuneHeadlessMode  OpenBrowser: $script:DuneOpenBrowser  PreferredPort: $script:DunePreferredPort"
 
 try {
-    Start-DuneHttpServer -DistRoot $script:DistRoot -PreferredPort $script:DunePreferredPort -Token $script:LaunchToken
+    $bindAddress = '127.0.0.1'
+    if ($env:DST_HOSTING_BACKEND -eq 'docker') {
+        $bindAddress = if ($env:DST_HTTP_BIND_ADDRESS) { $env:DST_HTTP_BIND_ADDRESS } else { '0.0.0.0' }
+    }
+    Start-DuneHttpServer -DistRoot $script:DistRoot -PreferredPort $script:DunePreferredPort -Token $script:LaunchToken -BindAddress $bindAddress
 } finally {
     if ($browserJob) {
         try { Stop-Job -Job $browserJob -ErrorAction SilentlyContinue } catch {}
