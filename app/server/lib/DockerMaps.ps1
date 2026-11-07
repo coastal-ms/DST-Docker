@@ -3,10 +3,15 @@ function Get-DuneDockerDeepDesertInstances {
     if(-not $reply.ok){throw $reply.error}
     $metadata=$reply.data
     $games=@($metadata.plan.games | Where-Object {$_.map -ceq 'DeepDesert_1'})
-    $dimensions=Invoke-DuneSqlQuery -Ip docker -ReadOnly $true -Sql "SELECT partition_id, dimension_index FROM dune.world_partition WHERE map='DeepDesert_1';"
-    if(-not $dimensions.ok){throw 'Deep Desert partition identities could not be verified.'}
     $lookup=@{}
-    foreach($row in (ConvertTo-DuneRowMaps -Result $dimensions)){$lookup[[int]$row.partition_id]=[int]$row.dimension_index}
+    $active=@($metadata.services|Where-Object {$_.state -in @('running','restarting') -and $_.component -in @($games|ForEach-Object {"game-$($_.partition)"})})
+    # A stopped world has no active instances to resolve. Its saved partition
+    # selections can be reviewed without waking the database or inventing IDs.
+    if($active.Count -gt 0){
+        $dimensions=Invoke-DuneSqlQuery -Ip docker -ReadOnly $true -Sql "SELECT partition_id, dimension_index FROM dune.world_partition WHERE map='DeepDesert_1';"
+        if(-not $dimensions.ok){throw 'Deep Desert partition identities could not be verified.'}
+        foreach($row in (ConvertTo-DuneRowMaps -Result $dimensions)){$lookup[[int]$row.partition_id]=[int]$row.dimension_index}
+    }
     $instances=@(foreach($game in $games){
         $entry=@($metadata.services|Where-Object {$_.component -eq "game-$($game.partition)"}) | Select-Object -First 1
         if(-not $entry -or $entry.state -notin @('running','restarting')){continue}

@@ -22,6 +22,12 @@ function Get-DuneDbContext {
         if (-not (Test-Path -LiteralPath '/data/config/DuneServer/docker-database.json')) {
             return @{ ok=$false; status=503; message='Connect a Docker game database in setup first.' }
         }
+        $reply=Invoke-DuneDockerManager -Request @{action='status'}
+        if(-not $reply.ok){return @{ok=$false;status=503;message='Docker database availability could not be verified. Retry when management is available.'}}
+        $database=$reply.data.database
+        if($database -and ($database.state -ne 'running' -or $database.health -in @('starting','unhealthy'))){
+            return @{ok=$false;status=503;message='The Docker game database is stopped or not ready. Start the battlegroup when you are ready to use database controls.'}
+        }
         return @{ ok=$true; ip='docker'; backend='docker' }
     }
     if (-not (Get-Command Invoke-V6Ssh -ErrorAction SilentlyContinue)) {

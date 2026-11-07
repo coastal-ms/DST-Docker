@@ -56,4 +56,35 @@ Describe 'Native specialized settings retain shared behavior' {
         Mock Invoke-DuneSqlQuery {@{ok=$true;rows=@()}}
         {Get-DuneDockerDeepDesertInstances}|Should -Throw '*no longer matches*'
     }
+
+    It 'reviews configured Deep Desert partitions without querying or starting the stopped database' {
+        Mock Invoke-DuneDockerManager {@{ok=$true;data=@{plan=@{games=@(@{partition=8;map='DeepDesert_1'},@{partition=12;map='DeepDesert_1'})};services=@(@{component='game-8';state='exited'},@{component='game-12';state='created'})}}}
+        Mock Invoke-DuneSqlQuery {throw 'Stopped database must not be queried.'}
+        $result=Get-DuneDockerDeepDesertInstances
+        @($result.Instances).Count|Should -Be 0
+        @($result.ConfiguredPartitionIds)|Should -Be @(8,12)
+        Should -Invoke Invoke-DuneSqlQuery -Times 0
+        Should -Invoke Invoke-DuneDockerManager -Times 1 -ParameterFilter {$Request.action -eq 'status'}
+    }
+
+    It 'reports a stopped or unhealthy owned database unavailable before any SQL is issued' {
+        Mock Test-Path {param($LiteralPath);$LiteralPath -eq '/data/config/DuneServer/docker-database.json'}
+        foreach($observed in @(@{state='exited';health='healthy'},@{state='running';health='starting'},@{state='running';health='unhealthy'})){
+            $script:databaseState=$observed
+            Mock Invoke-DuneDockerManager {@{ok=$true;data=@{database=$script:databaseState}}}
+            $context=Get-DuneDbContext
+            $context.ok|Should -BeFalse
+            $context.status|Should -Be 503
+            $context.message|Should -Match 'stopped or not ready'
+        }
+        Should -Invoke Invoke-DuneDockerSqlRaw -Times 0
+    }
+
+    It 'permits a healthy database and refuses an unavailable management service' {
+        Mock Test-Path {param($LiteralPath);$LiteralPath -eq '/data/config/DuneServer/docker-database.json'}
+        Mock Invoke-DuneDockerManager {@{ok=$true;data=@{database=@{state='running';health='healthy'}}}}
+        (Get-DuneDbContext).ok|Should -BeTrue
+        Mock Invoke-DuneDockerManager {@{ok=$false}}
+        (Get-DuneDbContext).status|Should -Be 503
+    }
 }
