@@ -938,6 +938,7 @@ FROM updated;
 
 function Invoke-DuneVehicleRefuel {
     param([string]$Ip, [long]$VehicleId)
+    if($env:DST_HOSTING_BACKEND -eq 'docker'){return Invoke-DuneDockerVehicleRefuel -Ip $Ip -VehicleId $VehicleId}
     if ($VehicleId -le 0) { return @{ ok = $false; error = 'vehicle_id is required.' } }
 
     $clsSql = "SELECT class::text AS cls FROM dune.actors WHERE id = $VehicleId::bigint;"

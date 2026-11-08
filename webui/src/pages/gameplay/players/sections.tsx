@@ -3751,6 +3751,7 @@ function RefuelVehicleForm({ busy, controllerId, playerName, onSubmit }: {
   if (vehicles.length === 0) return <EmptyBox msg={`No vehicles found for ${playerName}.`} />
   return (
     <div className="space-y-2">
+      {import.meta.env.VITE_DST_EDITION === 'docker' && <p className="text-xs text-text-muted">Stop the vehicle map before refuelling. DST saves full fuel for its next start.</p>}
       <label className="block text-[11px] uppercase tracking-wider text-text-dim mb-1">Vehicle</label>
       <select value={vid} disabled={busy} className={formSelectCls} onChange={e => setVid(e.target.value)}>
         {vehicles.map(v => <option key={v.id} value={v.id}>{prettyVehicle(v)}</option>)}

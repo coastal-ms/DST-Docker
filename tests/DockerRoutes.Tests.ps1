@@ -82,7 +82,12 @@ Describe 'Docker adapter routing boundary' {
     It 'opens the existing module repair adapter without other vehicle write methods' {
         Test-DuneDockerRouteQualified -Method POST -Path '/api/gameplay/players/repair-vehicle'|Should -BeTrue
         foreach($method in @('GET','PUT','DELETE')){Test-DuneDockerRouteQualified -Method $method -Path '/api/gameplay/players/repair-vehicle'|Should -BeFalse}
-        foreach($path in @('/api/gameplay/players/repair-vehicle/all','/api/gameplay/players/refuel-vehicle','/api/gameplay/vehicles/repair')){Test-DuneDockerRouteQualified -Method POST -Path $path|Should -BeFalse}
+        foreach($path in @('/api/gameplay/players/repair-vehicle/all','/api/gameplay/vehicles/repair')){Test-DuneDockerRouteQualified -Method POST -Path $path|Should -BeFalse}
+    }
+    It 'opens only the exact native refuel method' {
+        Test-DuneDockerRouteQualified -Method POST -Path '/api/gameplay/players/refuel-vehicle'|Should -BeTrue
+        foreach($method in @('GET','PUT','DELETE')){Test-DuneDockerRouteQualified -Method $method -Path '/api/gameplay/players/refuel-vehicle'|Should -BeFalse}
+        Test-DuneDockerRouteQualified -Method POST -Path '/api/gameplay/players/refuel-vehicle/all'|Should -BeFalse
     }
 
     It 'allows derived inventory reads and refresh without opening arbitrary item methods' {
