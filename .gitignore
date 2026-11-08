@@ -69,3 +69,6 @@ tools/atlas/__pycache__/
 /app/DST/INI Backups/
 # Local HTTPS configuration contains installation-specific volume names.
 https.compose.json
+
+# Persistent local host backup folder binding
+/mirror.compose.json

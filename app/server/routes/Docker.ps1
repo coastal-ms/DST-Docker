@@ -90,7 +90,7 @@ Register-DuneRoute -Method POST -Path '/api/docker/setup' -Handler {
     param($req, $res, $routeParams, $body)
     if ($env:DST_HOSTING_BACKEND -ne 'docker') { Write-DuneError -Response $res -Status 404 -Message 'Docker hosting is not enabled.'; return }
     $action = [string]$body.action
-    if ($action -notin @('database.create','database.initialize','database.migrate','database.start','database.stop','world.configure','credentials.save','connections.prepare','services.prepare','services.start','services.stop','games.refresh-adapters','backups.create','backups.verify','backups.restore','backups.cleanup.recover','backups.export','backups.schedule.recover')) {
+    if ($action -notin @('database.create','database.initialize','database.migrate','database.start','database.stop','world.configure','credentials.save','connections.prepare','services.prepare','services.start','services.stop','games.refresh-adapters','backups.create','backups.verify','backups.restore','backups.cleanup.recover','backups.export','backups.schedule.recover','backups.mirror.set','backups.mirror.sync','backups.mirror.recover','backups.mirror.cancel')) {
         Write-DuneError -Response $res -Status 400 -Message 'Unsupported setup action.'; return
     }
     $request = @{action=$action}
@@ -103,6 +103,7 @@ Register-DuneRoute -Method POST -Path '/api/docker/setup' -Handler {
         if (-not [int]::TryParse([string]$body.port,[ref]$port)) { Write-DuneError -Response $res -Status 400 -Message 'Choose a database port.'; return }
         $request.port=$port
     }
+    if ($action -eq 'backups.mirror.set') { $request.enabled=$body.enabled }
     if ($action -eq 'credentials.save') { $request.token=[string]$body.token }
     if ($action -eq 'world.configure') { $request.profile=$body.profile }
     if ($action -in @('backups.verify','backups.restore','backups.export')) { $request.backupId=[string]$body.backupId }

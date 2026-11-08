@@ -418,8 +418,16 @@ class Engine:
         self.upload_component_files(identifier,project,'db-import',{'tmp/dst-job.py':{'data':script}})
         return identifier
 
+    def mirror_destination(self):
+        import mirror_jobs
+        return mirror_jobs.destination(self)
+
+    def create_backup_mirror_job(self,project,request):
+        import mirror_jobs
+        return mirror_jobs.create(self,project,request)
+
     def backup_report(self,identifier,project,component):
-        if component not in {'db-backup','db-verify','db-restore','db-migrate','db-files','db-export','db-import'}:raise ValueError('Invalid backup report component.')
+        if component not in {'db-backup','db-verify','db-restore','db-migrate','db-files','db-export','db-import','db-mirror'}:raise ValueError('Invalid backup report component.')
         self.assert_owned(identifier,project,component)
         connection=EngineConnection()
         try:
@@ -444,13 +452,13 @@ class Engine:
         result=[]
         for row in rows:
             component=(row.get('Labels') or {}).get('io.dst.component')
-            if component not in {'db-backup','db-verify','db-files','db-restore','db-export','db-import'}:continue
+            if component not in {'db-backup','db-verify','db-files','db-restore','db-export','db-import','db-mirror'}:continue
             result.append({'id':row['Id'],'name':(row.get('Names') or [''])[0].lstrip('/'),
                            'component':component,'createdAt':row['Created'],'state':row['State']})
         return sorted(result,key=lambda row:(row['createdAt'],row['id']),reverse=True)
 
     def remove_backup_job(self,project,job):
-        if job.get('component') not in {'db-backup','db-verify','db-files','db-restore','db-export','db-import'}:raise ValueError('Only backup helper jobs may be cleaned up.')
+        if job.get('component') not in {'db-backup','db-verify','db-files','db-restore','db-export','db-import','db-mirror'}:raise ValueError('Only backup helper jobs may be cleaned up.')
         observed=self.assert_owned(job['id'],project,job['component'])
         if observed['State']['Status']!='exited':raise ValueError('A backup helper must finish before cleanup.')
         # No force and no volume deletion. A start race is rejected by Docker.

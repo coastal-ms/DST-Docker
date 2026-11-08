@@ -26,5 +26,6 @@ COPY packaging/docker/asset_activation.py /opt/dst-manager/asset_activation.py
 COPY packaging/docker/service_generations.py /opt/dst-manager/service_generations.py
 COPY packaging/docker/world_update.py /opt/dst-manager/world_update.py
 COPY packaging/docker/settings_service.py packaging/docker/settings_client.py packaging/docker/settings_adapter.py /opt/dst-manager/
+COPY packaging/docker/backup_mirror.py packaging/docker/backup_mirror_control.py packaging/docker/mirror_jobs.py /opt/dst-manager/
 WORKDIR /opt/dst-manager
 ENTRYPOINT ["python3", "-B", "manager.py"]

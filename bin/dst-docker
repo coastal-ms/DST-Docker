@@ -8,13 +8,19 @@ cd "$task_root"
 task_https_state=$task_root
 if [ -f "$task_root/../../installation.json" ]; then task_https_state=$(CDPATH= cd -- "$task_root/../.." && pwd); fi
 task_https_override=${DST_HTTPS_OVERRIDE:-$task_https_state/https.compose.json}
+task_mirror_override=${DST_MIRROR_OVERRIDE:-$task_https_state/mirror.compose.json}
 compose() {
-  if [ -f "$task_https_override" ]; then
-    docker compose -f "$task_root/compose.yaml" -f "$task_https_override" "$@"
-  else
-    docker compose -f "$task_root/compose.yaml" "$@"
-  fi
+  if [ -f "$task_mirror_override" ]; then set -- -f "$task_mirror_override" "$@"; fi
+  if [ -f "$task_https_override" ]; then set -- -f "$task_https_override" "$@"; fi
+  docker compose -f "$task_root/compose.yaml" "$@"
 }
+prepare_mirror() {
+  if [ -f "$task_mirror_override" ] && [ -z "${1:-}" ]; then return; fi
+  task_mirror_project=$(compose config --format json | python3 -c 'import json,sys;print(json.load(sys.stdin)["name"])')
+  task_mirror_directory=${1:-${DST_BACKUP_MIRROR_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/dst-docker/backups/$task_mirror_project}}
+  python3 packaging/docker/mirror_config.py --project "$task_mirror_project" --directory "$task_mirror_directory" --output "$task_mirror_override"
+}
+
 task_port=''
 case "${1:-up}" in
   up) if [ "$#" -gt 1 ]; then [ "$#" -eq 3 ] && [ "$2" = '--port' ] || { echo 'Usage: sh bin/dst-docker up [--port PORT]' >&2; exit 1; }; task_port=$3; fi;;
@@ -84,6 +90,7 @@ wait_portal() {
 }
 case "${1:-up}" in
   up)
+    prepare_mirror
     docker compose -f packaging/docker/compose.assets.yaml build
     if ! docker compose -f packaging/docker/compose.assets.yaml run --rm --entrypoint python3 assets -c 'import json; from pathlib import Path; state=json.loads(Path("/srv/dst/install-state.json").read_text()); raise SystemExit(0 if state.get("state")=="downloaded" else 1)' >/dev/null 2>&1; then
       docker compose -f packaging/docker/compose.assets.yaml run --rm assets
@@ -130,9 +137,15 @@ case "${1:-up}" in
     task_project=$(compose config --format json | python3 -c 'import json,sys;print(json.load(sys.stdin)["name"])')
     python3 packaging/docker/https.py export-root --project "$task_project" --output "$2"
     ;;
+  mirror-folder)
+    [ "$#" -le 2 ] || { echo 'Usage: sh bin/dst-docker mirror-folder [NEW_FOLDER]' >&2; exit 1; }
+    prepare_mirror "${2:-}"
+    python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["x-dst-backup-mirror-folder"])' "$task_mirror_override"
+    printf '\nThe folder is prepared. Run up to apply its mount, then enable Local backup mirror in Database. Existing copies are never pruned by DST.\n'
+    ;;
   url) portal_links ;;
   status) compose ps ;;
   logs) compose logs --tail=80 ;;
   down) compose down ;;
-  *) echo 'Usage: sh bin/dst-docker up [--port PORT] | port PORT | https HOST_IPV4 [HTTPS_PORT] | https-root OUTPUT.crt | url | status | logs | down' >&2; exit 1 ;;
+  *) echo 'Usage: sh bin/dst-docker up [--port PORT] | port PORT | https HOST_IPV4 [HTTPS_PORT] | https-root OUTPUT.crt | mirror-folder [NEW_FOLDER] | url | status | logs | down' >&2; exit 1 ;;
 esac

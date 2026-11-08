@@ -52,6 +52,10 @@ def retained_ids(state,keep):
                 key=lambda row:row[1]['createdAt'],reverse=True)
     protected={value.get('backupId') for value in (state.get('restore',{}),state.get('updateRun',{}))}
     if rows:protected.add(rows[0][0])
+    mirror=state.get('backupMirror',{});run=mirror.get('run',{})
+    if run.get('phase') in {'preparing','running','failed'}:protected.update(run.get('backupIds',[]))
+    if mirror.get('enabled'):
+        protected.update(key for key,value in rows if mirror.get('mirrored',{}).get(value['name'],{}).get('sha256')!=value.get('sha256'))
     return [key for key,value in rows[max(1,keep):] if key not in protected
             and value.get('verification',{}).get('phase') not in {'preparing','running'}
             and value.get('export',{}).get('phase') not in {'preparing','running'}

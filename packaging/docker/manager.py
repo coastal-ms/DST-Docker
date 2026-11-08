@@ -33,6 +33,7 @@ import world_update
 import resource_policy
 import regis_compatibility
 import backup_schedule
+import backup_mirror_control
 import sys
 import shutil
 
@@ -179,6 +180,7 @@ def public_state(state, engine):
     if state.get('operation',{}).get('phase')!='running':
         observe_backup_jobs(state,engine)
         observe_backup_cleanup(state,engine)
+        backup_mirror_control.observe(state,engine,save)
     backups=[]
     for identifier,entry in state.get('backups',{}).items():
         row={key:entry[key] for key in ['name','phase','createdAt','finishedAt','bytes','sha256','error','operationId','scheduledSlot','requestId','source','uploadId'] if key in entry}
@@ -204,6 +206,7 @@ def public_state(state, engine):
             'connectionServices':connections,'services':services,'desiredState':state.get('desiredState','stopped'),
             'plan':public_plan(state['worldPlan']) if state.get('worldPlan') else None,
             'operation':state.get('operation'),'backups':sorted(backups,key=lambda row:row['createdAt'],reverse=True),
+            'backupMirror':backup_mirror_control.snapshot(state,engine),
             'backupCleanup':{key:state['backupCleanup'][key] for key in ('phase','error','startedAt') if key in state['backupCleanup']} if state.get('backupCleanup') else None,
             'pendingMemoryChange':state.get('pendingMemoryChange'),
             'update':{key:state['updateRun'][key] for key in ('id','phase','build','error','recoveryError','committed','startedAt','finishedAt') if key in state['updateRun']} if state.get('updateRun') else None,
@@ -267,7 +270,7 @@ def start_backup(state,engine,backup_id=None,scheduled_resume=None):
 def start_backup_cleanup(state,engine,ids):
     if state.get('backupCleanup'):raise ValueError('Finish the previous backup cleanup before deleting more files.')
     if not isinstance(ids,list) or not 1<=len(ids)<=100 or any(not isinstance(value,str) for value in ids) or len(set(ids))!=len(ids):raise ValueError('Select one to100 distinct backup records.')
-    protected={value.get('backupId') for value in (state.get('restore',{}),state.get('updateRun',{}))}
+    protected={value.get('backupId') for value in (state.get('restore',{}),state.get('updateRun',{}))} | backup_mirror_control.protected_ids(state)
     files=[]
     for identifier in ids:
         entry=state.get('backups',{}).get(identifier)
@@ -375,6 +378,8 @@ def protected_backup_jobs(state):
         if entry.get('phase') in {'preparing','running'}:protected.add(entry.get('job'))
         if entry.get('verification',{}).get('phase') in {'preparing','running'}:protected.add(entry['verification'].get('job'))
         if entry.get('export',{}).get('phase') in {'preparing','running'}:protected.add(entry['export'].get('job'))
+    mirror=state.get('backupMirror',{}).get('run',{})
+    if mirror.get('phase') in {'preparing','running','failed'}:protected.add(mirror.get('job'))
     return protected
 
 
@@ -400,6 +405,7 @@ def backup_schedule_tick(engine=None,now=None):
         if state.get('operation',{}).get('phase')=='running':return
         observe_backup_jobs(state,engine)
         observe_backup_cleanup(state,engine)
+        backup_mirror_control.tick(state,engine,save)
         for entry in state.get('backups',{}).values():
             if entry.get('source')=='import' and entry.get('phase') in {'preparing','running'}:
                 if entry['phase']=='preparing' or engine.assert_owned(entry['job'],state['id'],'db-import')['State']['Status']=='created':
@@ -1432,6 +1438,8 @@ def run_operation(state,engine,request):
         elif action=='backups.export':start_backup_export(state,engine,request.get('backupId'))
         elif action=='backups.import':start_backup_import(state,engine,request)
         elif action=='backups.schedule.recover':recover_scheduled_backup(state,engine)
+        elif action=='backups.mirror.sync':backup_mirror_control.start(state,engine,save,check_all=True)
+        elif action=='backups.mirror.recover':backup_mirror_control.start(state,engine,save,retry=True)
         else:raise ValueError('Unsupported Docker operation.')
         state['operation'].update(phase='completed',finishedAt=time.time())
     except (ValueError,EngineError) as error:
@@ -1475,6 +1483,10 @@ def dispatch(request, engine=None):
         if action=='backups.schedule.set':
             backup_schedule.configure(state,request,time.time());state.pop('backupSchedulerError',None);save(state)
             return backup_schedule.snapshot(state,time.time(),bool(BACKUP_WORKER and BACKUP_WORKER.is_alive()))
+        if action=='backups.mirror.set':
+            backup_mirror_control.configure(state,engine,save,request.get('enabled'));return backup_mirror_control.snapshot(state,engine)
+        if action=='backups.mirror.cancel':
+            backup_mirror_control.cancel_failed(state,engine,save);return backup_mirror_control.snapshot(state,engine)
         if action=='backups.jobs.prune':return prune_backup_jobs(state,engine,request.get('keepLast',10),request.get('keepDays',0))
         if action == 'files.open':
             prepare_file_browser(state, engine)
@@ -1505,7 +1517,7 @@ def dispatch(request, engine=None):
             if not reply.get('ok'):raise ValueError(reply.get('error','Settings backups could not be created.'))
             return reply['data']
         if action in {'database.create','database.initialize','database.migrate','database.start','database.stop','world.configure','connections.prepare',
-                      'services.prepare','services.start','services.stop','services.restart','services.refresh-core-adapters','scale.prepare','maps.start','maps.stop','maps.restart','maps.observers.prepare','files.prepare','settings.prepare','regis.set','regis.recover','logs.export','updates.stage','updates.apply','updates.recover','rmq.publish','games.refresh-adapters','backups.create','backups.verify','backups.restore','backups.delete','backups.cleanup.recover','backups.export','backups.import','backups.schedule.recover'}:
+                      'services.prepare','services.start','services.stop','services.restart','services.refresh-core-adapters','scale.prepare','maps.start','maps.stop','maps.restart','maps.observers.prepare','files.prepare','settings.prepare','regis.set','regis.recover','logs.export','updates.stage','updates.apply','updates.recover','rmq.publish','games.refresh-adapters','backups.create','backups.verify','backups.restore','backups.delete','backups.cleanup.recover','backups.export','backups.import','backups.schedule.recover','backups.mirror.sync','backups.mirror.recover'}:
             if action=='regis.set' and (type(request.get('enabled')) is not bool or type(request.get('acknowledgeStoredTanks',False)) is not bool):
                 raise ValueError('Supply JSON booleans for Tank support and the stored-Tank acknowledgement.')
             if action=='updates.apply' and (not isinstance(request.get('expectedBuild'),str) or not re.fullmatch(r'[0-9]{1,18}',request['expectedBuild']) or type(request.get('allowOnline',False)) is not bool or type(request.get('withTanks',False)) is not bool):raise ValueError('Supply a valid build and JSON boolean online-player and Tank authorization.')

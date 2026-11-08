@@ -10,6 +10,7 @@ import { isLocalViewer } from '../util/viewer'
 import { createDockerBackup, importDockerBackup, verifyDockerBackup, recoverDockerBackupCleanup, prepareDockerBackupDownload, recoverDockerScheduledBackup } from '../api/docker'
 import DockerRestoreDialog from './docker/DockerRestoreDialog'
 import { DockerDatabaseControl } from './docker/DockerDatabaseControl'
+import { DockerBackupMirror } from './docker/DockerBackupMirror'
 import {
   getDbInfo,
   runSql,
@@ -769,7 +770,7 @@ export function Database() {
       <BackupScheduleCard vmRunning={vmRunning} showToast={showToast} />
 
       {/* Local backup mirror — copies each new VM backup into a user-chosen folder. */}
-      <BackupMirrorCard vmRunning={vmRunning} showToast={showToast} />
+      {docker ? <DockerBackupMirror /> : <BackupMirrorCard vmRunning={vmRunning} showToast={showToast} />}
 
       {/* Fix on-demand maps — captured output */}
       <CollapsibleCard

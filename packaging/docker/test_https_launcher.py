@@ -18,6 +18,8 @@ class HttpsLauncherTests(unittest.TestCase):
         docker.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$DST_FIXTURE_DOCKER_LOG"\ncase "$*" in *"config --format json"*) echo \'{"name":"fixture"}\';; *"Get-DuneDockerConsolePort"*) echo 8088;; *"last-url.txt"*) echo \'http://127.0.0.1:18088/?t=synthetic-only\';; esac\nexit 0\n');docker.chmod(0o755)
         self.env={**os.environ,'PATH':str(commands)+':'+os.environ['PATH'],'DST_FIXTURE_DOCKER_LOG':str(self.log)}
         self.env.pop('DST_HTTPS_OVERRIDE',None)
+        self.env.pop('DST_MIRROR_OVERRIDE',None)
+        self.env.pop('DST_BACKUP_MIRROR_DIR',None)
         self.releases=[]
         for name in ('a'*64,'b'*64):
             release=self.prefix/'releases'/name;(release/'bin').mkdir(parents=True)
@@ -25,6 +27,7 @@ class HttpsLauncherTests(unittest.TestCase):
             (release/'compose.yaml').write_text('name: fixture\nservices: {}\n')
             tools=release/'packaging/docker';tools.mkdir(parents=True)
             shutil.copy(Path(__file__).with_name('portal_urls.py'),tools/'portal_urls.py')
+            shutil.copy(Path(__file__).with_name('mirror_config.py'),tools/'mirror_config.py')
             (tools/'https.py').write_text("import json,sys\na=sys.argv; value=lambda flag:a[a.index(flag)+1]\np=value('--output'); old=json.load(open(p)); old['x-dst-https-origin']='https://'+value('--address')+':'+value('--port'); old['x-dst-http-internal-port']=int(value('--upstream-port')); json.dump(old,open(p,'w'))\n")
             self.releases.append(release)
         self.override=self.prefix/'https.compose.json'
@@ -69,3 +72,25 @@ class HttpsLauncherTests(unittest.TestCase):
         result=self.run_launcher('port','9191');self.assertEqual(result.returncode,0,result.stderr)
         self.assertEqual(json.loads(self.override.read_text())['x-dst-https-origin'],'https://192.0.2.2:9191')
         self.assertNotIn('down',self.log.read_text())
+
+    def test_upgrade_preserves_mirror_folder_and_copies_outside_releases(self):
+        folder=self.root/'host-backups'
+        first=self.run_launcher('mirror-folder',str(folder))
+        self.assertEqual(first.returncode,0,first.stderr)
+        override=self.prefix/'mirror.compose.json'
+        original=override.read_bytes()
+        canary=folder/'existing-backup.dump';canary.write_bytes(b'existing backup copy')
+        for index in (0,1):
+            result=self.run_launcher('mirror-folder',release=index)
+            self.assertEqual(result.returncode,0,result.stderr)
+            result=self.run_launcher('status',release=index)
+            self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(override.read_bytes(),original)
+        self.assertEqual(canary.read_bytes(),b'existing backup copy')
+        calls=self.log.read_text().splitlines()
+        expected='-f '+str(self.override)+' -f '+str(override)+' ps'
+        self.assertEqual(sum(expected in line for line in calls),2)
+        self.assertFalse(any((release/'mirror.compose.json').exists() for release in self.releases))
+        changed=self.run_launcher('mirror-folder',str(self.root/'different-folder'),release=1)
+        self.assertNotEqual(changed.returncode,0)
+        self.assertEqual(override.read_bytes(),original)
