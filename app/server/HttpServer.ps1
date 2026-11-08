@@ -1037,6 +1037,8 @@ function Start-DuneHttpServer {
     if($env:DST_HOSTING_BACKEND -eq 'docker'){
         try {Start-DuneDockerRestartScheduler -ServerDir $script:DuneServerDir -HttpReady $httpReady}
         catch {Write-DuneLog ('Docker scheduler launch failed: '+$_.Exception.Message) 'WARN'}
+        try {Start-DuneDockerChatScheduler -ServerDir $script:DuneServerDir -HttpReady $httpReady}
+        catch {Write-DuneLog ('Docker chat scheduler launch failed: '+$_.Exception.Message) 'WARN'}
     } elseif (-not ((Get-Command Test-DuneSoloInstallation -ErrorAction SilentlyContinue) -and (Test-DuneSoloInstallation)) -and (Get-Command Start-DuneRestartScheduler -ErrorAction SilentlyContinue)) {
         try { Start-DuneRestartScheduler -ServerDir $script:DuneServerDir -HttpReady $httpReady } catch {
             if (Get-Command Write-DuneLog -ErrorAction SilentlyContinue) {
@@ -1102,6 +1104,10 @@ function Start-DuneHttpServer {
                 $backgroundStopped = $false
                 Write-DuneLog "Restart scheduler shutdown failed: $($_.Exception.Message)" 'WARN'
             }
+        }
+        if (Get-Command Stop-DuneDockerChatScheduler -ErrorAction SilentlyContinue) {
+            try { $backgroundStopped = (Stop-DuneDockerChatScheduler) -and $backgroundStopped }
+            catch { $backgroundStopped=$false; Write-DuneLog ('Docker chat scheduler shutdown failed: '+$_.Exception.Message) 'WARN' }
         }
         if ($backgroundStopped) { $httpReady.Dispose() }
         # Wait briefly for in-flight handlers to finish, then reap + tear down.

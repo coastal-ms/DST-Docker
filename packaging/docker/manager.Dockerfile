@@ -14,6 +14,7 @@ COPY packaging/docker/world_template.py /opt/dst-manager/world_template.py
 COPY packaging/docker/game_plan.py packaging/docker/connection_services.py /opt/dst-manager/
 COPY packaging/docker/core_services.py packaging/docker/native-game.sh /opt/dst-manager/
 COPY packaging/docker/rmq_commands.py /opt/dst-manager/rmq_commands.py
+COPY packaging/docker/rmq_chat.py /opt/dst-manager/rmq_chat.py
 COPY packaging/docker/scale_protocol.py packaging/docker/scaler.py /opt/dst-manager/
 COPY packaging/docker/director_policy.py /opt/dst-manager/director_policy.py
 COPY packaging/docker/file_browser.py /opt/dst-manager/file_browser.py

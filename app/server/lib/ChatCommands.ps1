@@ -575,6 +575,9 @@ function New-DuneChatCommandsDefault {
 function Test-DuneChatCommandsReady {
     param([hashtable]$State)
     if (-not $State) { return @{ ready = $false; reason = 'no-state' } }
+    if($env:DST_HOSTING_BACKEND -eq 'docker' -and @($State.channels).Count -eq 0){
+        return @{ready=$false;reason='no-channels-enabled';message='Select at least one chat channel to listen on.'}
+    }
     $anyOn = $false
     foreach ($k in @($State.commands.Keys)) {
         if ($State.commands[$k].enabled) { $anyOn = $true; break }
@@ -591,10 +594,15 @@ function Read-DuneChatCommandsState {
     $def = New-DuneChatCommandsDefault
     if (-not (Test-Path -LiteralPath $path)) { return $def }
     try {
-        $obj = (Get-Content -LiteralPath $path -Raw -ErrorAction Stop) | ConvertFrom-Json -ErrorAction Stop
+        $raw = Get-Content -LiteralPath $path -Raw -ErrorAction Stop
+        $obj = if($env:DST_HOSTING_BACKEND -eq 'docker'){
+            $raw|ConvertFrom-Json -DateKind String -ErrorAction Stop
+        }else{$raw|ConvertFrom-Json -ErrorAction Stop}
         $out = $def
+        if($env:DST_HOSTING_BACKEND -eq 'docker' -and $obj.replyTitle){$out.replyTitle=[string]$obj.replyTitle}
         if ($null -ne $obj.enabled) { $out.enabled = [bool]$obj.enabled }
         if ($obj.channels)   { $out.channels = @($obj.channels) }
+        elseif($env:DST_HOSTING_BACKEND -eq 'docker' -and $null -ne $obj.channels){$out.channels=@()}
         if ($obj.lastError)  { $out.lastError = [string]$obj.lastError }
         if ($obj.lastSeenAt) { $out.lastSeenAt = [string]$obj.lastSeenAt }
         if ($null -ne $obj.pollSeconds) {
@@ -647,8 +655,30 @@ function Get-DuneChatCommandPollSeconds {
     return $n
 }
 
-function Save-DuneChatCommandsState {    param([hashtable]$State)
+function Save-DuneChatCommandsState {    param([hashtable]$State,[switch]$RuntimeOnly)
     $path = Get-DuneChatCommandsStatePath
+    if($env:DST_HOSTING_BACKEND -eq 'docker'){
+        try {
+            return Invoke-WithDuneLock -Name 'docker-chat-state' -Script {
+                $current=if(Test-Path -LiteralPath $path){Read-DuneChatCommandsState}elseif($RuntimeOnly){New-DuneChatCommandsDefault}else{$null}
+                $saved=@{};foreach($key in $State.Keys){$saved[$key]=$State[$key]}
+                if($current){
+                    if($RuntimeOnly){
+                        $saved=$current
+                        foreach($key in @('cooldowns','lastSeenAt','lastError')){$saved[$key]=$State[$key]}
+                    }else{
+                        foreach($key in @('cooldowns','lastSeenAt','lastError')){$saved[$key]=$current[$key]}
+                    }
+                }
+                $temp=$path+'.'+[guid]::NewGuid().ToString('N')+'.tmp'
+                try{
+                    [IO.File]::WriteAllText($temp,($saved|ConvertTo-Json -Depth 8),[Text.UTF8Encoding]::new($false))
+                    Move-Item -LiteralPath $temp -Destination $path -Force
+                }finally{if(Test-Path -LiteralPath $temp){Remove-Item -LiteralPath $temp -Force}}
+                return $true
+            }
+        }catch{return $false}
+    }
     try {
         ($State | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath $path -Encoding UTF8
         return $true
@@ -837,6 +867,7 @@ function Resolve-DuneChatCommandAction {
 # x-max-length with drop-head plus a TTL makes that impossible.
 function Initialize-DuneChatCommandQueue {
     param([string]$Ip)
+    if($env:DST_HOSTING_BACKEND -eq 'docker'){return Sync-DuneDockerChatQueue}
     if (-not (Get-Command Find-V6MqGamePod -ErrorAction SilentlyContinue)) {
         return @{ ok = $false; message = 'Broadcast helpers unavailable (Broadcast.ps1 not loaded).' }
     }
@@ -860,6 +891,7 @@ rabbit_binding:add({binding, XName, <<"#">>, QName, []}, <<"dst">>).
 # disabled DST is not quietly accumulating a copy of every message players type.
 function Remove-DuneChatCommandQueue {
     param([string]$Ip)
+    if($env:DST_HOSTING_BACKEND -eq 'docker'){return Invoke-DuneDockerChatQueue -Action delete}
     try { $pod = Find-V6MqGamePod -Ip $Ip } catch {
         return @{ ok = $false; message = $_.Exception.Message }
     }
@@ -883,6 +915,7 @@ end.
 function Get-DuneChatCommandMessages {
     param([string]$Ip, [int]$Max = 0)
     if ($Max -le 0) { $Max = $script:DuneChatDrainMax }
+    if($env:DST_HOSTING_BACKEND -eq 'docker'){return Invoke-DuneDockerChatQueue -Action drain -Maximum $Max}
     try { $pod = Find-V6MqGamePod -Ip $Ip } catch {
         return @{ ok = $false; message = $_.Exception.Message; messages = @() }
     }
@@ -1525,6 +1558,12 @@ function Invoke-DuneChatCommandTick {
         $handled = 0
         $dirty = $false
         foreach ($raw in @($drain.messages)) {
+            if($env:DST_HOSTING_BACKEND -eq 'docker'){
+                $latest=Read-DuneChatCommandsState
+                if(-not $latest.enabled){break}
+                $latest.cooldowns=$state.cooldowns
+                $state=$latest
+            }
             $msg = ConvertFrom-DuneChatMessage -Text $raw
             if (-not $msg) { continue }
             $act = Resolve-DuneChatCommandAction -Message $msg -State $state
@@ -1571,7 +1610,7 @@ function Invoke-DuneChatCommandTick {
         }
 
         if ($handled -gt 0) { $state.lastSeenAt = ([datetime]::UtcNow).ToString('o'); $dirty = $true }
-        if ($dirty) { [void](Save-DuneChatCommandsState -State $state) }
+        if ($dirty) { [void](Save-DuneChatCommandsState -State $state -RuntimeOnly:($env:DST_HOSTING_BACKEND -eq 'docker')) }
         return @{ ok = $true; acted = ($handled -gt 0); handled = $handled; scanned = @($drain.messages).Count }
     } catch {
         if (Get-Command Write-DuneLog -ErrorAction SilentlyContinue) {

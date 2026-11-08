@@ -240,7 +240,10 @@ Register-DuneRoute -Method PUT -Path '/api/gameplay/chat-commands' -Handler {
         # settings are saved either way, and the scheduler tick re-declares the
         # queue on its next pass if this did not land.
         $queue = @{ ok = $false; skipped = $true }
-        if ($wasEnabled -ne $state.enabled) {
+        if($env:DST_HOSTING_BACKEND -eq 'docker'){
+            $queue=Sync-DuneDockerChatQueue
+            $state=Read-DuneChatCommandsState
+        }elseif ($wasEnabled -ne $state.enabled) {
             try {
                 $ctx = Get-DuneDbContext
                 if ($ctx.ok) {

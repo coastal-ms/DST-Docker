@@ -172,3 +172,14 @@ Describe 'Native Landsraad method boundary' {
         Test-DuneDockerRouteQualified -Method POST -Path '/api/gameplay/landsraad/reset'|Should -BeFalse
     }
 }
+
+Describe 'Native chat command route boundary' {
+    It 'opens only settings and exact bookmark methods' {
+        foreach($method in @('GET','PUT')){Test-DuneDockerRouteQualified -Method $method -Path '/api/gameplay/chat-commands'|Should -BeTrue}
+        foreach($suffix in @('teleports','teleports/capture')){
+            foreach($method in @('POST','DELETE')){Test-DuneDockerRouteQualified -Method $method -Path ('/api/gameplay/chat-commands/'+$suffix)|Should -BeTrue}
+            Test-DuneDockerRouteQualified -Method PUT -Path ('/api/gameplay/chat-commands/'+$suffix)|Should -BeFalse
+        }
+        foreach($path in @('/api/gameplay/chat-commands/exec','/api/gameplay/chat-commands/teleports/extra')){Test-DuneDockerRouteQualified -Method POST -Path $path|Should -BeFalse}
+    }
+}

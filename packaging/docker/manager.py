@@ -21,6 +21,7 @@ from world_template import read_template, validate_profile, fresh_partition_sql
 from game_plan import plan_world, public_plan
 from connection_services import ensure_tls, queue_spec
 from rmq_commands import publish as publish_commands
+from rmq_chat import operate as chat_queue
 from scale_protocol import snapshot as scale_snapshot,parse_patch,scale_resource,native_director_ini,desired_partitions,party_sharing_ini,classic_automatic_maps
 import file_browser
 import settings_adapter
@@ -1475,6 +1476,9 @@ def dispatch(request, engine=None):
     with LOCK:
         state = project_state()
         if action == 'status': return public_state(state, engine)
+        # Turning chat Off must remove its listener even while a game command
+        # or maintenance operation is in progress. This touches only DST's queue.
+        if action == 'chat.queue.delete':return chat_queue(state,engine,'delete')
         if action == 'files.endpoint': return file_browser.endpoint(state, engine)
         if action == 'regis.status': return regis_compatibility.status(state,engine)
         if action == 'regis.support': return regis_compatibility.support(state,engine)
@@ -1530,6 +1534,8 @@ def dispatch(request, engine=None):
         if action=='scale.patch':return request_scale(state,engine,request.get('name'),request.get('patch'))
         if action=='maps.floor':return set_map_floor(state,engine,request.get('map'),request.get('enabled'))
         if action=='maps.party-sharing':return set_party_sharing(state,engine,request.get('map'),request.get('shared'))
+        if action in {'chat.queue.declare','chat.queue.delete','chat.queue.drain'}:
+            return chat_queue(state,engine,action.rsplit('.',1)[1],request.get('maximum',25))
         if action=='settings.read':return read_settings(state,engine,request.get('file'))
         if action in {'settings.backups.list','settings.backups.inspect','settings.backups.read','settings.backups.delete-checked'}:
             payload={'action':action.removeprefix('settings.')}

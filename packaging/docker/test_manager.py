@@ -300,6 +300,16 @@ class ManagerTests(unittest.TestCase):
         self.assertEqual(first['id'],second['id'])
         self.assertEqual(len(first['id']),32)
 
+    def test_chat_off_can_delete_only_its_queue_during_another_operation(self):
+        state=manager.project_state();state['operation']={'phase':'running'};manager.save(state)
+        engine=FakeEngine()
+        with patch.object(manager,'chat_queue',return_value={'messages':[],'skipped':False}) as chat:
+            self.assertEqual(manager.dispatch({'action':'chat.queue.delete'},engine),{'messages':[],'skipped':False})
+            chat.assert_called_once_with(state,engine,'delete')
+            for action in ['chat.queue.declare','chat.queue.drain']:
+                with self.assertRaises(manager.OperationBusyError):manager.dispatch({'action':action},engine)
+            self.assertEqual(chat.call_count,1)
+
     def test_ambiguous_database_create_is_not_repeated(self):
         state=manager.project_state(); engine=FakeEngine()
         assets={'state':'downloaded','images':[{'archive':'prerequisites/igw-postgres.tar','tags':['registry.funcom.com/funcom/self-hosting/igw-postgres:test']}]}

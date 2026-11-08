@@ -39,6 +39,9 @@ function Test-DuneDockerLandsraadRoute {
 
 function Test-DuneDockerRouteQualified {
     param([string]$Method,[string]$Path)
+    if($Path -ceq '/api/gameplay/chat-commands'){return $Method -cin @('GET','PUT')}
+    if($Path -ceq '/api/gameplay/chat-commands/teleports'){return $Method -cin @('POST','DELETE')}
+    if($Path -ceq '/api/gameplay/chat-commands/teleports/capture'){return $Method -cin @('POST','DELETE')}
     if(Test-DuneDockerAccountManagementRoute -Method $Method -Path $Path){return $true}
     if(Test-DuneDockerVehicleDeletionRoute -Method $Method -Path $Path){return $true}
     if(Test-DuneDockerMarketBotRoute -Method $Method -Path $Path){return $true}
