@@ -3,6 +3,17 @@ BeforeAll {
     Import-DstLib 'DockerRoutes.ps1'
 }
 Describe 'Docker adapter routing boundary' {
+    It 'qualifies fleet and bounded integrity reads while preserving vehicle mutation gates' {
+        foreach($path in @('/api/gameplay/vehicles','/api/gameplay/vehicles/700204/integrity')){
+            Test-DuneDockerRouteQualified -Method GET -Path $path|Should -BeTrue
+            Test-DuneDockerRouteQualified -Method POST -Path $path|Should -BeFalse
+        }
+        foreach($path in @('/api/gameplay/vehicles/names','/api/gameplay/vehicles/delete','/api/gameplay/vehicles/repair','/api/gameplay/vehicles/../integrity','/api/gameplay/vehicles/0/integrity')){
+            Test-DuneDockerRouteQualified -Method POST -Path $path|Should -BeFalse
+            Test-DuneDockerRouteQualified -Method GET -Path $path|Should -BeFalse
+        }
+    }
+
     It 'allows derived inventory reads and refresh without opening arbitrary item methods' {
         foreach($path in @('/api/v1/inventory/players','/api/v1/inventory/items','/api/v1/inventory/items/occurrences','/api/v1/inventory/items/DT_Resource(1).Test/occurrences')) {
             Test-DuneDockerRouteQualified -Method GET -Path $path|Should -BeTrue
