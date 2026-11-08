@@ -46,12 +46,12 @@ import type {
   GameConfigClientApplyItem,
 } from '../api/types'
 import { LandclaimTimerCard } from './gameconfig/LandclaimTimerCard'
+import { DockerClientInstructions } from './gameconfig/DockerClientInstructions'
 import { DeepDesertPvpCard } from './gameconfig/DeepDesertPvpCard'
 import { BaseBackupGuardPanel } from './gameconfig/BaseBackupGuardPanel'
 import { isLocalViewer } from '../util/viewer'
 import { useSettingsDraft } from './gameconfig/settingsApplyContext'
 import { LabSaveReview } from './gameconfig/LabSaveReview'
-import { chooseBrowserClientFolder, chooseBrowserClientFiles, isBrowserClientSelectionCancelled } from '../api/browserClientFiles'
 
 export const EXPERIMENTAL_BLOCKED_DEFAULT_TARGETS = new Set([
   'game||/script/dunesandbox.timeofdaysettings||m_starttime',
@@ -511,7 +511,7 @@ export function GameConfig({ mode = 'standard', embedded = false, section = 'adv
   const [skipError, setSkipError] = useState('')
   const [compareOpen, setCompareOpen] = useState(false)
   const refreshClient = useCallback(async () => {
-    if (!localViewer) return null
+    if (!localViewer || dockerEdition) return null
     try {
       const info = await getGameConfigClient()
       setClientInfo(info)
@@ -521,24 +521,17 @@ export function GameConfig({ mode = 'standard', embedded = false, section = 'adv
       setClientErr(e instanceof Error ? e.message : String(e))
       return null
     }
-  }, [localViewer])
+  }, [localViewer, dockerEdition])
 
   useEffect(() => {
     void refreshClient()
   }, [refreshClient])
 
-  const onBrowseClientDir = useCallback(async (filesOnly = false, direct = false) => {
+  const onBrowseClientDir = useCallback(async () => {
+    if (dockerEdition) return
     setClientErr(null)
     setClientBusy(true)
     try {
-      if (dockerEdition) {
-        const info = await (filesOnly ? chooseBrowserClientFiles() : chooseBrowserClientFolder({ direct }))
-        setClientInfo(info); setClientDirInput(info.dir)
-        setClientMsg(info.browserDelivery === 'download'
-          ? 'Client files selected. Reviewed changes download with exact originals as backups; you install them manually while Dune is closed.'
-          : 'Client folder selected in this browser. Reviewed writes are backed up in its DST INI Backups folder.')
-        return
-      }
       const r = await api<{ ok: boolean; cancelled: boolean; path: string }>('/api/browse-path', {
         method: 'POST',
         body: JSON.stringify({
@@ -549,7 +542,7 @@ export function GameConfig({ mode = 'standard', embedded = false, section = 'adv
       })
       if (r.ok && !r.cancelled && r.path) setClientDirInput(r.path)
     } catch (e) {
-      if (!isBrowserClientSelectionCancelled(e)) setClientErr(e instanceof Error ? e.message : String(e))
+      setClientErr(e instanceof Error ? e.message : String(e))
     } finally {
       setClientBusy(false)
     }
@@ -740,6 +733,13 @@ export function GameConfig({ mode = 'standard', embedded = false, section = 'adv
   }, [schema, seedValues, refreshClient])
 
   useEffect(() => {
+    if (!dockerEdition) return
+    const refreshSaved = () => { void loadAll() }
+    window.addEventListener('dst:server-settings-saved', refreshSaved)
+    return () => window.removeEventListener('dst:server-settings-saved', refreshSaved)
+  }, [dockerEdition, loadAll])
+
+  useEffect(() => {
     if (unsavedDraft.current) {
       if (!vmRunning) setLoadError('Server unavailable. Your unsaved draft is retained; reconnect before applying.')
       return
@@ -770,7 +770,7 @@ export function GameConfig({ mode = 'standard', embedded = false, section = 'adv
           return
         }
       }
-      if (vmRunning) {
+      if (vmRunning || dockerEdition) {
         void loadAll()
       } else {
         // No live battlegroup: populate every field with its funcom default so the
@@ -791,7 +791,7 @@ export function GameConfig({ mode = 'standard', embedded = false, section = 'adv
       }
     })()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [vmRunning])
+  }, [vmRunning, dockerEdition])
 
   useEffect(() => {
     if (!experimentalPage) return
@@ -863,6 +863,9 @@ export function GameConfig({ mode = 'standard', embedded = false, section = 'adv
     () => buildAllClientApplyItems(schemaWithLoadedExperimental, cfg),
     [schemaWithLoadedExperimental, cfg],
   )
+  const dockerClientEntries = useMemo(
+    () => buildClientShareEntries(clientApplyItems, cfg), [clientApplyItems, cfg],
+  )
   const allClientDifferences = useMemo(
     () => buildClientConfigDifferences(schemaWithLoadedExperimental, cfg, clientInfo),
     [schemaWithLoadedExperimental, cfg, clientInfo],
@@ -875,7 +878,7 @@ export function GameConfig({ mode = 'standard', embedded = false, section = 'adv
   const clientDifferences = allClientDifferences.filter(item => !skippedDifferences.includes(differenceIdentity(item))
     && (compareOpen || dirtyKeys.includes(item.key)))
   const propagationItems = schemaWithLoadedExperimental.flatMap(category => category.fields)
-    .filter(field => field.clientApply && dirtyKeys.includes(field.key) && localViewer && (!dockerEdition || clientInfo?.dirExists === true)
+    .filter(field => field.clientApply && dirtyKeys.includes(field.key) && localViewer && !dockerEdition
       && !allClientDifferences.some(item => item.file === field.file && item.key === field.key && skippedDifferences.includes(differenceIdentity(item))))
     .map(field => ({ file: field.file, section: field.section, key: field.key, value: values[field.key] ?? '' }))
   const skipDifferences = (items: typeof allClientDifferences) => {
@@ -1354,12 +1357,12 @@ export function GameConfig({ mode = 'standard', embedded = false, section = 'adv
         }
       />}
 
-      <div className="mb-4 flex flex-wrap items-center gap-3">
+      {!dockerEdition && <div className="mb-4 flex flex-wrap items-center gap-3">
         <button type="button" className="btn-secondary" disabled={!localViewer || loadState !== 'ready' || clientBusy}
           onClick={() => { setCompareOpen(true); void loadAll() }}>Compare INIs</button>
         <span className="text-xs text-text-muted">Compare server and this PC’s gameplay overrides. Existing differences stay as set until you choose an action.</span>
-      </div>
-      {localViewer && compareOpen && clientDifferences.length === 0 && <p role="status" className="mb-4 text-sm text-text-muted">No unskipped gameplay differences. Existing settings are unchanged.</p>}
+      </div>}
+      {!dockerEdition && localViewer && compareOpen && clientDifferences.length === 0 && <p role="status" className="mb-4 text-sm text-text-muted">No unskipped gameplay differences. Existing settings are unchanged.</p>}
       {localViewer && clientDifferences.length > 0 && (
         <section className="card mb-4 min-w-0 border-warning/40 p-4" aria-label="Server and local INI differences">
           <div className="flex flex-wrap items-center justify-between gap-3">
@@ -1507,8 +1510,9 @@ export function GameConfig({ mode = 'standard', embedded = false, section = 'adv
       </div>
 
       <div hidden={embedded && section !== 'client'}>
-      {!localViewer && <p className="card p-4 text-sm text-text-muted">Player compatibility applies to each player’s own PC. Open DST locally to review that PC’s files. Applying server settings does not change player files.</p>}
-      {localViewer && (
+      {dockerEdition && <DockerClientInstructions entries={dockerClientEntries} ready={loadState === 'ready' && cfg !== null} />}
+      {!dockerEdition && !localViewer && <p className="card p-4 text-sm text-text-muted">Player compatibility applies to each player’s own PC. Open DST locally to review that PC’s files. Applying server settings does not change player files.</p>}
+      {!dockerEdition && localViewer && (
         <>
           {/* Local client config (this PC) */}
           <CollapsibleCard
@@ -1641,7 +1645,7 @@ export function GameConfig({ mode = 'standard', embedded = false, section = 'adv
               <button type="button" onClick={() => void onBrowseClientDir()} disabled={clientBusy} className="btn-secondary shrink-0">
                 <Icon name={clientBusy ? 'Loader2' : 'FolderOpen'} size={14} className={clientBusy ? 'animate-spin' : ''} /> {dockerEdition ? 'Choose folder' : 'Browse'}
               </button>
-              {dockerEdition && <button type="button" onClick={() => void onBrowseClientDir(true)} disabled={clientBusy} className="btn-secondary shrink-0">Choose files</button>}
+              {dockerEdition && <button type="button" onClick={() => void onBrowseClientDir()} disabled={clientBusy} className="btn-secondary shrink-0">Choose files</button>}
               {!dockerEdition && <button
                 type="button"
                 onClick={() => void onSaveClientDir()}
@@ -1654,7 +1658,7 @@ export function GameConfig({ mode = 'standard', embedded = false, section = 'adv
             {dockerEdition && <details className="mt-3 text-xs text-text-muted">
               <summary className="cursor-pointer">Advanced: writable working folders</summary>
               <p className="mt-2 mb-2">Direct browser writes are available only for folders your browser permits. Use this for a working copy outside protected locations. It cannot grant access to AppData or install changes into the game&apos;s normal config folder.</p>
-              <button type="button" onClick={() => void onBrowseClientDir(false, true)} disabled={clientBusy} className="btn-secondary">Use writable working folder</button>
+              <button type="button" onClick={() => void onBrowseClientDir()} disabled={clientBusy} className="btn-secondary">Use writable working folder</button>
             </details>}
             {clientInfo && (
               <div className="text-[11px] text-text-dim mt-2 font-mono break-all space-y-0.5">
@@ -1956,7 +1960,7 @@ export function GameConfig({ mode = 'standard', embedded = false, section = 'adv
                 <Icon name={reloadingPods ? 'Loader2' : 'RefreshCw'} size={14} className={reloadingPods ? 'animate-spin' : ''} />
                 {reloadingPods ? 'Restarting battlegroup…' : 'Apply server settings'}
               </button>}
-              {localViewer && !applyController && (
+              {!dockerEdition && localViewer && !applyController && (
                 <button
                   type="button"
                   onClick={() => setClientReview({ mode: 'server', items: enabledClientApplyItems.map(item => ({ ...item })) })}
@@ -1995,7 +1999,7 @@ export function GameConfig({ mode = 'standard', embedded = false, section = 'adv
       )}
       </div>
       {embedded && <div hidden={section !== 'tools'}>
-        <p className="card mb-4 p-4 text-sm text-text-muted">These tools have their own actions because their targets differ from ordinary field drafts. Save partition choices while maps are running, then use Review & Apply to deploy the saved server configuration. The land-claim timer also targets the DST host PC; base protection changes database cleanup immediately.</p>
+        <p className="card mb-4 p-4 text-sm text-text-muted">These tools have their own actions because their targets differ from ordinary field drafts. Save partition choices while maps are running, then use Review & Apply to deploy the saved server configuration. {dockerEdition ? 'The land-claim timer includes manual player instructions; base protection changes database cleanup immediately.' : 'The land-claim timer also targets the DST host PC; base protection changes database cleanup immediately.'}</p>
         <DeepDesertPvpCard vmRunning={vmRunning} />
         <LandclaimTimerCard vmRunning={vmRunning} />
         <section className="card mb-4 p-4"><h2 className="text-sm font-semibold">Base-backup protection · server database · immediate</h2><BaseBackupGuardPanel vmRunning={vmRunning} /></section>
@@ -2008,7 +2012,7 @@ export function GameConfig({ mode = 'standard', embedded = false, section = 'adv
         onConfirm={confirmSandwormEnable}
       />
 
-      {labReview && <LabSaveReview serverOnly={comparisonServerOnly} updates={labReview} serverAvailable={vmRunning} serverPaths={{ game: cfg?.game.path ?? '', engine: cfg?.engine.path ?? '' }} onServerSave={() => saveGameConfigRaw(labReview)}
+      {labReview && <LabSaveReview serverOnly={dockerEdition || comparisonServerOnly} updates={labReview} serverAvailable={vmRunning} serverPaths={{ game: cfg?.game.path ?? '', engine: cfg?.engine.path ?? '' }} onServerSave={() => saveGameConfigRaw(labReview)}
         onCancel={() => setLabReview(null)} onDone={message => {
           setLabReview(null); void loadAll().then(() => setSavedMsg(message))
         }} />}

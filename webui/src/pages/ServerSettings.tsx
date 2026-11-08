@@ -29,6 +29,7 @@ const readApplyStatus = async () => withManagedHost(await api<StatusSnapshot>('/
 export function AdvancedServerSettings() { return <ServerSettings initialSection="advanced" /> }
 
 export function ServerSettings({ initialSection = 'official' }: { initialSection?: 'official' | 'advanced' } = {}) {
+  const docker = import.meta.env.VITE_DST_EDITION === 'docker'
   const { status, forceRefresh } = useStatus()
   const [launchingStop, setLaunchingStop] = useState(false)
   const [launchingStart, setLaunchingStart] = useState(false)
@@ -39,6 +40,12 @@ export function ServerSettings({ initialSection = 'official' }: { initialSection
   const [localStopError, setStopError] = useState<string | null>(null)
   const [localStopMessage, setStopMessage] = useState<string | null>(null)
   const [section, setSection] = useState<'official' | 'advanced' | 'client' | 'tools' | 'maintenance'>(initialSection)
+  useEffect(() => {
+    if (!docker) return
+    const show = () => setSection('client')
+    window.addEventListener('dst:player-instructions', show)
+    return () => window.removeEventListener('dst:player-instructions', show)
+  }, [docker])
   const drafts = useRef(new Map<string, SettingsDraft>())
   const [summary, setSummary] = useState<{ changes: SettingsDraft['changes']; ready: boolean }>({ changes: [], ready: false })
   const [reviewOpen, setReviewOpen] = useState(false)
@@ -111,7 +118,9 @@ export function ServerSettings({ initialSection = 'official' }: { initialSection
           update({ stage: 'saving', message: `Battlegroup stopped. Saving reviewed ${id} settings…` })
           writesAttempted = true
           await draft.apply(); saved.push(id)
+          if (docker) setSection('client')
         }
+        if (docker && saved.length) window.dispatchEvent(new Event('dst:server-settings-saved'))
         if (managed && startAfterApply) {
           update({ stage: 'starting', message: 'Settings saved. Applying configuration and starting the battlegroup…' })
           const result = await withOnlinePlayerGuard(force => api<{ message: string }>(`/api/gameconfig/reload-pods${force ? '?force=true' : ''}`, {
@@ -292,8 +301,8 @@ export function ServerSettings({ initialSection = 'official' }: { initialSection
       </div>
       <div className="mb-4 rounded-lg border border-border bg-surface p-3 text-sm" role="note">
         {section === 'client' ? <>
-          <strong>This PC's game files only</strong>
-          <p className="mt-1 text-xs text-text-muted">{import.meta.env.VITE_DST_EDITION === 'docker' ? 'Select this PC’s client config folder or files below. Where direct browser writes are unavailable, DST prepares reviewed downloads for you to install while Dune is closed.' : 'Changes this PC’s game files for every server you play on. Other players’ files stay unchanged.'}</p>
+          <strong>{docker ? 'Instructions for every player' : "This PC's game files only"}</strong>
+          <p className="mt-1 text-xs text-text-muted">{import.meta.env.VITE_DST_EDITION === 'docker' ? 'After saving server settings, share the complete instructions below. Each player edits their own Game.ini and Engine.ini while the game is closed.' : 'Changes this PC’s game files for every server you play on. Other players’ files stay unchanged.'}</p>
         </> : section === 'official' || section === 'advanced' ? <>
           <strong>Selected server's files</strong>
           <p className="mt-1 text-xs text-text-muted">Applies to the selected server. Review &amp; Apply shows all file changes before saving.</p>
@@ -304,7 +313,7 @@ export function ServerSettings({ initialSection = 'official' }: { initialSection
       </div>
       <div role="region" aria-label="Settings actions" className="sticky top-16 z-20 mb-4 flex flex-wrap items-center gap-3 rounded-lg border border-border bg-base/95 p-3 shadow-lg backdrop-blur-sm">
           <button className="btn-primary" type="button" disabled={!vmRunning || !summary.ready || applying || reviewOpen || launchingStart || launchingStop || stopRequested || startRequested || tankSetupBusy} onClick={() => void review()}>{applying ? 'Applying settings…' : 'Review & Apply'}{summary.changes.length > 0 ? ` (${summary.changes.length})` : ''}</button>
-          <span className="text-xs text-text-muted">Review changes and choose whether to start afterward. You can keep intentional local differences.</span>
+          <span className="text-xs text-text-muted">{docker ? 'Review changes and choose whether to start afterward. Saved settings include matching player instructions.' : 'Review changes and choose whether to start afterward. You can keep intentional local differences.'}</span>
           {stopError && (
             <div className="flex w-full min-w-0 items-start gap-2 rounded-lg border border-danger/40 bg-danger/10 p-3 text-sm text-danger" role="alert">
               <Icon name="AlertCircle" size={14} className="mt-0.5 shrink-0" /><span className="min-w-0 break-words">{stopError}</span>

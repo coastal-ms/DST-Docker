@@ -110,7 +110,7 @@ $script:DuneOpenBrowser  = $null   # null = auto-decide
 $script:DunePreferredPort = 8765
 if($env:DST_HOSTING_BACKEND -eq 'docker'){
     . (Join-Path $PSScriptRoot 'server/lib/DockerConsole.ps1')
-    $script:DunePreferredPort=Get-DuneDockerConsolePort
+    $script:DunePreferredPort=Get-DuneDockerListenerPort
 }
 
 for ($i = 0; $i -lt $args.Count; $i++) {

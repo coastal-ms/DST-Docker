@@ -31,6 +31,13 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(spec['environment']['RMQ_HTTP_TOKEN_AUTH_SECRET'],self.credentials['rmqSecret'])
         self.assertEqual(spec['environment']['fls-apikey'],self.credentials['apiKey'])
 
+    def test_seeded_settings_directory_is_writable_before_any_game_start(self):
+        with patch('core_services.Path.read_text',return_value='test launcher'):
+            spec=game_spec(self.plan,1,self.credentials,'172.20.0.1',{'UserGame.ini':'stock'})
+        root='home/dune/server/DuneSandbox/Saved/UserSettings'
+        self.assertEqual(spec['files'][root],{'directory':True,'uid':1000,'gid':65534,'mode':0o700})
+        self.assertEqual(spec['files'][root+'/UserGame.ini']['uid'],1000)
+
     def test_core_services_share_own_endpoints_identity_and_auth_material(self):
         template={'world':{'spec':{'utilities':{'director':{'spec':{'configFiles':{'files':{'director.ini':'stock configuration'}}}}}}}}
         specifications=service_specs(self.plan,template,self.credentials)

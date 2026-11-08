@@ -42,13 +42,18 @@ def configuration(address, port, upstream_port, secret):
     auto_https disable_redirects
     servers {{
         protocols h1 h2
+        listener_wrappers {{
+            http_redirect
+            tls
+        }}
     }}
 }}
 {origin} {{
     bind {address}
     tls internal
     reverse_proxy 127.0.0.1:{upstream_port} {{
-        header_up Host {address}:{port}
+        header_up Host 127.0.0.1:{upstream_port}
+        header_up X-Dst-Tls-Authority {address}:{port}
         header_up X-Dst-Tls-Proxy {secret}
         header_up X-Forwarded-Proto https
         header_up -Cf-Access-Authenticated-User-Email
@@ -64,13 +69,16 @@ def configuration(address, port, upstream_port, secret):
     return {'Caddyfile': caddy, 'proxy.json': json.dumps({'origin': origin, 'secret': secret})}
 
 
-def compose_override(project, origin):
+def compose_override(project, origin, internal_port):
     # JSON is also valid YAML. No secret or private key is written on the host.
     return {
         'x-dst-https-origin': origin,
+        'x-dst-https-format': 2,
+        'x-dst-http-internal-port': internal_port,
         'services': {
             'dst': {
-                'environment': {'DST_TLS_PROXY_CONFIG': '/run/dst-tls/proxy.json'},
+                'environment': {'DST_TLS_PROXY_CONFIG': '/run/dst-tls/proxy.json',
+                                'DST_HTTP_BIND_ADDRESS':'127.0.0.1','DST_HTTP_INTERNAL_PORT':str(internal_port)},
                 'volumes': ['dst-https-config:/run/dst-tls:ro'],
             },
             'https': {
@@ -126,10 +134,48 @@ for base in ('/tls-config','/tls-data'):os.chown(base,10001,10001)
            'validate', '--config', '/run/dst-tls/Caddyfile', '--adapter', 'caddyfile')
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open('x', encoding='utf-8') as f:
-        json.dump(compose_override(args.project, f'https://{address}:{args.port}'), f, indent=2)
+        json.dump(compose_override(args.project, f'https://{address}:{args.port}', args.upstream_port), f, indent=2)
         f.write('\n')
     print(json.dumps({'override': str(output), 'url': f'https://{address}:{args.port}',
                       'servicesStarted': False, 'clientTrustInstalled': False}))
+
+
+def update(args):
+    """Reconfigure only this setup's proxy; retain its secret and CA volume."""
+    address = validate(args.project, args.address, args.port, args.upstream_port)
+    output = Path(args.output).resolve()
+    previous = json.loads(output.read_text(encoding='utf-8'))
+    expected = {name: {'external': True, 'name': args.project + '-' + name}
+                for name in ('dst-https-config', 'dst-https-data')}
+    if previous.get('volumes') != expected:
+        raise ValueError('The override does not match this setup’s HTTPS volumes.')
+    for name in expected:
+        labels = json.loads(docker('volume', 'inspect', '--format', '{{json .Labels}}', args.project + '-' + name)) or {}
+        if labels.get('com.dst.https.project') != args.project:
+            raise ValueError('The HTTPS volumes do not belong to this setup.')
+    raw = docker('run', '--rm', '--network', 'none', '--read-only', '--user', '10001:10001',
+                 '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true',
+                 '-v', args.project + '-dst-https-config:/tls:ro', '--entrypoint', 'cat', CADDY, '/tls/proxy.json')
+    secret = json.loads(raw).get('secret', '')
+    if not re.fullmatch('[a-f0-9]{64}', secret):
+        raise ValueError('The existing HTTPS proxy secret is invalid; no configuration was changed.')
+    files = configuration(address, args.port, args.upstream_port, secret)
+    # Validate the replacement before touching the current files. Never rotate CA.
+    docker('run', '--rm', '-i', '--network', 'none', '--read-only', '--user', '10001:10001',
+           '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true',
+           '--tmpfs', '/tmp:rw,noexec,nosuid,size=32m,uid=10001,gid=10001',
+           '-e', 'XDG_DATA_HOME=/tmp/data', '-e', 'XDG_CONFIG_HOME=/tmp/config',
+           '--entrypoint', 'caddy', CADDY, 'validate', '--config', '-', '--adapter', 'caddyfile', input=files['Caddyfile'])
+    writer = "import json,os,pathlib,sys; files=json.load(sys.stdin); base=pathlib.Path('/tls'); [( (base/(name+'.new')).write_text(value), (base/(name+'.new')).chmod(0o600), os.replace(base/(name+'.new'),base/name)) for name,value in files.items()]"
+    docker('run', '--rm', '-i', '--network', 'none', '--read-only', '--user', '10001:10001',
+           '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true',
+           '-v', args.project + '-dst-https-config:/tls', '--entrypoint', 'python3', args.app_image,
+           '-c', writer, input=json.dumps(files))
+    temporary = output.with_suffix(output.suffix + '.new')
+    temporary.write_text(json.dumps(compose_override(args.project, f'https://{address}:{args.port}', args.upstream_port), indent=2) + '\n', encoding='utf-8')
+    temporary.replace(output)
+    print(json.dumps({'override': str(output), 'url': f'https://{address}:{args.port}',
+                      'authorityPreserved': True, 'servicesStarted': False, 'clientTrustInstalled': False}))
 
 
 def export(args):
@@ -155,19 +201,20 @@ def export(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
-    p = commands.add_parser('prepare', help='Prepare isolated TLS volumes and a Compose override; starts nothing.')
-    p.add_argument('--project', required=True)
-    p.add_argument('--address', required=True)
-    p.add_argument('--port', type=int, default=8443)
-    p.add_argument('--upstream-port', type=int, default=8088)
-    p.add_argument('--app-image', default='dst-docker:local')
-    p.add_argument('--output', required=True)
+    for command in ('prepare', 'update'):
+        p = commands.add_parser(command, help='Configure HTTPS without starting services or installing trust.')
+        p.add_argument('--project', required=True)
+        p.add_argument('--address', required=True)
+        p.add_argument('--port', type=int, default=8088)
+        p.add_argument('--upstream-port', type=int, default=18088)
+        p.add_argument('--app-image', default='dst-docker:local')
+        p.add_argument('--output', required=True)
     e = commands.add_parser('export-root', help='Export only the public CA certificate after HTTPS starts.')
     e.add_argument('--project', required=True)
     e.add_argument('--output', required=True)
     args = parser.parse_args()
     try:
-        (prepare if args.command == 'prepare' else export)(args)
+        {'prepare': prepare, 'update': update, 'export-root': export}[args.command](args)
     except (ValueError, RuntimeError) as exc:
         parser.exit(1, str(exc) + '\n')
 

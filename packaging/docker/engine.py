@@ -364,9 +364,13 @@ class Engine:
             for filename,settings in files.items():
                 path=Path(filename)
                 if path.is_absolute() or '..' in path.parts: raise ValueError('Invalid internal component file.')
-                data=settings['data']
-                if isinstance(data,str): data=data.encode('utf-8')
-                member=tarfile.TarInfo(filename);member.size=len(data)
+                member=tarfile.TarInfo(filename)
+                if settings.get('directory') is True:
+                    member.type=tarfile.DIRTYPE;data=b''
+                else:
+                    data=settings['data']
+                    if isinstance(data,str): data=data.encode('utf-8')
+                member.size=len(data)
                 member.mode=settings.get('mode',0o444);member.uid=settings.get('uid',0);member.gid=settings.get('gid',0)
                 archive.addfile(member,io.BytesIO(data))
         connection=EngineConnection()

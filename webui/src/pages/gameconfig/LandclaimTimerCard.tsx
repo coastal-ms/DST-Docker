@@ -15,7 +15,6 @@ import { ApiError } from '../../api/client'
 import { ConfirmationModal } from '../../components/ConfirmationModal'
 import { getLandclaimTimer, saveLandclaimTimer } from '../../api/gameconfig'
 import type { LandclaimTimerState } from '../../api/types'
-import { chooseBrowserClientFiles, isBrowserClientSelectionCancelled } from '../../api/browserClientFiles'
 
 type Props = {
   vmRunning: boolean
@@ -23,7 +22,6 @@ type Props = {
 
 export function LandclaimTimerCard({ vmRunning }: Props) {
   const docker = import.meta.env.VITE_DST_EDITION === 'docker'
-  const [includeClient, setIncludeClient] = useState(false)
   const [state, setState] = useState<LandclaimTimerState | null>(null)
   const [enabled, setEnabled] = useState(false)
   const [seconds, setSeconds] = useState('')
@@ -67,7 +65,7 @@ export function LandclaimTimerCard({ vmRunning }: Props) {
   const curEnabled = server?.available ? server.enabled : false
   const curSeconds = server?.available ? server.seconds : ''
   const client = state?.client
-  const clientNeedsApply = (!docker || includeClient) && !!client?.dirExists && (enabled !== client.enabled ||
+  const clientNeedsApply = !docker && !!client?.dirExists && (enabled !== client.enabled ||
     (enabled && (trimmed !== client.seconds.trim() || !client.formattedOk)) ||
     (!enabled && client.hasOverrides === true))
   const dirty = enabled !== curEnabled || (enabled && (trimmed !== curSeconds.trim() || !server?.formattedOk)) ||
@@ -78,13 +76,13 @@ export function LandclaimTimerCard({ vmRunning }: Props) {
     if (!canApply) return
     setSaving(true); setErr(null); setWarning(null); setOk(null)
     try {
-      const r = docker ? await saveLandclaimTimer(enabled, enabled ? trimmed : '', includeClient) : await saveLandclaimTimer(enabled, enabled ? trimmed : '')
+      const r = await saveLandclaimTimer(enabled, enabled ? trimmed : '')
       setState({ server: r.server, client: r.client, clientBlock: r.clientBlock })
       seed({ server: r.server, client: r.client, clientBlock: r.clientBlock })
       const clientNote = r.result.client.applied
         ? ', client Game.ini updated'
         : ''
-      if ((!docker || includeClient) && !r.result.client.ok) setWarning(`Client Game.ini was not updated: ${r.result.client.reason ?? 'client config folder unavailable'}`)
+      if (!docker && !r.result.client.ok) setWarning(`Client Game.ini was not updated: ${r.result.client.reason ?? 'client config folder unavailable'}`)
       setOk(enabled
         ? `Land-claim timer set to ${trimmed}s — server UserGame.ini updated${clientNote}.`
         : `Land-claim timer cleared — server game defaults restored${clientNote}.`)
@@ -93,7 +91,8 @@ export function LandclaimTimerCard({ vmRunning }: Props) {
       // Client-side setting: surface the exact block so the admin can hand it to
       // connecting players (it only takes effect on their end if THEIR Game.ini
       // carries the same block).
-      if (enabled && r.clientBlock) setShowBlock(true)
+      if (docker) window.dispatchEvent(new Event('dst:player-instructions'))
+      else if (enabled && r.clientBlock) setShowBlock(true)
     } catch (e) {
       setErr(e instanceof ApiError ? e.message : String(e))
     } finally {
@@ -162,23 +161,12 @@ export function LandclaimTimerCard({ vmRunning }: Props) {
       <div className="card p-3 mt-3 border-border bg-surface-2/40 text-xs text-text-muted flex items-start gap-2">
         <Icon name="Info" size={14} className="mt-0.5 shrink-0 text-accent-bright" />
         <div className="leading-relaxed">
-          {docker ? <>Saves the server <span className="font-mono">UserGame.ini</span>. You can separately select this PC&apos;s player <span className="font-mono">Game.ini</span> below.</> : <>Applies to both the server <span className="font-mono">UserGame.ini</span> and the DST host PC&apos;s client <span className="font-mono"> Game.ini</span> (when the client config folder is set).</>} Connecting players
+          {docker ? <>Saves the server <span className="font-mono">UserGame.ini</span>. Each player manually edits their own <span className="font-mono">Game.ini</span> using the shared instructions.</> : <>Applies to both the server <span className="font-mono">UserGame.ini</span> and the DST host PC&apos;s client <span className="font-mono"> Game.ini</span> (when the client config folder is set).</>} Connecting players
           need the same client value for the change to take effect on their end — share your DST-managed
           <span className="font-mono"> Game.ini</span> block. Disabling restores the game&apos;s default schedule.
         </div>
       </div>
 
-      {docker && <div className="mt-3 rounded-lg border border-border p-3 text-sm">
-        <button type="button" className="btn-secondary mb-3" disabled={saving || loading} onClick={() => {
-          setLoading(true); setErr(null)
-          void chooseBrowserClientFiles().then(async () => { setState(await getLandclaimTimer()); setIncludeClient(true) })
-            .catch(e => { if (!isBrowserClientSelectionCancelled(e)) setErr(e instanceof Error ? e.message : String(e)) }).finally(() => setLoading(false))
-        }}>Choose player config</button>
-        <label className="flex items-start gap-2"><input type="checkbox" checked={includeClient} disabled={saving || !client?.dirExists} onChange={e => setIncludeClient(e.target.checked)} />
-          <span>{client?.browserDelivery === 'download' ? 'Also prepare this PC’s player Game.ini download' : 'Also save this PC’s selected player Game.ini'}<span className="block text-xs text-text-muted">Close Dune before changing player files. Downloads include originals and must be installed manually.</span></span>
-        </label>
-        {client?.reason && <p className="mt-2 text-xs text-warning">{client.reason}</p>}
-      </div>}
 
       {state && (
         <div className="mt-3 text-xs text-text-muted space-y-1">
@@ -190,14 +178,14 @@ export function LandclaimTimerCard({ vmRunning }: Props) {
                 ? <span className="text-success">custom {server.seconds}s{server.formattedOk ? '' : ' (needs re-apply)'}</span>
                 : <span className="text-text-dim">game default</span>}
           </div>
-          <div>
+          {!docker && <div>
             Client Game.ini:{' '}
             {!state.client.exists
-              ? <span className="text-text-dim italic">{docker ? 'not selected' : 'not found'}{state.client.dir ? ` at ${state.client.dir}` : ''}</span>
+              ? <span className="text-text-dim italic">{'not found'}{state.client.dir ? ` at ${state.client.dir}` : ''}</span>
               : state.client.enabled
                 ? <span className="text-success">custom {state.client.seconds}s</span>
                 : <span className="text-text-dim">game default</span>}
-          </div>
+          </div>}
         </div>
       )}
 
@@ -239,7 +227,7 @@ export function LandclaimTimerCard({ vmRunning }: Props) {
           onClose={() => setShowBlock(false)}
         />
       )}
-      {reviewOpen && <ConfirmationModal title="Review land-claim timer" description={`This ${enabled ? `sets a ${trimmed}-second timer` : 'restores the default schedule'} in the server UserGame.ini${docker ? includeClient ? client?.browserDelivery === 'download' ? ' and prepares a reviewed player Game.ini download with original backup; the download is not installed automatically' : ' and this PC’s explicitly selected player Game.ini' : ' only; no player file will be changed' : ' and the DST host PC’s player Game.ini when its folder is available'}. Other players need their own matching value. This action is separate from the server-settings field review; deploy the server file with Review & Apply afterward.`} confirmLabel={docker ? includeClient ? client?.browserDelivery === 'download' ? 'Save server & Download player file' : 'Save server & selected player file' : 'Save server file' : 'Save server & host PC'} onCancel={() => setReviewOpen(false)} onConfirm={() => { setReviewOpen(false); void apply() }} />}
+      {reviewOpen && <ConfirmationModal title="Review land-claim timer" description={`This ${enabled ? `sets a ${trimmed}-second timer` : 'restores the default schedule'} in the server UserGame.ini${docker ? ' only. Each player applies the matching Game.ini instructions manually' : " and the DST host PC's player Game.ini when its folder is available"}. This action is separate from the server-settings field review; deploy the server file with Review & Apply afterward.`} confirmLabel={docker ? 'Save server file' : 'Save server & host PC'} onCancel={() => setReviewOpen(false)} onConfirm={() => { setReviewOpen(false); void apply() }} />}
     </CollapsibleCard>
   )
 }

@@ -23,15 +23,49 @@ esac
 if [ -n "$task_port" ]; then
   case "$task_port" in *[!0-9]*|'') echo 'Choose a console port between 1024 and 65535.' >&2; exit 1;; esac
   [ "$task_port" -ge 1024 ] && [ "$task_port" -le 65535 ] || { echo 'Choose a console port between 1024 and 65535.' >&2; exit 1; }
-  [ ! -f "$task_https_override" ] || { echo 'HTTPS is paired with the current HTTP port. Keep that port while HTTPS is enabled.' >&2; exit 1; }
 fi
 command -v docker >/dev/null 2>&1 || { echo 'Docker is required. Run this inside Linux or your WSL distribution.' >&2; exit 1; }
 docker compose version >/dev/null
 portal_links() {
-  compose exec -T dst cat /data/state/DuneServer/last-url.txt |
-    python3 packaging/docker/portal_urls.py $(hostname -I 2>/dev/null || true)
-  if [ -f "$task_https_override" ]; then python3 -c 'import json,sys;print("HTTPS: "+json.load(open(sys.argv[1]))["x-dst-https-origin"])' "$task_https_override"; fi
+  if [ -f "$task_https_override" ]; then
+    task_origin=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["x-dst-https-origin"])' "$task_https_override")
+    compose exec -T dst cat /data/state/DuneServer/last-url.txt | python3 packaging/docker/portal_urls.py --https-origin "$task_origin"
+  else
+    compose exec -T dst cat /data/state/DuneServer/last-url.txt | python3 packaging/docker/portal_urls.py $(hostname -I 2>/dev/null || true)
+  fi
 }
+public_port() {
+  compose run --rm --no-deps --entrypoint pwsh dst -NoLogo -NoProfile -Command '. /opt/dst/app/server/lib/DockerConsole.ps1; Get-DuneDockerConsolePort'
+}
+configure_https() {
+  task_project=$(compose config --format json | python3 -c 'import json,sys;print(json.load(sys.stdin)["name"])')
+  task_internal=''
+  if [ -f "$task_https_override" ]; then
+    task_internal=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("x-dst-http-internal-port", ""))' "$task_https_override")
+  fi
+  if [ -z "$task_internal" ] || [ "$task_internal" = "$task_tls_port" ]; then
+    task_internal=$(python3 - "$task_tls_port" <<'PY'
+import socket,sys
+with socket.socket() as probe:
+    try:probe.bind(('127.0.0.1',18088 if sys.argv[1]!='18088' else 0))
+    except OSError:probe.bind(('127.0.0.1',0))
+    print(probe.getsockname()[1])
+PY
+)
+  fi
+  task_tls_action=prepare
+  if [ -f "$task_https_override" ]; then task_tls_action=update; fi
+  python3 packaging/docker/https.py "$task_tls_action" --project "$task_project" --address "$task_tls_address" --port "$task_tls_port" --upstream-port "$task_internal" --output "$task_https_override"
+}
+start_https() {
+  # Release the public socket before moving the app to its private listener.
+  compose stop https
+  compose up --no-build -d --no-deps dst
+  wait_portal >/dev/null
+  compose up --no-build -d --no-deps --force-recreate https
+  portal_links
+}
+
 set_port() {
   compose run --rm --no-deps --entrypoint pwsh dst -NoLogo -NoProfile -File /opt/dst/packaging/docker/set-console-port.ps1 -Port "$task_port"
 }
@@ -57,27 +91,39 @@ case "${1:-up}" in
     compose build map-observer-image scaler-image regis-tools-image
     compose pull file-browser-image
     compose build
-    if [ -n "$task_port" ]; then set_port; fi
+    if [ -n "$task_port" ]; then
+      if [ -f "$task_https_override" ]; then
+        task_tls_address=$(python3 -c 'import json,sys,urllib.parse;print(urllib.parse.urlsplit(json.load(open(sys.argv[1]))["x-dst-https-origin"]).hostname)' "$task_https_override")
+        task_tls_port=$task_port
+        configure_https
+        compose stop https
+      fi
+      set_port
+    fi
     compose up --no-build -d
     wait_portal
     ;;
-  port) set_port; compose restart dst; wait_portal ;;
+  port)
+    if [ -f "$task_https_override" ]; then
+      task_tls_address=$(python3 -c 'import json,sys,urllib.parse;print(urllib.parse.urlsplit(json.load(open(sys.argv[1]))["x-dst-https-origin"]).hostname)' "$task_https_override")
+      task_tls_port=$task_port
+      configure_https
+      set_port
+      start_https
+    else
+      set_port; compose restart dst; wait_portal
+    fi
+    ;;
   https)
     [ "$#" -ge 2 ] && [ "$#" -le 3 ] || { echo 'Usage: sh bin/dst-docker https HOST_IPV4 [HTTPS_PORT]' >&2; exit 1; }
-    task_tls_port=${3:-8443}
-    if [ -f "$task_https_override" ]; then
-      python3 - "$task_https_override" "$2" "$task_tls_port" <<'PY'
-import json,sys
-expected='https://'+sys.argv[2]+':'+sys.argv[3]
-if json.load(open(sys.argv[1])).get('x-dst-https-origin')!=expected:raise SystemExit('Existing HTTPS configuration uses another address or port. Preserve its authority; review the configuration before changing it.')
-PY
-    else
-      task_project=$(compose config --format json | python3 -c 'import json,sys;print(json.load(sys.stdin)["name"])')
-      task_http_port=$(compose exec -T dst cat /data/state/DuneServer/last-url.txt | python3 -c 'import sys,urllib.parse;print(urllib.parse.urlparse(sys.stdin.read().strip()).port)')
-      python3 packaging/docker/https.py prepare --project "$task_project" --address "$2" --port "$task_tls_port" --upstream-port "$task_http_port" --output "$task_https_override"
-    fi
-    compose up --no-build -d --no-deps dst https
-    printf '\nHTTPS started. Export its public trust certificate with: sh bin/dst-docker https-root OUTPUT.crt\nTrust that certificate on each client PC before using HTTPS. HTTP remains available.\n'
+    task_tls_address=$2
+    task_tls_port=${3:-$(public_port)}
+    configure_https
+    task_port=$task_tls_port
+    set_port
+    start_https
+    printf '\nHTTPS started. Export its public trust certificate with: sh bin/dst-docker https-root OUTPUT.crt\nTrust that certificate on each client PC before using HTTPS. HTTP bookmarks redirect to HTTPS on the same port.\n'
+
     ;;
   https-root)
     [ "$#" -eq 2 ] && [ -f "$task_https_override" ] || { echo 'Usage after enabling HTTPS: sh bin/dst-docker https-root OUTPUT.crt' >&2; exit 1; }

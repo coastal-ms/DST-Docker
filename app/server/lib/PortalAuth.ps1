@@ -546,7 +546,10 @@ function Get-DuneDockerTlsOrigin {
         if(-not $proof -or -not (Test-DunePortalFixedTimeEqual ([Text.Encoding]::UTF8.GetBytes($proof)) ([Text.Encoding]::UTF8.GetBytes($config.secret)))){return $null}
         $origin=[uri]$config.origin
         if($origin.Scheme -cne 'https' -or $origin.UserInfo -or $origin.AbsolutePath -ne '/' -or $origin.Query -or $origin.Fragment){return $null}
-        if([string]$Request.Headers['Host'] -ine $origin.Authority){return $null}
+        if($env:DST_HTTP_INTERNAL_PORT){
+            if([string]$Request.Headers['Host'] -ine "127.0.0.1:$($env:DST_HTTP_INTERNAL_PORT)" -or
+               [string]$Request.Headers['X-Dst-Tls-Authority'] -ine $origin.Authority){return $null}
+        } elseif([string]$Request.Headers['Host'] -ine $origin.Authority){return $null}
         return $origin
     } catch {return $null}
 }

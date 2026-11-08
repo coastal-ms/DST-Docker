@@ -25,3 +25,28 @@ Describe 'Persistent Docker console port' {
         }
     }
 }
+
+Describe 'Private Docker console listener' {
+    BeforeEach {
+        $script:OldPrivatePort=$env:DST_HTTP_INTERNAL_PORT
+        $script:OldTlsConfig=$env:DST_TLS_PROXY_CONFIG
+    }
+    AfterEach {
+        $env:DST_HTTP_INTERNAL_PORT=$script:OldPrivatePort
+        $env:DST_TLS_PROXY_CONFIG=$script:OldTlsConfig
+    }
+    It 'uses the private port only with a configured TLS proxy' {
+        $env:DST_TLS_PROXY_CONFIG='fixture-proxy.json'
+        $env:DST_HTTP_INTERNAL_PORT='18088'
+        Get-DuneDockerListenerPort|Should -Be 18088
+        $env:DST_TLS_PROXY_CONFIG=''
+        {Get-DuneDockerListenerPort}|Should -Throw
+    }
+    It 'rejects malformed private ports' {
+        $env:DST_TLS_PROXY_CONFIG='fixture-proxy.json'
+        foreach($value in @('true','80','65536','18088.5')){
+            $env:DST_HTTP_INTERNAL_PORT=$value
+            {Get-DuneDockerListenerPort}|Should -Throw
+        }
+    }
+}

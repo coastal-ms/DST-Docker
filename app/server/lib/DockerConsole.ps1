@@ -8,6 +8,15 @@ function Get-DuneDockerConsolePort {
     return [int]$value.port
 }
 
+function Get-DuneDockerListenerPort {
+    if(-not $env:DST_HTTP_INTERNAL_PORT){return Get-DuneDockerConsolePort}
+    $port=0
+    if(-not $env:DST_TLS_PROXY_CONFIG -or -not [int]::TryParse($env:DST_HTTP_INTERNAL_PORT,[ref]$port) -or $port -lt 1024 -or $port -gt 65535){
+        throw 'The private HTTPS console listener configuration is invalid.'
+    }
+    return $port
+}
+
 function Set-DuneDockerConsolePort {
     param([Parameter(Mandatory)][ValidateRange(1024,65535)][int]$Port,
           [string]$Path='/data/config/DuneServer/docker-console.json')

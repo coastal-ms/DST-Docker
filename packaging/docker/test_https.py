@@ -29,9 +29,11 @@ class HttpsTests(unittest.TestCase):
         self.assertEqual(json.loads(config['proxy.json'])['origin'],'https://192.0.2.1:8443')
 
     def test_override_preserves_http_config_and_keeps_private_authority_away_from_app(self):
-        config=tls.compose_override('dst','https://192.0.2.1:8443')
+        config=tls.compose_override('dst','https://192.0.2.1:8088',18088)
         app=config['services']['dst'];proxy=config['services']['https']
-        self.assertNotIn('DST_HTTP_BIND_ADDRESS',app['environment'])
+        self.assertEqual(app['environment']['DST_HTTP_BIND_ADDRESS'],'127.0.0.1')
+        self.assertEqual(app['environment']['DST_HTTP_INTERNAL_PORT'],'18088')
+        self.assertEqual(config['x-dst-https-format'],2)
         self.assertEqual(app['volumes'],['dst-https-config:/run/dst-tls:ro'])
         self.assertNotIn('build',proxy)
         self.assertEqual(proxy['user'],'10001:10001')
@@ -59,3 +61,28 @@ class HttpsTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError,'does not belong'):tls.export(args)
                 self.assertEqual(docker.call_count,1)
             self.assertFalse(output.exists())
+
+    def test_update_preserves_authority_and_secret_and_validates_before_writing(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output=Path(temporary)/'https.json'
+            output.write_text(json.dumps(tls.compose_override('dst','https://192.0.2.1:8443',18088)))
+            args=argparse.Namespace(project='dst',address='192.0.2.1',port=8088,upstream_port=18088,output=str(output),app_image='fixture')
+            calls=[]
+            def fake(*parts,input=None):
+                calls.append((parts,input))
+                if parts[:2]==('volume','inspect'):return '{"com.dst.https.project":"dst"}'
+                if parts[-1]=='/tls/proxy.json':return json.dumps({'secret':'a'*64})
+                return ''
+            with patch.object(tls,'docker',side_effect=fake):tls.update(args)
+            self.assertEqual(json.loads(output.read_text())['x-dst-https-origin'],'https://192.0.2.1:8088')
+            writes=[(parts,payload) for parts,payload in calls if 'python3' in parts]
+            self.assertEqual(len(writes),1)
+            self.assertIn('a'*64,writes[0][1])
+            self.assertFalse(any('dst-dst-https-data:/data' in part for parts,_ in calls for part in parts))
+            before=output.read_bytes()
+            def fail(*parts,input=None):
+                if 'validate' in parts:raise RuntimeError('invalid replacement')
+                return fake(*parts,input=input)
+            with patch.object(tls,'docker',side_effect=fail):
+                with self.assertRaises(RuntimeError):tls.update(args)
+            self.assertEqual(output.read_bytes(),before)

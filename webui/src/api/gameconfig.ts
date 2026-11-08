@@ -1,6 +1,5 @@
 // GameConfig API — typed wrappers around /api/gameconfig/*
 import { api, withOnlinePlayerGuard } from './client'
-import { applyBrowserClientSettings, applyBrowserLandclaimTimer, downloadBrowserClientFile, getBrowserClientInfo, setBrowserClientEngineEnabled } from './browserClientFiles'
 import type {
   GameConfigSchemaResponse,
   GameConfigExperimentalCategoriesResponse,
@@ -164,7 +163,7 @@ export function saveGameConfigRaw(updates: GameConfigRawUpdate[]) {
 }
 
 export function saveLabLocal(updates: GameConfigRawUpdate[], validateOnly = false) {
-  if (import.meta.env.VITE_DST_EDITION === 'docker') return applyBrowserClientSettings(updates, validateOnly)
+  if (import.meta.env.VITE_DST_EDITION === 'docker') return Promise.reject(new Error('Docker provides manual player compatibility instructions. Edit player INI files on the player PC.'))
   return api<GameConfigClientApplyResult>('/api/gameconfig/client/lab', {
     method: 'PUT', body: JSON.stringify({ approved: true, updates, validateOnly }),
   })
@@ -188,12 +187,12 @@ export function deleteGameConfigBackups(paths: string[]) {
 // --- Local client config (admin's own machine) -----------------------------
 
 export function getGameConfigClient() {
-  if (import.meta.env.VITE_DST_EDITION === 'docker') return getBrowserClientInfo()
+  if (import.meta.env.VITE_DST_EDITION === 'docker') return Promise.reject(new Error('Docker provides manual player compatibility instructions. Edit player INI files on the player PC.'))
   return api<GameConfigClientInfo>('/api/gameconfig/client')
 }
 
 export function setGameConfigClientDir(dir: string) {
-  if (import.meta.env.VITE_DST_EDITION === 'docker') return getBrowserClientInfo()
+  if (import.meta.env.VITE_DST_EDITION === 'docker') return Promise.reject(new Error('Docker provides manual player compatibility instructions. Edit player INI files on the player PC.'))
   return api<GameConfigClientInfo>('/api/gameconfig/client/dir', {
     method: 'PUT',
     body: JSON.stringify({ dir }),
@@ -201,7 +200,7 @@ export function setGameConfigClientDir(dir: string) {
 }
 
 export function setGameConfigClientEngineEnabled(enabled: boolean, dir?: string) {
-  if (import.meta.env.VITE_DST_EDITION === 'docker') return setBrowserClientEngineEnabled(enabled)
+  if (import.meta.env.VITE_DST_EDITION === 'docker') return Promise.reject(new Error('Docker provides manual player compatibility instructions. Edit player INI files on the player PC.'))
   return api<GameConfigClientEngineGateResult>('/api/gameconfig/client/engine', {
     method: 'PUT',
     body: JSON.stringify({ enabled, ...(dir ? { dir } : {}) }),
@@ -209,7 +208,7 @@ export function setGameConfigClientEngineEnabled(enabled: boolean, dir?: string)
 }
 
 export function applyGameConfigClient(items: GameConfigClientApplyItem[], dir?: string) {
-  if (import.meta.env.VITE_DST_EDITION === 'docker') return applyBrowserClientSettings(items.map(item => ({ file: item.file, section: item.section, key: item.key, value: item.value })), false, false)
+  if (import.meta.env.VITE_DST_EDITION === 'docker') return Promise.reject(new Error('Docker provides manual player compatibility instructions. Edit player INI files on the player PC.'))
   return api<GameConfigClientApplyResult>('/api/gameconfig/client/apply', {
     method: 'PUT',
     body: JSON.stringify({
@@ -220,7 +219,7 @@ export function applyGameConfigClient(items: GameConfigClientApplyItem[], dir?: 
 }
 
 export function openGameConfigClientFile(file: 'game' | 'engine' = 'game', dir?: string) {
-  if (import.meta.env.VITE_DST_EDITION === 'docker') return downloadBrowserClientFile(file)
+  if (import.meta.env.VITE_DST_EDITION === 'docker') return Promise.reject(new Error('Docker provides manual player compatibility instructions. Edit player INI files on the player PC.'))
   return api<{ ok: boolean; path: string }>('/api/gameconfig/client/open', {
     method: 'POST',
     body: JSON.stringify({ file, ...(dir ? { dir } : {}) }),
@@ -229,36 +228,16 @@ export function openGameConfigClientFile(file: 'game' | 'engine' = 'game', dir?:
 
 // --- Land-claim (staking unit) extension timer ------------------------------
 
-export async function getLandclaimTimer() {
-  const state = await api<LandclaimTimerState>('/api/gameconfig/landclaim-timer')
-  if (import.meta.env.VITE_DST_EDITION !== 'docker') return state
-  try {
-    const client = await getBrowserClientInfo()
-    return { ...state, client: { exists: client.game.exists, dirExists: client.dirExists, path: client.game.path, dir: client.dir,
-      enabled: false, seconds: '', formattedOk: false, ...client.landclaimTimer, browserDelivery: client.browserDelivery } }
-  } catch (e) { return { ...state, client: { ...state.client, reason: e instanceof Error ? e.message : String(e) } } }
+export function getLandclaimTimer() {
+  return api<LandclaimTimerState>('/api/gameconfig/landclaim-timer')
 }
 
-export async function saveLandclaimTimer(enabled: boolean, seconds: string, includeClient = false) {
-  const docker = import.meta.env.VITE_DST_EDITION === 'docker'
-  if (docker && includeClient) await applyBrowserLandclaimTimer(enabled, seconds, true)
-  const result = await withOnlinePlayerGuard(force =>
+export async function saveLandclaimTimer(enabled: boolean, seconds: string) {
+  return withOnlinePlayerGuard(force =>
     api<LandclaimTimerSaveResponse>(`/api/gameconfig/landclaim-timer${fq(force)}`, {
-      method: 'PUT',
-      body: JSON.stringify({ enabled, seconds }),
+      method: 'PUT', body: JSON.stringify({ enabled, seconds }),
     }),
   )
-  if (!docker) return result
-  if (includeClient) {
-    try {
-      const client = await applyBrowserLandclaimTimer(enabled, seconds)
-      result.result.client = { ok: true, applied: client.applied > 0, delivery: client.delivery === 'download' || client.delivery === 'validated' ? client.delivery : undefined }
-    } catch (e) {
-      result.result.client = { ok: false, applied: false, reason: e instanceof Error ? e.message : String(e) }
-    }
-  }
-  try { return { ...result, ...await getLandclaimTimer() } }
-  catch { return { ...result, warning: 'The server timer was saved, but the refreshed status could not be loaded. Refresh before changing it again.' } }
 }
 
 export function getSpicefields() {

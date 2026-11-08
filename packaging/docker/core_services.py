@@ -81,6 +81,8 @@ def game_spec(plan,partition,credentials,bridge_address,defaults):
            'usr/local/share/ca-certificates/dst-connection.crt':{'data':credentials['tls']['ca.pem']}}
     # Settings are seeded only into a brand-new owned Saved volume. Later
     # updates must compare and explicitly preserve users' manual edits.
+    if partition==1 and defaults:
+        files['home/dune/server/DuneSandbox/Saved/UserSettings']={'directory':True,'uid':1000,'gid':65534,'mode':0o700}
     for name,data in (defaults.items() if partition==1 else []):
         if name not in {'UserEngine.ini','UserGame.ini','UserServerCustomSettings.ini'}: raise ValueError('Invalid stock settings file.')
         files['home/dune/server/DuneSandbox/Saved/UserSettings/'+name]={'data':data,'uid':1000,'gid':65534,'mode':0o600}

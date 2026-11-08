@@ -3,6 +3,7 @@ BeforeAll {
     Import-DstLib 'PortalAuth.ps1'
     . (Join-Path (Get-DstRepoRoot) 'app/server/HttpServer.ps1')
     $script:HttpsOldBackend=$env:DST_HOSTING_BACKEND
+    $script:HttpsOldInternal=$env:DST_HTTP_INTERNAL_PORT
     $script:HttpsOldConfig=$env:DST_TLS_PROXY_CONFIG
     $env:DST_HOSTING_BACKEND='docker'
     $env:DST_TLS_PROXY_CONFIG=Join-Path $TestDrive 'proxy.json'
@@ -18,9 +19,11 @@ BeforeAll {
 AfterAll {
     $env:DST_HOSTING_BACKEND=$script:HttpsOldBackend
     $env:DST_TLS_PROXY_CONFIG=$script:HttpsOldConfig
+    $env:DST_HTTP_INTERNAL_PORT=$script:HttpsOldInternal
 }
 Describe 'Paired Docker HTTPS proxy' {
     BeforeEach {
+        $env:DST_HTTP_INTERNAL_PORT=''
         $env:DST_HOSTING_BACKEND='docker'
         @{origin='https://192.0.2.10:8443';secret=$script:HttpsSecret}|ConvertTo-Json|Set-Content $env:DST_TLS_PROXY_CONFIG
     }
@@ -33,6 +36,19 @@ Describe 'Paired Docker HTTPS proxy' {
         Clear-DunePortalSessionCookie $response -Request $request
         $response.Headers['Set-Cookie']|Should -Match '; Secure; HttpOnly; SameSite=Strict'
         Test-DuneLocalOnlyRequest $request|Should -BeFalse
+    }
+    It 'accepts a private listener only with the paired public authority and rejects forged authorities' {
+        $env:DST_HTTP_INTERNAL_PORT='18088'
+        $request=New-TlsRequest
+        $request.Headers.Host='127.0.0.1:18088'
+        $request.Headers['X-Dst-Tls-Authority']='192.0.2.10:8443'
+        Test-DunePortalRequestOrigin $request|Should -BeTrue
+        Test-DuneLocalOnlyRequest $request|Should -BeFalse
+        $request.Headers['X-Dst-Tls-Authority']='evil.example:8443'
+        Test-DunePortalRequestOrigin $request|Should -BeFalse
+        $request.Headers['X-Dst-Tls-Authority']='192.0.2.10:8443'
+        $request.Headers.Host='127.0.0.1:18089'
+        Test-DunePortalRequestOrigin $request|Should -BeFalse
     }
     It 'rejects HTTPS claims without a valid pairing secret' {
         foreach($secret in @('',('b'*64))){

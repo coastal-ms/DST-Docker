@@ -23,4 +23,12 @@ def portal_urls(local_url, addresses):
 
 
 if __name__ == '__main__':
-    print('\n'.join(portal_urls(sys.stdin.read(), sys.argv[1:])))
+    local = sys.stdin.read()
+    if sys.argv[1:2] == ['--https-origin']:
+        parsed = urlsplit(portal_urls(local, [])[0])
+        origin = urlsplit(sys.argv[2])
+        if origin.scheme != 'https' or not origin.hostname or not origin.port or origin.path or origin.query or origin.fragment or origin.username:
+            raise ValueError('The HTTPS origin is invalid.')
+        print(urlunsplit(parsed._replace(scheme='https', netloc=origin.netloc)))
+    else:
+        print('\n'.join(portal_urls(local, sys.argv[1:])))
