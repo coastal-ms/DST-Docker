@@ -32,6 +32,8 @@ import asset_updates
 import service_generations
 import world_update
 import resource_policy
+import memory_swap
+import memory_swap_control
 import regis_compatibility
 import backup_schedule
 import backup_mirror_control
@@ -204,6 +206,7 @@ def public_state(state, engine):
     return {'projectId': state['id'], 'phase': state['phase'], 'assets': assets, 'assetUpdate': update,
             'fileBrowser': browser_status,
             'regisPending':bool(state.get('pendingRegisChange')),
+            'swapPending':bool(state.get('pendingSwapChange')),
             'database': database, 'credentialsSaved': (STATE / 'funcom-token').is_file(),
             'profile':state.get('profile'), 'partitionsPrepared':bool(state.get('partitionsPrepared')),
             'connectionServices':connections,'services':services,'desiredState':state.get('desiredState','stopped'),
@@ -607,7 +610,7 @@ def prepare_connections(state,engine):
     if state['phase']!='database-ready' or not state.get('partitionsPrepared'):
         raise ValueError('Prepare the world database and layout first.')
     template=read_template()
-    plan=plan_world(state['id'],state['profile'],template,assets_state(),state['database'],state.get('mapMemoryOverrides'))
+    plan=plan_world(state['id'],state['profile'],template,assets_state(),state['database'],state.get('mapMemoryOverrides'),state.get('memorySwap'))
     previous=state.get('worldPlan')
     if previous:
         # Add derived database addressing to early local-preview journals.
@@ -809,6 +812,7 @@ def stop_database_only(state,engine):
 
 
 def start_services(state,engine,publish_gateway=True):
+    if state.get('pendingSwapChange'):raise ValueError('Retry or restore the pending Memory Swap change before starting maps.')
     regis_compatibility.assert_prepared_images(state,engine)
     if state.get('pendingResourceChange'):raise ValueError('Finish the pending resource allocation before starting the world.')
     if type(publish_gateway) is not bool:raise ValueError('The gateway publication choice must be a JSON boolean.')
@@ -1087,7 +1091,8 @@ def set_resources(state,engine,request):
         entries.append((component,entry['id'],allocation))
     state['pendingResourceChange']=change;save(state)
     for component,identifier,allocation in entries:
-        engine.set_component_memory(identifier,state['id'],component,int(allocation['memoryGiB']*1024**3))
+        if state.get('memorySwap'):engine.set_component_memory(identifier,state['id'],component,int(allocation['memoryGiB']*1024**3),state['memorySwap'])
+        else:engine.set_component_memory(identifier,state['id'],component,int(allocation['memoryGiB']*1024**3))
         engine.set_component_cpu(identifier,state['id'],component,allocation['cpus'])
     state['resourcePolicy']={'memoryGiB':change['memoryGiB']}
     state['mapMemoryOverrides']={item['map']:int(item['memoryGiB']*1024**3) for item in change['maps']}
@@ -1122,7 +1127,9 @@ def set_map_memory(state,engine,map_name,gib):
     if reserved>int(counters['MemTotal'])*1024-2*1024**3 or increase+2*1024**3>int(counters['MemAvailable'])*1024:
         raise ValueError('The requested map allocation needs more memory than is available with 2 GiB host headroom.')
     state['pendingMemoryChange']={'map':map_name,'bytes':amount};save(state)
-    for component,identifier in instances:engine.set_component_memory(identifier,state['id'],component,amount)
+    for component,identifier in instances:
+        if state.get('memorySwap'):engine.set_component_memory(identifier,state['id'],component,amount,state['memorySwap'])
+        else:engine.set_component_memory(identifier,state['id'],component,amount)
     state.setdefault('mapMemoryOverrides',{})[map_name]=amount
     rows[0]['memoryBytes']=amount
     state['worldPlan']['initialMemoryBytes']=sum(row['memoryBytes']*row['initialReplicas'] for row in state['worldPlan']['maps'])
@@ -1288,7 +1295,7 @@ def reconfigure_address(state,engine,profile):
         raise ValueError('The installed game package changed; review the server update before changing network settings.')
     # Preserve the actual installed INI, including deliberate manual changes.
     director_ini=engine.read_director_config(state['services']['director']['id'],state['id'])
-    plan=plan_world(state['id'],profile,template,assets_state(),state['database'],state.get('mapMemoryOverrides'))
+    plan=plan_world(state['id'],profile,template,assets_state(),state['database'],state.get('mapMemoryOverrides'),state.get('memorySwap'))
     state['pendingAddressChange']={'previousProfile':state['profile'],'previousPlan':state['worldPlan'],'startedAt':time.time()}
     state.update(profile=profile,worldPlan=plan);save(state)
     credentials=read_credentials(state)
@@ -1452,6 +1459,8 @@ def run_operation(state,engine,request):
         elif action=='settings.prepare':prepare_settings_service(state,engine)
         elif action=='regis.set':state['operation']['result']=regis_compatibility.Compatibility(state,engine,sys.modules[__name__]).set(request['enabled'],request.get('acknowledgeStoredTanks',False))
         elif action=='regis.recover':state['operation']['result']=regis_compatibility.Compatibility(state,engine,sys.modules[__name__]).recover()
+        elif action=='memory-swap.set':state['operation']['result']=memory_swap_control.configure(state,engine,save,request)
+        elif action=='memory-swap.recover':state['operation']['result']=memory_swap_control.recover(state,engine,save,request.get('restorePrevious',False))
         elif action=='logs.export':state['operation']['result']=export_logs(state,engine,request.get('scope'),state['operation']['id'])
         elif action=='updates.stage':state['operation']['result']=asset_updates.start_stage(state,engine,request.get('expectedBuild'),save)
         elif action=='updates.apply':state['operation']['result']=world_update.NativeUpdate(state,engine,sys.modules[__name__]).apply(request.get('expectedBuild'),request.get('allowOnline',False),request.get('withTanks',False))
@@ -1498,6 +1507,7 @@ def dispatch(request, engine=None):
         if action == 'files.endpoint': return file_browser.endpoint(state, engine)
         if action == 'regis.status': return regis_compatibility.status(state,engine)
         if action == 'regis.support': return regis_compatibility.support(state,engine)
+        if action == 'memory-swap.status': return memory_swap_control.snapshot(state,engine)
         if action == 'assets.version': return installed_version()
         if action=='backups.schedule.get':return backup_schedule.snapshot(state,time.time(),bool(BACKUP_WORKER and BACKUP_WORKER.is_alive()))
         if action=='backups.history':return backup_schedule.history(state,request.get('recent',10))
@@ -1522,6 +1532,8 @@ def dispatch(request, engine=None):
             raise ValueError('Recover the interrupted research operation before starting another operation.')
         if state.get('pendingMemoryChange') and action!='maps.memory':raise ValueError('Finish the pending map memory allocation first.')
         if state.get('pendingResourceChange') and action!='resources.set':raise ValueError('Finish the pending resource allocation first.')
+        if state.get('pendingSwapChange') and action not in {'memory-swap.set','memory-swap.recover','services.stop','logs.export'}:
+            raise ValueError('Retry or restore the pending Memory Swap change before another server operation.')
         if state.get('pendingRegisChange') and action not in {'regis.set','regis.recover','services.stop','logs.export'}:
             raise ValueError('Finish or restore the pending Tank change in Server Settings before another server operation.')
         if state.get('backupCleanup') and action in {'backups.create','backups.verify','backups.restore','backups.delete','backups.import','backups.schedule.recover','updates.apply','updates.recover','database.migrate','world-restart.apply','world-restart.rollback','world-restart.research'}:
@@ -1569,8 +1581,11 @@ def dispatch(request, engine=None):
             reply=settings_client.request({'action':'backups.create','files':request.get('files')})
             if not reply.get('ok'):raise ValueError(reply.get('error','Settings backups could not be created.'))
             return reply['data']
-        if action in {'database.create','database.initialize','database.migrate','database.start','database.stop','world.configure','world.rename','connections.prepare',
+        if action in {'memory-swap.set','memory-swap.recover','database.create','database.initialize','database.migrate','database.start','database.stop','world.configure','world.rename','connections.prepare',
                       'services.prepare','services.start','services.stop','services.restart','services.refresh-core-adapters','scale.prepare','maps.start','maps.stop','maps.restart','maps.observers.prepare','files.prepare','settings.prepare','regis.set','regis.recover','logs.export','updates.stage','updates.apply','updates.recover','rmq.publish','rmq.courier','games.refresh-adapters','backups.create','backups.verify','backups.restore','backups.delete','backups.cleanup.recover','backups.export','backups.import','backups.schedule.recover','backups.mirror.sync','backups.mirror.recover','world-restart.apply','world-restart.recover','world-restart.rollback','world-restart.research','world-restart.research-recover'}:
+            if action=='memory-swap.set':memory_swap.validate(request)
+            if action=='memory-swap.recover' and (type(request.get('restorePrevious',False)) is not bool or request.get('confirmation')!='RECOVER MEMORY SWAP'):
+                raise ValueError('Confirm Memory Swap recovery and supply a JSON boolean for restoring its previous policy.')
             if action in {'world-restart.apply','world-restart.rollback'} and request.get('confirmation')!=('RESTART WORLD' if action=='world-restart.apply' else 'ROLL BACK WORLD'):
                 raise ValueError('Supply the exact World Restart confirmation.')
             if action=='world-restart.research' and request.get('confirmation')!='RESET RESEARCH':raise ValueError('Supply the exact research recovery confirmation.')

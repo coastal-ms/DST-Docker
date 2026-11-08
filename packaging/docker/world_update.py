@@ -220,7 +220,7 @@ class NativeUpdate:
             self.phase('validating',stageId=update['id'])
             root=Path('/assets/staged')/update['id'];template=read_template(root/'server/scripts/setup/templates/world-template.yaml')
             report=json.loads((root/'install-state.json').read_text())
-            plan=plan_world(self.s['id'],self.s['profile'],template,report,self.s['database'],self.s.get('mapMemoryOverrides'))
+            plan=plan_world(self.s['id'],self.s['profile'],template,report,self.s['database'],self.s.get('mapMemoryOverrides'),self.s.get('memorySwap'))
             if with_tanks:self.validate_tank_plan(plan)
             if any(int(name[5:]) not in {r['partition'] for r in plan['games']} for name in self.s['services'] if name.startswith('game-')):raise ValueError('An installed map was removed from this package; review its saved data before updating.')
             status=self.m.public_state(self.s,self.e)

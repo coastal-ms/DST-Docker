@@ -78,6 +78,7 @@ def validate_change(state, request, host):
 
 
 def admit(state, engine, partitions):
+    if state.get('pendingSwapChange'):raise ValueError('Retry or restore the pending Memory Swap change before starting maps.')
     policy = state.get('resourcePolicy')
     if not policy: return
     if state.get('pendingResourceChange'): raise ValueError('Finish the pending resource allocation before starting maps.')

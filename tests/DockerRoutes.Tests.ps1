@@ -3,6 +3,13 @@ BeforeAll {
     Import-DstLib 'DockerRoutes.ps1'
 }
 Describe 'Docker adapter routing boundary' {
+    It 'exposes only typed Owner Memory Swap status, configuration and recovery routes' {
+        foreach($method in @('GET','PUT')){Test-DuneDockerRouteQualified -Method $method -Path '/api/docker/memory-swap'|Should -BeTrue}
+        Test-DuneDockerRouteQualified -Method POST -Path '/api/docker/memory-swap'|Should -BeFalse
+        Test-DuneDockerRouteQualified -Method POST -Path '/api/docker/memory-swap/recover'|Should -BeTrue
+        Test-DuneDockerRouteQualified -Method GET -Path '/api/docker/memory-swap/recover'|Should -BeFalse
+        Test-DuneDockerRouteQualified -Method PUT -Path '/api/docker/memory-swap/extra'|Should -BeFalse
+    }
     It 'permits exact native Owner diagnostics and rename writes through the desktop-host boundary' {
         Test-DuneDockerOwnerHostRoute -Method POST -Path '/api/diagnostics/bundle'|Should -BeTrue
         Test-DuneDockerRouteQualified -Method POST -Path '/api/diagnostics/bundle'|Should -BeTrue

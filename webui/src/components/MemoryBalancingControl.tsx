@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api/client'
+import { MemorySwapControl } from './MemorySwapControl'
 
 export function MemoryBalancingControl() {
   const [enabled, setEnabled] = useState<boolean | null>(null)
@@ -27,5 +28,6 @@ export function MemoryBalancingControl() {
     </button>
     <p className="mt-2 text-xs text-text-dim">{enabled === false ? 'Classic DST behavior: the usual map startup and Warm controls decide which maps stay loaded.' : 'Empty on-demand maps can unload to free RAM. Entering a cold map takes longer; Warm keeps a chosen map ready.'}</p>
     {error && <p role="alert" className="mt-2 text-xs text-danger">{error}</p>}
+    <MemorySwapControl />
   </div>
 }

@@ -1,6 +1,7 @@
 """Native Funcom component adapters. No Kubernetes API or third-party patches."""
 from pathlib import Path
 import re
+import memory_swap
 
 
 def service_specs(plan,template,credentials):
@@ -93,6 +94,7 @@ def game_spec(plan,partition,credentials,bridge_address,defaults):
                            'FuncomLiveServices__ServiceAuthToken':credentials['token'],
                            'RMQ_HTTP_TOKEN_AUTH_SECRET':credentials['rmqSecret'],'fls-apikey':credentials['apiKey']},
             'command':arguments,'entrypoint':['/dst-game.sh'],'host_network':True,'memory':map_info['memoryBytes'],'map_name':game['map'],
+            'memory_swap':memory_swap.total_limit(map_info['memoryBytes'],plan.get('memorySwap')),
             'volumes':[{'name':'dst-'+plan['projectId']+'-game-'+str(partition)+'-saved',
                         'target':'/home/dune/server/DuneSandbox/Saved','mustBeNew':True}]+(
                        [{'name':'dst-'+plan['projectId']+'-game-1-saved','target':'/home/dune/server/DuneSandbox/Saved/UserSettings',

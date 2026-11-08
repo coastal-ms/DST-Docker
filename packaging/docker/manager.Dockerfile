@@ -5,6 +5,7 @@ RUN pip install --no-cache-dir PyYAML==6.0.3
 RUN groupadd --gid 10001 dst && mkdir -p /control /projects && chgrp dst /control && chmod 750 /control
 COPY packaging/docker/engine.py packaging/docker/manager.py /opt/dst-manager/
 COPY packaging/docker/resource_policy.py /opt/dst-manager/resource_policy.py
+COPY packaging/docker/memory_swap.py packaging/docker/memory_swap_control.py packaging/docker/host_memory_swap.py /opt/dst-manager/
 COPY packaging/docker/backup_schedule.py packaging/docker/backup_storage.py /opt/dst-manager/
 COPY packaging/docker/backup_import.py /opt/dst-manager/backup_import.py
 COPY packaging/docker/migration-job.py /opt/dst-manager/migration-job.py

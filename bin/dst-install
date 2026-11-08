@@ -75,6 +75,9 @@ if ((EUID != 0)); then
 fi
 task_need_apt=0
 if ((!task_has_cli || !task_has_python)); then task_need_apt=1; fi
+for task_swap_tool in findmnt mkswap swapon swapoff sysctl; do
+  if ! command -v "$task_swap_tool" >/dev/null 2>&1; then task_need_apt=1; fi
+done
 if [[ -n "$task_source" ]] && ! command -v git >/dev/null 2>&1; then task_need_apt=1; fi
 printf '[2/5] Preparing dependencies\n'
 if ((task_need_apt)); then
@@ -90,7 +93,7 @@ if ((task_need_apt)); then
   if ((${#task_sudo[@]})); then sudo -v; fi
   task_stage='installing prerequisites'
   "${task_sudo[@]}" apt-get update
-  task_packages=(ca-certificates curl python3)
+  task_packages=(ca-certificates curl python3 util-linux procps)
   if [[ -n "$task_source" ]]; then task_packages+=(git); fi
   "${task_sudo[@]}" apt-get install -y "${task_packages[@]}"
   if ((!task_has_cli)); then

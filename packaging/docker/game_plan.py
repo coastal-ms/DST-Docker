@@ -33,7 +33,7 @@ def memory_bytes(value):
     return int(match[1])*{'Ki':1024,'Mi':1024**2,'Gi':1024**3,'Ti':1024**4,None:1}[match[2]]
 
 
-def plan_world(project,profile,template,assets,database,memory_overrides=None):
+def plan_world(project,profile,template,assets,database,memory_overrides=None,swap_policy=None):
     if not re.fullmatch(r'[a-f0-9]{32}',project): raise ValueError('Invalid project identity.')
     profile=validate_profile(profile)
     images=official_images(assets)
@@ -79,7 +79,7 @@ def plan_world(project,profile,template,assets,database,memory_overrides=None):
         raise ValueError('Choose a lower game-port base; the world port ranges overlap or exceed 65535.')
     if database['port'] in all_ports:
         raise ValueError('World ports overlap the database port. Choose another game-port base.')
-    return {'projectId':project,'templateSha256':template['sha256'],'profile':profile,'images':images,
+    return {'projectId':project,'templateSha256':template['sha256'],'profile':profile,'images':images,'memorySwap':swap_policy,
             'names':{key:prefix+key for key in COMPONENTS if key!='game'},'ports':ports,
             'maps':maps,'games':games,'network':database['network'],'databaseName':database['name'],'databasePort':database['port'],
             'initialMemoryBytes':sum(item['memoryBytes']*item['initialReplicas'] for item in maps)}

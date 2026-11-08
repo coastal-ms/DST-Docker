@@ -3,6 +3,11 @@ BeforeAll {
     Import-DstLib 'Commands.ps1'
 }
 Describe 'Docker command catalogue and saved layout' {
+    It 'keeps shutdown and logs available while an interrupted swap change blocks starts and restarts' {
+        $state=@{hostingBackend='docker';prepared=$true;desiredState='running';activeServices=$true;swapPending=$true;operation=@{phase='failed'}}
+        foreach($name in @('start','restart','apply-inis','update')){(Get-DuneCommandAvailability -Command @{Name=$name} -State $state).available|Should -BeFalse}
+        foreach($name in @('stop','logs-export','operator-logs-export')){(Get-DuneCommandAvailability -Command @{Name=$name} -State $state).available|Should -BeTrue}
+    }
     It 'allows retrying an interrupted stop while containers remain active' {
         $state=@{hostingBackend='docker';prepared=$true;desiredState='stopped';activeServices=$true;operation=@{phase='failed'}}
         (Get-DuneCommandAvailability -Command @{Name='stop'} -State $state).available | Should -BeTrue

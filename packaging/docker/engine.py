@@ -44,16 +44,54 @@ class Engine:
                           'Mounts':[{'Type':'volume','Source':assets_volume,'Target':'/srv/dst'}],
                           'LogConfig':{'Type':'json-file','Config':{'max-size':'2m','max-file':'2'}}}})['Id']
 
-    def set_component_memory(self, identifier, project, component, amount):
+    def set_component_memory(self, identifier, project, component, amount, swap_policy=None):
         if not re.fullmatch(r'game-[0-9]+',component) or type(amount) is not int or not 256*1024**2<=amount<=128*1024**3:
             raise ValueError('Invalid map memory allocation.')
         observed=self.assert_owned(identifier,project,component)
         if observed['State']['Status']=='running' and amount<observed['HostConfig']['Memory']:
             raise ValueError('Stop the map before reducing its memory allocation.')
-        self.request('POST','/containers/'+identifier+'/update',{'Memory':amount,'MemorySwap':amount})
+        import memory_swap
+        total=memory_swap.total_limit(amount,swap_policy)
+        self.request('POST','/containers/'+identifier+'/update',{'Memory':amount,'MemorySwap':total})
         observed=self.assert_owned(identifier,project,component)
-        if observed['HostConfig']['Memory']!=amount or observed['HostConfig']['MemorySwap']!=amount:
+        if observed['HostConfig']['Memory']!=amount or observed['HostConfig']['MemorySwap']!=total:
             raise EngineError('The Docker map memory allocation could not be verified.')
+
+    def set_component_swap(self, identifier, project, component, policy):
+        import memory_swap
+        if not re.fullmatch(r'game-[1-9][0-9]*',component):raise ValueError('Only owned game maps have Memory Swap allowances.')
+        observed=self.assert_owned(identifier,project,component)
+        memory=observed['HostConfig']['Memory'];total=memory_swap.total_limit(memory,policy)
+        self.request('POST','/containers/'+identifier+'/update',{'MemorySwap':total})
+        result=self.assert_owned(identifier,project,component)
+        if result['HostConfig']['Memory']!=memory or result['HostConfig']['MemorySwap']!=total:
+            raise EngineError('The game swap allowance could not be verified; its RAM was not changed.')
+
+    def create_host_swap_job(self, project, request):
+        import memory_swap
+        if not re.fullmatch('[a-f0-9]{32}',project):raise ValueError('Invalid host swap ownership.')
+        read_only=request.get('action')=='status'
+        if not read_only:
+            policy=memory_swap.validate(request)
+            self.assert_swap_supported()
+            request={**policy,'action':'configure','confirmation':request['confirmation']}
+        else:request={'action':'status'}
+        own=self.inspect(os.environ['HOSTNAME'])
+        name='dst-'+project+'-host-swap-'+secrets.token_hex(8)
+        return self.request('POST','/containers/create?name='+name,{
+            'Image':own['Image'],'User':'0:0','Entrypoint':['python3','/opt/dst-manager/host_memory_swap.py'],
+            'Cmd':[json.dumps({**request,'project':project})],
+            'Labels':{'io.dst.managed':'true','io.dst.project':project,'io.dst.component':'host-memory-swap'},
+            'HostConfig':{'NetworkMode':'none','Privileged':not read_only,'ReadonlyRootfs':False,
+                          'RestartPolicy':{'Name':'no'},'Memory':128*1024**2,'MemorySwap':128*1024**2,
+                          'PidsLimit':32,'SecurityOpt':['no-new-privileges:true'],
+                          'Mounts':[{'Type':'bind','Source':'/','Target':'/host','ReadOnly':read_only}],
+                          'LogConfig':{'Type':'json-file','Config':{'max-size':'1m','max-file':'1'}}}})['Id']
+
+    def assert_swap_supported(self):
+        info=self.request('GET','/info')
+        if not info.get('SwapLimit') or any('rootless' in value for value in info.get('SecurityOptions',[])):
+            raise ValueError('This Docker host cannot manage swap limits. Use a rootful Linux Docker Engine with swap accounting.')
 
     def set_component_cpu(self, identifier, project, component, cpus):
         if not re.fullmatch(r'game-[0-9]+', component) or (cpus is not None and (type(cpus) not in (int,float) or not .25 <= cpus <= 1024)):
@@ -427,7 +465,7 @@ class Engine:
         return mirror_jobs.create(self,project,request)
 
     def backup_report(self,identifier,project,component):
-        if component not in {'db-backup','db-verify','db-restore','db-migrate','db-files','db-export','db-import','db-mirror'}:raise ValueError('Invalid backup report component.')
+        if component not in {'db-backup','db-verify','db-restore','db-migrate','db-files','db-export','db-import','db-mirror','host-memory-swap'}:raise ValueError('Invalid backup report component.')
         self.assert_owned(identifier,project,component)
         connection=EngineConnection()
         try:
@@ -477,7 +515,7 @@ class Engine:
             'io.dst.managed':'true','io.dst.project':project,'io.dst.component':component}})
 
     def create_component(self, project, component, image, network, environment, command=None, ports=None,
-                         volumes=None, memory=0, host_network=False, entrypoint=None, health=None, map_name=None,generation=None,regis_image=None):
+                         volumes=None, memory=0, host_network=False, entrypoint=None, health=None, map_name=None,generation=None,regis_image=None,memory_swap=None):
         # Internal API only. The Unix/browser dispatcher never accepts these
         # arguments from a client; it derives them from the official template.
         expected={'rmq-admin':'seabass-server-rabbitmq','rmq-game':'seabass-server-rabbitmq',
@@ -530,7 +568,10 @@ class Engine:
         if game:host['Init']=True
         if memory:
             if type(memory) is not int or memory<64*1024*1024: raise ValueError('Invalid component memory budget.')
-            host.update(Memory=memory,MemorySwap=memory)
+            import memory_swap as swap_policy
+            total=swap_policy.total_limit(memory) if game and memory_swap is None else memory if memory_swap is None else memory_swap
+            if type(total) is not int or total<memory:raise ValueError('Invalid combined RAM and swap limit.')
+            host.update(Memory=memory,MemorySwap=total)
         spec={'Image':effective_image,'Env':[key+'='+value for key,value in environment.items()],
               'Labels':{'io.dst.managed':'true','io.dst.project':project,'io.dst.component':component},
               'ExposedPorts':{key:{} for key in bindings},'HostConfig':host,'StopTimeout':120 if game else 30}

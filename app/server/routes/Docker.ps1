@@ -34,6 +34,32 @@ Register-DuneRoute -Method PUT -Path '/api/docker/memory-balancing' -Handler {
     Write-DuneJson -Response $res -Body $reply.data
 }
 
+Register-DuneRoute -Method GET -Path '/api/docker/memory-swap' -Handler {
+    param($req,$res,$routeParams,$body)
+    if($env:DST_HOSTING_BACKEND -ne 'docker'){Write-DuneError -Response $res -Status 404 -Message 'Docker hosting is not enabled.';return}
+    $reply=Invoke-DuneDockerManager -Request @{action='memory-swap.status'}
+    if(-not $reply.ok){Write-DuneError -Response $res -Status 503 -Message $reply.error;return}
+    Write-DuneJson -Response $res -Body $reply.data
+}
+
+Register-DuneRoute -Method PUT -Path '/api/docker/memory-swap' -Handler {
+    param($req,$res,$routeParams,$body)
+    if($env:DST_HOSTING_BACKEND -ne 'docker'){Write-DuneError -Response $res -Status 404 -Message 'Docker hosting is not enabled.';return}
+    if($body -isnot [hashtable]){Write-DuneError -Response $res -Status 400 -Message 'Review and confirm Memory Swap settings.';return}
+    $reply=Invoke-DuneDockerManager -Request @{action='memory-swap.set';enabled=$body.enabled;perServerGiB=$body.perServerGiB;poolGiB=$body.poolGiB;swappiness=$body.swappiness;confirmation=$body.confirmation}
+    if(-not $reply.ok){Write-DuneError -Response $res -Status 409 -Message $reply.error;return}
+    Write-DuneJson -Response $res -Body $reply.data
+}
+
+Register-DuneRoute -Method POST -Path '/api/docker/memory-swap/recover' -Handler {
+    param($req,$res,$routeParams,$body)
+    if($env:DST_HOSTING_BACKEND -ne 'docker'){Write-DuneError -Response $res -Status 404 -Message 'Docker hosting is not enabled.';return}
+    if($body -isnot [hashtable]){Write-DuneError -Response $res -Status 400 -Message 'Review Memory Swap recovery.';return}
+    $reply=Invoke-DuneDockerManager -Request @{action='memory-swap.recover';restorePrevious=$body.restorePrevious;confirmation=$body.confirmation}
+    if(-not $reply.ok){Write-DuneError -Response $res -Status 409 -Message $reply.error;return}
+    Write-DuneJson -Response $res -Body $reply.data
+}
+
 Register-DuneRoute -Method GET -Path '/api/docker/log-exports/{id}' -Handler {
     param($req,$res,$routeParams,$body)
     $id=[string]$routeParams.id

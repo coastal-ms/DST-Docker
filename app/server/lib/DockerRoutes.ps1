@@ -92,6 +92,8 @@ function Test-DuneDockerRouteQualified {
     if($Method -eq 'POST' -and $Path -in @('/api/docker/owner/setup','/api/portal-auth/login','/api/portal-auth/logout','/api/portal-auth/change-password')){return $true}
     if($Path -eq '/api/docker/resources' -and $Method -in @('GET','PUT')){return $true}
     if($Path -eq '/api/docker/memory-balancing' -and $Method -in @('GET','PUT')){return $true}
+    if($Path -eq '/api/docker/memory-swap' -and $Method -in @('GET','PUT')){return $true}
+    if($Path -eq '/api/docker/memory-swap/recover' -and $Method -eq 'POST'){return $true}
     if($Method -eq 'GET' -and $Path -cmatch '^/api/docker/log-exports/[a-f0-9]{32}$'){return $true}
     if($Method -eq 'POST'){
         if($Path -eq '/api/docker/client-files/transform'){return $true}
