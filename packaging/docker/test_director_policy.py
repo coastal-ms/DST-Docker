@@ -1,10 +1,28 @@
 import json
 import unittest
+import urllib.error
 from unittest.mock import Mock,patch
 from director_policy import apply
 
 
 class PolicyTests(unittest.TestCase):
+    def test_starting_director_is_retried_and_an_applied_floor_needs_no_override(self):
+        response=Mock();response.__enter__=Mock(return_value=response);response.__exit__=Mock()
+        response.read.return_value=json.dumps({'instancedMaps':{'Survival_1':{'cfg':{'minServers':0},'webOverrideCfg':{'playerHardCap':42}}}}).encode()
+        with patch('director_policy.urllib.request.urlopen',side_effect=[urllib.error.URLError('not ready'),response]) as opened,patch('director_policy.time.sleep'):
+            self.assertTrue(apply({'host':'dst-'+'a'*32+'-director','map':'Survival_1','floor':0})['applied'])
+        self.assertEqual(opened.call_count,2)
+        self.assertTrue(all(isinstance(call.args[0],str) for call in opened.call_args_list))
+
+    def test_permanent_http_failure_is_not_retried(self):
+        with patch('director_policy.urllib.request.urlopen',side_effect=urllib.error.HTTPError('http://fixture',401,'denied',{},None)) as opened:
+            with self.assertRaises(urllib.error.HTTPError):apply({'host':'dst-'+'a'*32+'-director','map':'Survival_1','floor':0})
+        self.assertEqual(opened.call_count,1)
+
+    def test_startup_retry_has_a_deadline(self):
+        with patch('director_policy.urllib.request.urlopen',side_effect=urllib.error.URLError('not ready')),patch('director_policy.time.monotonic',side_effect=[0,31]):
+            with self.assertRaisesRegex(ValueError,'director is still starting'):apply({'host':'dst-'+'a'*32+'-director','map':'Survival_1','floor':0})
+
     def test_floor_preserves_other_live_overrides_and_checks_activation(self):
         requests=[]
         def open_url(request,timeout):

@@ -3,6 +3,7 @@ import json
 import re
 import sys
 import time
+import urllib.error
 import urllib.request
 
 
@@ -17,7 +18,20 @@ def apply(request):
             raw=response.read(8*1024*1024+1)
         if len(raw)>8*1024*1024:raise ValueError('Director response exceeds its limit.')
         return json.loads(raw)['instancedMaps'][name]
-    current=read()
+    # A newly started director can be running before its HTTP API is ready.
+    # Keep this map operation pending while that owned service finishes booting.
+    deadline=time.monotonic()+30
+    while True:
+        try:
+            current=read()
+            break
+        except (urllib.error.URLError,TimeoutError,ConnectionError) as error:
+            if isinstance(error,urllib.error.HTTPError) and error.code not in {408,502,503,504}:raise
+            if time.monotonic()>=deadline:raise ValueError('The director is still starting; retry the map control.') from None
+            time.sleep(.25)
+    pending=current.get('webOverrideCfg') or {}
+    pending_floor=next((value for key,value in pending.items() if key.lower()=='minservers'),floor)
+    if current['cfg']['minServers']==floor and pending_floor==floor:return {'applied':True}
     override={key:value for key,value in (current.get('webOverrideCfg') or {}).items() if key.lower()!='minservers'}
     override['MinServers']=floor
     payload=json.dumps({'MapName':name,'ClassicalInstancingGroupConfig':override}).encode()

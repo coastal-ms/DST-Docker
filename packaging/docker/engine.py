@@ -645,7 +645,10 @@ class Engine:
         self.assert_owned(scaler,project,'scaler');self.assert_owned(director,project,'director')
         payload={'host':'dst-'+project+'-director','map':map_name,'floor':floor}
         script=Path(__file__).with_name('director_policy.py').read_text()
-        result=json.loads(self.exec_internal(scaler,project,'scaler',['python3','-c',script,json.dumps(payload)]))
+        try:
+            result=json.loads(self.exec_internal(scaler,project,'scaler',['python3','-c',script,json.dumps(payload)]))
+        except (EngineError,ValueError):
+            raise EngineError('The map setting was saved, but the director has not confirmed it yet. Wait for the director to finish starting, then retry the map control.') from None
         if result.get('applied') is not True:raise EngineError('The live director did not confirm the warm setting.')
 
     def exec_internal(self, identifier, project, component, command):
