@@ -3,6 +3,14 @@ BeforeAll {
     Import-DstLib 'DockerRoutes.ps1'
 }
 Describe 'Docker adapter routing boundary' {
+    It 'opens only qualified market reads without enabling vendor mutations' {
+        foreach($path in @('/api/gameplay/status','/api/gameplay/market/items','/api/gameplay/market/listings','/api/gameplay/market/sales','/api/gameplay/market/stats','/api/gameplay/market/categories','/api/gameplay/market/catalog')) {
+            Test-DuneDockerRouteQualified -Method GET -Path $path|Should -BeTrue
+            Test-DuneDockerRouteQualified -Method POST -Path $path|Should -BeFalse
+        }
+        Test-DuneDockerRouteQualified -Method POST -Path '/api/gameplay/market-bot/exec'|Should -BeFalse
+        Test-DuneDockerRouteQualified -Method GET -Path '/api/gameplay/market/unreviewed'|Should -BeFalse
+    }
     It 'exposes only the native browser backup routes and bounded download identities' {
         foreach($path in @('/api/db/backup-schedule','/api/db/backup-history','/api/db/backup-dump-pods')){Test-DuneDockerRouteQualified -Method GET -Path $path|Should -BeTrue}
         Test-DuneDockerRouteQualified -Method POST -Path '/api/docker/backup-import'|Should -BeTrue
