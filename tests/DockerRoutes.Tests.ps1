@@ -8,6 +8,11 @@ Describe 'Docker adapter routing boundary' {
         foreach($method in @('GET','PUT','DELETE')){Test-DuneDockerRouteQualified -Method $method -Path '/api/gameplay/players/max-augment-attributes'|Should -BeFalse}
         Test-DuneDockerRouteQualified -Method POST -Path '/api/gameplay/players/max-augment-attributes/extra'|Should -BeFalse
     }
+    It 'opens only the exact native orphaned-building-piece repair write' {
+        Test-DuneDockerRouteQualified -Method POST -Path '/api/gameplay/players/repair-orphaned-building-pieces'|Should -BeTrue
+        foreach($method in @('GET','PUT','DELETE')){Test-DuneDockerRouteQualified -Method $method -Path '/api/gameplay/players/repair-orphaned-building-pieces'|Should -BeFalse}
+        Test-DuneDockerRouteQualified -Method POST -Path '/api/gameplay/players/repair-orphaned-building-pieces/extra'|Should -BeFalse
+    }
     It 'qualifies exact native character tag write methods' {
         foreach($path in @('/api/gameplay/players/tags','/api/gameplay/players/update-tags')){
             Test-DuneDockerRouteQualified -Method POST -Path $path|Should -BeTrue
