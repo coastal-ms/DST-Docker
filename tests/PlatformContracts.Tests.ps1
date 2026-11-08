@@ -64,7 +64,7 @@
 }
 
 Describe 'Platform capability registry' {
-    It 'advertises qualified native inventory reads without unqualified Docker capabilities' {
+    It 'advertises native inventory, base and Owner vehicle actions without unrelated capabilities' {
         $previousBackend = $env:DST_HOSTING_BACKEND
         try {
             $env:DST_HOSTING_BACKEND = 'docker'
@@ -72,7 +72,12 @@ Describe 'Platform capability registry' {
             $ids | Should -Contain 'inventory.read'
             $ids | Should -Contain 'base.manage'
             $ids | Should -Contain 'base.manage.destructive'
-            $ids | Should -Not -Contain 'vehicle.rename'
+            $ids | Should -Contain 'vehicle.rename'
+            $ids | Should -Contain 'vehicle.delete'
+            $adminIds = @(Get-DuneCapabilitiesForPrincipal -Principal @{type='portal-account';role='admin'} -RuntimePlatform linux).id
+            $adminIds | Should -Contain 'inventory.read'
+            $adminIds | Should -Not -Contain 'vehicle.rename'
+            $adminIds | Should -Not -Contain 'vehicle.delete'
             $ids | Should -Not -Contain 'player.manage.self'
             @(Get-DuneCapabilitiesForPrincipal -Principal @{type='anonymous'} -RuntimePlatform linux).Count | Should -Be 0
         } finally { $env:DST_HOSTING_BACKEND = $previousBackend }

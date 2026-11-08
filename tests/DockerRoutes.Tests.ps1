@@ -36,10 +36,24 @@ Describe 'Docker adapter routing boundary' {
         }
         Test-DuneDockerRouteQualified -Method POST -Path '/api/gameplay/vehicles/names'|Should -BeTrue
         foreach($method in @('GET','PUT','DELETE')){Test-DuneDockerRouteQualified -Method $method -Path '/api/gameplay/vehicles/names'|Should -BeFalse}
-        foreach($path in @('/api/gameplay/vehicles/names/extra','/api/gameplay/vehicles/delete','/api/gameplay/vehicles/repair','/api/gameplay/vehicles/../integrity','/api/gameplay/vehicles/0/integrity')){
+        foreach($path in @('/api/gameplay/vehicles/names/extra','/api/gameplay/vehicles/repair','/api/gameplay/vehicles/../integrity','/api/gameplay/vehicles/0/integrity')){
             Test-DuneDockerRouteQualified -Method POST -Path $path|Should -BeFalse
             Test-DuneDockerRouteQualified -Method GET -Path $path|Should -BeFalse
         }
+    }
+
+    It 'bounds native Owner deletion to exact methods and queue IDs without broad host exceptions' {
+        foreach($path in @('/api/gameplay/vehicles/delete','/api/gameplay/vehicles/deletions','/api/gameplay/vehicles/deletions/process')){
+            Test-DuneDockerRouteQualified -Method POST -Path $path|Should -BeTrue
+            Test-DuneDockerOwnerHostRoute -Method POST -Path $path|Should -BeTrue
+        }
+        Test-DuneDockerRouteQualified -Method GET -Path '/api/gameplay/vehicles/deletions'|Should -BeTrue
+        Test-DuneDockerRouteQualified -Method DELETE -Path ('/api/gameplay/vehicles/deletions/'+('a'*32))|Should -BeTrue
+        foreach($path in @('/api/gameplay/vehicles/delete/all','/api/gameplay/vehicles/deletions/process/extra','/api/gameplay/vehicles/deletions/../process','/api/console','/api/db/query')){
+            Test-DuneDockerOwnerHostRoute -Method POST -Path $path|Should -BeFalse
+        }
+        foreach($method in @('GET','PUT','DELETE')){Test-DuneDockerRouteQualified -Method $method -Path '/api/gameplay/vehicles/delete'|Should -BeFalse}
+        Test-DuneDockerRouteQualified -Method DELETE -Path '/api/gameplay/vehicles/deletions/not-an-id'|Should -BeFalse
     }
 
     It 'allows derived inventory reads and refresh without opening arbitrary item methods' {

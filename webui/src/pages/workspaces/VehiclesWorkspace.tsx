@@ -22,6 +22,7 @@ import { ConfirmationModal } from '../../components/ConfirmationModal'
 import { ViewportNotice } from '../../components/ViewportNotice'
 import { SourceBadge } from '../gameplay/shared'
 import { isLocalViewer } from '../../util/viewer'
+import { usePortalAccess } from '../../auth/portalAccess'
 
 const TABS: readonly WorkspaceTab[] = [
   { id: 'fleet', label: 'Fleet', to: '/vehicles?view=fleet', icon: 'Truck' },
@@ -65,7 +66,8 @@ function VehicleFleetWorkspace() {
   const [now, setNow] = useState(Date.now())
   const [refreshing, setRefreshing] = useState(false)
   const [readFailed, setReadFailed] = useState(false)
-  const local = isLocalViewer()
+  const { canAccessOwnerSurfaces } = usePortalAccess()
+  const local = import.meta.env.VITE_DST_EDITION === 'docker' ? canAccessOwnerSurfaces : isLocalViewer()
   const [error, setError] = useState('')
   const [unavailable, setUnavailable] = useState(false)
   const [message, setMessage] = useState('')

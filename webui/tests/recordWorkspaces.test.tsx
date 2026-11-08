@@ -10,7 +10,9 @@ import {
 } from '../src/api/gameplay'
 import { COMMAND_DECK_KEY } from '../src/hooks/useCommandDeck'
 import { isLocalViewer } from '../src/util/viewer'
+import { usePortalAccess } from '../src/auth/portalAccess'
 vi.mock('../src/util/viewer', () => ({ isLocalViewer: vi.fn(() => true) }))
+vi.mock('../src/auth/portalAccess', () => ({ usePortalAccess: vi.fn() }))
 
 vi.mock('../src/hooks/useStatus', () => ({ useStatus: () => ({ status: { bg: { state: 'running' } } }) }))
 vi.mock('../src/api/gameplay', async importOriginal => ({
@@ -27,6 +29,7 @@ async function renderFleet() {
 beforeEach(() => {
   vi.mocked(getInventoryPlayers).mockResolvedValue({ players: [{ id: 20001, name: 'Aster' }] })
   vi.mocked(isLocalViewer).mockReturnValue(true)
+  vi.mocked(usePortalAccess).mockReturnValue({isPlayer:false,canAccessOwnerSurfaces:true,canAccessServerUpdates:true,canAccessSetup:true})
   localStorage.setItem(COMMAND_DECK_KEY, '1')
   vi.mocked(getBases).mockResolvedValue({ source: 'live', bases: [{ id: 1, name: 'North base', owner: 'Aster', pieces: 40, placeables: 12, totemId: 11 }] })
   vi.mocked(getMarketItems).mockResolvedValue({ source: 'live', total: 1, page: 0, limit: 50, items: [{
@@ -42,9 +45,21 @@ beforeEach(() => {
   vi.mocked(saveVehicleNames).mockResolvedValue({ ok: true, renamed: 1, restart_started: true, message: 'Saved 1 vehicle name change and launched the battlegroup restart.' })
   vi.mocked(deleteVehicles).mockResolvedValue({ ok: true, message: 'Vehicle deleted.', processed: 1, failed: 0 })
 })
-afterEach(() => { cleanup(); localStorage.clear(); vi.clearAllMocks(); vi.restoreAllMocks(); window.history.replaceState({}, '', '/') })
+afterEach(() => { cleanup(); localStorage.clear(); vi.clearAllMocks(); vi.restoreAllMocks(); vi.unstubAllEnvs(); window.history.replaceState({}, '', '/') })
 
 describe('Record-focused gameplay workspaces', () => {
+  it.each([
+    {owner:true,loopback:false},
+    {owner:false,loopback:true},
+    {owner:false,loopback:false},
+  ])('uses Docker Owner access for vehicle deletion when owner=$owner and loopback=$loopback', async ({owner,loopback}) => {
+    vi.stubEnv('VITE_DST_EDITION','docker')
+    vi.mocked(isLocalViewer).mockReturnValue(loopback)
+    vi.mocked(usePortalAccess).mockReturnValue({isPlayer:false,canAccessOwnerSurfaces:owner,canAccessServerUpdates:true,canAccessSetup:owner})
+    await renderFleet()
+    if(owner)expect(screen.getByRole('button',{name:'Delete selected (0)'})).toBeDisabled()
+    else expect(screen.queryByRole('button',{name:'Delete selected (0)'})).not.toBeInTheDocument()
+  })
   it('opens a keyboard-operable base dossier without weakening the stopped-battlegroup release guard', async () => {
     const user = userEvent.setup()
     render(<BasesTab />)

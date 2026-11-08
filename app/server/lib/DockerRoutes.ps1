@@ -7,9 +7,23 @@ function Test-DuneDockerAccountManagementRoute {
     return $Method -ceq 'POST' -and ($Path -ceq '/api/remote-access/portal-accounts/revoke-all-sessions' -or $Path -cmatch '^/api/remote-access/portal-accounts/[a-f0-9]{32}/(?:reset-password|revoke-sessions)$')
 }
 
+function Test-DuneDockerVehicleDeletionRoute {
+    param([string]$Method,[string]$Path)
+    if($Method -ceq 'GET'){return $Path -ceq '/api/gameplay/vehicles/deletions'}
+    if($Method -ceq 'POST'){return $Path -cin @('/api/gameplay/vehicles/delete','/api/gameplay/vehicles/deletions','/api/gameplay/vehicles/deletions/process')}
+    return $Method -ceq 'DELETE' -and $Path -cmatch '^/api/gameplay/vehicles/deletions/[a-f0-9]{32}$'
+}
+
+function Test-DuneDockerOwnerHostRoute {
+    param([string]$Method,[string]$Path)
+    return (Test-DuneDockerAccountManagementRoute -Method $Method -Path $Path) -or
+        (Test-DuneDockerVehicleDeletionRoute -Method $Method -Path $Path)
+}
+
 function Test-DuneDockerRouteQualified {
     param([string]$Method,[string]$Path)
     if(Test-DuneDockerAccountManagementRoute -Method $Method -Path $Path){return $true}
+    if(Test-DuneDockerVehicleDeletionRoute -Method $Method -Path $Path){return $true}
     if($Path.StartsWith('/api/docker/file-browser/',[StringComparison]::Ordinal) -and $Method -in @('GET','HEAD','POST','PUT','PATCH','DELETE')){return $true}
     if($Method -eq 'GET' -and $Path -cmatch '^/api/docker/backup-exports/[a-f0-9]{32}$'){return $true}
     if($Method -eq 'POST' -and $Path -eq '/api/docker/backup-import'){return $true}

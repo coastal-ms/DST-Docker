@@ -1,5 +1,7 @@
 # Linux port — handoff status
 
+Historical scaffold notes: this document predates the native Docker edition. Use README.md and DOCKER-DEVELOPMENT.md for the current installation flow and scope. The limitations and unverified status below describe the earlier scaffold, not current Docker qualification.
+
 > **This is an untested scaffold, not a working Linux port.** It exists so
 > someone other than the current Windows maintainer can pick the Linux build
 > up without starting from a blank repo. Expect bugs on first run; some

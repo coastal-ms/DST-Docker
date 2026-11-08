@@ -1447,10 +1447,10 @@ function Invoke-DuneContext {
             if ($r.Method -ne $method) { continue }
             $m = $r.Regex.Match($rawPath)
             if ($m.Success) {
-                $nativeAccountOwner=$env:DST_HOSTING_BACKEND -eq 'docker' -and
-                    (Test-DuneDockerAccountManagementRoute -Method $method -Path $rawPath) -and
+                $nativeHostOwner=$env:DST_HOSTING_BACKEND -eq 'docker' -and
+                    (Test-DuneDockerOwnerHostRoute -Method $method -Path $rawPath) -and
                     $portalSessionAuth.ok -and $portalSessionAuth.account.role -ceq 'owner'
-                if ($r.LocalOnly -and -not $isLocalRequest -and -not $nativeAccountOwner) {
+                if ($r.LocalOnly -and -not $isLocalRequest -and -not $nativeHostOwner) {
                     Write-DuneError -Response $res -Status 403 -Message 'This API is available only from the host machine.'
                     return
                 }

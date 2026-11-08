@@ -202,9 +202,19 @@ function Test-DuneVehicleWindowStopped {
     param([string]$Ip, [string]$DatabaseScope)
     $scope = Get-DuneVehicleHostScope -Ip $Ip
     if ($scope.key -cne $DatabaseScope) { return @{ ok = $false; error = 'Vehicle database scope changed. Cancel and requeue the target.' } }
-    $probe = Invoke-DuneBackupShell -Ip $Ip -Script "kubectl get battlegroup '$($scope.world)' -n '$($scope.namespace)' -o jsonpath='{.status.phase}'" -TimeoutSec 30
-    if ($null -eq $probe -or $probe.rc -ne 0 -or ([string]$probe.out).Trim() -cne 'Stopped') {
-        return @{ ok = $false; error = 'A fresh Stopped battlegroup state could not be proven. No deletion was attempted.' }
+    if ($env:DST_HOSTING_BACKEND -eq 'docker') {
+        $observed = Invoke-DuneDockerManager -Request @{action='status'}
+        if (-not $observed.ok) { return @{ok=$false;error='The stopped Docker battlegroup could not be observed. No deletion was attempted.'} }
+        $games = @($observed.data.services | Where-Object { $_.component -match '^game-[1-9][0-9]*$' })
+        if ($observed.data.projectId -cne $scope.world -or $observed.data.desiredState -cne 'stopped' -or $games.Count -eq 0 -or
+            @($games | Where-Object { $_.state -notin @('created','exited') }).Count -gt 0) {
+            return @{ ok = $false; error = 'A fresh Stopped Docker battlegroup state could not be proven. No deletion was attempted.' }
+        }
+    } else {
+        $probe = Invoke-DuneBackupShell -Ip $Ip -Script "kubectl get battlegroup '$($scope.world)' -n '$($scope.namespace)' -o jsonpath='{.status.phase}'" -TimeoutSec 30
+        if ($null -eq $probe -or $probe.rc -ne 0 -or ([string]$probe.out).Trim() -cne 'Stopped') {
+            return @{ ok = $false; error = 'A fresh Stopped battlegroup state could not be proven. No deletion was attempted.' }
+        }
     }
     $sessions = Invoke-DuneSqlQuery -Ip $Ip -Sql "SELECT count(*)::text AS sessions FROM pg_stat_activity WHERE datname = current_database() AND application_name LIKE 'DuneSandbox%' AND pid <> pg_backend_pid();" -ReadOnly $true -MaxRows 1 -TimeoutSec 15
     if (-not $sessions.ok) { return @{ ok = $false; error = "Live game session preflight failed: $($sessions.error)" } }
@@ -213,6 +223,15 @@ function Test-DuneVehicleWindowStopped {
         return @{ ok = $false; error = 'No-session preflight did not prove all game database connections are gone.' }
     }
     return @{ ok = $true }
+}
+
+function Invoke-DuneVehicleLifecycleCommand {
+    param([string]$Ip, [ValidateSet('stop','start')][string]$Command, [int]$TimeoutSec)
+    if ($env:DST_HOSTING_BACKEND -eq 'docker') {
+        $result = Invoke-DuneDockerServiceLifecycle -Command $Command -TimeoutSec $TimeoutSec
+        return @{rc=$(if($result.ok){0}else{1});out=$(if($result.ok){$result.output}else{$result.error})}
+    }
+    return Invoke-DuneBackupShell -Ip $Ip -Script "/home/dune/.dune/bin/battlegroup $Command" -TimeoutSec $TimeoutSec
 }
 
 function Invoke-DuneVerifiedSafetyBackup {
@@ -400,7 +419,7 @@ function Invoke-DuneVehicleDeletionWindow {
         $start = $null
         $windowError = $null
         try {
-            $stop = Invoke-DuneBackupShell -Ip $Ip -Script '/home/dune/.dune/bin/battlegroup stop' -TimeoutSec 600
+            $stop = Invoke-DuneVehicleLifecycleCommand -Ip $Ip -Command stop -TimeoutSec 600
             if ($null -eq $stop -or $stop.rc -ne 0) {
                 throw "No vehicles were deleted because the battlegroup did not stop cleanly. $([string]$stop.out)"
             }
@@ -426,7 +445,7 @@ function Invoke-DuneVehicleDeletionWindow {
             $windowError = $_.Exception.Message
             $state.processing.last_error = $windowError
         } finally {
-            $start = Invoke-DuneBackupShell -Ip $Ip -Script '/home/dune/.dune/bin/battlegroup start' -TimeoutSec 900
+            $start = Invoke-DuneVehicleLifecycleCommand -Ip $Ip -Command start -TimeoutSec 900
         }
 
         $retry = @($entries | Where-Object { $_.status -eq 'queued' })
