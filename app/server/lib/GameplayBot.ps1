@@ -1201,10 +1201,16 @@ DELETE FROM dune.dune_exchange_orders WHERE id = $orderId;
 $itemDelete
 COMMIT;
 "@
-        $w = Invoke-DuneSqlQuery -Ip $ctx.ip -Sql $buySql -ReadOnly $false -MaxRows 5 -TimeoutSec 45
+        $w = if ($env:DST_HOSTING_BACKEND -eq 'docker') {
+            Invoke-DuneDockerBotPurchase -Ip $ctx.ip -Ident $ident -OrderId $orderId -SellerId $sellerId -ItemId $itemId -TemplateId $tmpl -UnitPrice $payoutUnit -Stack $stack -OrderExpiry $orderExpiry
+        } else {
+            Invoke-DuneSqlQuery -Ip $ctx.ip -Sql $buySql -ReadOnly $false -MaxRows 5 -TimeoutSec 45
+        }
         if (-not $w.ok) {
             $summary.errors++
             $summary.message = "buy ${tmpl}: $($w.error)"
+        } elseif ($env:DST_HOSTING_BACKEND -eq 'docker' -and -not $w.purchased) {
+            $summary.skipped++
         } else {
             $summary.purchased++
             $summary.winners += ,$winner
