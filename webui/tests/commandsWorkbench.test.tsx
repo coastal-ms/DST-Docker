@@ -388,6 +388,18 @@ describe('Contextual Commands workbench', () => {
     expect(api).toHaveBeenCalledExactlyOnceWith('/api/commands/run/restart', { method: 'POST' })
   })
 
+  it('keeps Docker localhost Admin command and layout access limited to the account role', () => {
+    vi.stubEnv('VITE_DST_EDITION', 'docker')
+    state.local = true
+    state.role = 'admin'
+    render(<Commands />)
+    expect(screen.queryByRole('button', { name: 'Custom layout' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Reset layout' })).not.toBeInTheDocument()
+    expect(screen.queryByText('Stop battlegroup')).not.toBeInTheDocument()
+    expect(screen.queryByText('Delete VM')).not.toBeInTheDocument()
+    expect(screen.getByText('Restart battlegroup')).toBeInTheDocument()
+    expect(api).not.toHaveBeenCalled()
+  })
   it('shows Docker owner controls by IP with native sections and no VM wording', () => {
     vi.stubEnv('VITE_DST_EDITION', 'docker')
     localStorage.removeItem(COMMAND_DECK_KEY)
