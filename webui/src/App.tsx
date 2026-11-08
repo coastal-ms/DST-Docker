@@ -17,8 +17,6 @@ import type { GameplaySectionId } from './platform/gameplay'
 import { InstallationProvider, isSoloDestination, useSoloInstallation } from './hooks/useInstallationMode'
 import { SettingsApplyProgress } from './components/SettingsApplyProgress'
 
-const DockerConsole = lazy(() => import('./pages/docker/DockerConsole'))
-
 const WORKSPACE_ROUTES = WORKSPACE_MANIFEST.map(workspace => ({
   ...workspace,
   Component: lazy(import.meta.env.VITE_DST_EDITION === 'docker' && workspace.id === 'settings'
@@ -139,6 +137,5 @@ function InstalledApp() {
 }
 
 export default function App() {
-  if (import.meta.env.VITE_DST_EDITION === 'docker' && new URLSearchParams(window.location.search).get('dockerScaffold') === '1') return <LazyPage name="DST Docker"><DockerConsole /></LazyPage>
   return <InstallationProvider><InstalledApp /></InstallationProvider>
 }
