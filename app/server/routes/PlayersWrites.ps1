@@ -380,7 +380,11 @@ Register-DuneRoute -Method POST -Path '/api/gameplay/players/fresh-start/restore
     try {
         $name = [string](Get-DuneBodyValue -Body $body -Name 'name')
         if (-not $name) { Write-DuneError -Response $res -Status 400 -Message 'name is required.'; return }
-        Invoke-DunePlayerWriteRoute -Response $res -Action { param($ip) Invoke-DunePlayerRestoreBuilds -Ip $ip -Name $name -SkipNpe $false }
+        if($env:DST_HOSTING_BACKEND -eq 'docker'){
+            $account=Get-DuneBodyInt -Body $body -Name 'account_id'
+            if($null -eq $account -or $account -le 0){Write-DuneError -Response $res -Status 400 -Message 'account_id is required for the selected character.';return}
+            Invoke-DunePlayerWriteRoute -Response $res -Action {param($ip) Invoke-DuneDockerPlayerRestoreBuilds -Ip $ip -Name $name -AccountId $account -SkipNpe $false}
+        }else{Invoke-DunePlayerWriteRoute -Response $res -Action { param($ip) Invoke-DunePlayerRestoreBuilds -Ip $ip -Name $name -SkipNpe $false }}
     } catch {
         Write-DuneError -Response $res -Status 500 -Message "Restore builds failed: $($_.Exception.Message)"
     }
@@ -394,7 +398,11 @@ Register-DuneRoute -Method POST -Path '/api/gameplay/players/fresh-start/restore
     try {
         $name = [string](Get-DuneBodyValue -Body $body -Name 'name')
         if (-not $name) { Write-DuneError -Response $res -Status 400 -Message 'name is required.'; return }
-        Invoke-DunePlayerWriteRoute -Response $res -Action { param($ip) Invoke-DunePlayerRestoreBuilds -Ip $ip -Name $name -SkipNpe $true }
+        if($env:DST_HOSTING_BACKEND -eq 'docker'){
+            $account=Get-DuneBodyInt -Body $body -Name 'account_id'
+            if($null -eq $account -or $account -le 0){Write-DuneError -Response $res -Status 400 -Message 'account_id is required for the selected character.';return}
+            Invoke-DunePlayerWriteRoute -Response $res -Action {param($ip) Invoke-DuneDockerPlayerRestoreBuilds -Ip $ip -Name $name -AccountId $account -SkipNpe $true}
+        }else{Invoke-DunePlayerWriteRoute -Response $res -Action { param($ip) Invoke-DunePlayerRestoreBuilds -Ip $ip -Name $name -SkipNpe $true }}
     } catch {
         Write-DuneError -Response $res -Status 500 -Message "Restore builds (+ skip NPE) failed: $($_.Exception.Message)"
     }

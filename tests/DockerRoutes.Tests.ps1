@@ -3,6 +3,18 @@ BeforeAll {
     Import-DstLib 'DockerRoutes.ps1'
 }
 Describe 'Docker adapter routing boundary' {
+    It 'bounds native purchase snapshot and restore routes to exact existing methods' {
+        foreach($path in @('/api/gameplay/players/fresh-start/snapshots','/api/gameplay/players/fresh-start/snapshots-path')){
+            Test-DuneDockerRouteQualified -Method GET -Path $path|Should -BeTrue
+            Test-DuneDockerRouteQualified -Method POST -Path $path|Should -BeFalse
+        }
+        foreach($path in @('/api/gameplay/players/fresh-start/snapshot','/api/gameplay/players/fresh-start/restore','/api/gameplay/players/fresh-start/restore-skip-npe')){
+            Test-DuneDockerRouteQualified -Method POST -Path $path|Should -BeTrue
+            Test-DuneDockerRouteQualified -Method GET -Path $path|Should -BeFalse
+            Test-DuneDockerRouteQualified -Method POST -Path ($path+'/extra')|Should -BeFalse
+        }
+        Test-DuneDockerRouteQualified -Method POST -Path '/api/gameplay/players/fresh-start/wipe'|Should -BeFalse
+    }
     It 'bounds native augment maximization to the exact existing write method' {
         Test-DuneDockerRouteQualified -Method POST -Path '/api/gameplay/players/max-augment-attributes'|Should -BeTrue
         foreach($method in @('GET','PUT','DELETE')){Test-DuneDockerRouteQualified -Method $method -Path '/api/gameplay/players/max-augment-attributes'|Should -BeFalse}

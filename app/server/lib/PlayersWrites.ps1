@@ -2050,6 +2050,7 @@ WHERE a.id = $pawnID::bigint
 # ---------------------------------------------------------------------------
 
 function Get-DuneFreshStartSnapshotPath {
+    if($env:DST_HOSTING_BACKEND -eq 'docker'){return Get-DuneDockerFreshStartPath}
     $dir = Join-Path $env:APPDATA 'DuneServer'
     if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
     return (Join-Path $dir 'fresh-start-snapshots.json')
@@ -2078,6 +2079,7 @@ function Save-DuneFreshStartSnapshots {
 
 # Metadata-only list of saved snapshots for the UI (no bulky cosmetics blob).
 function Get-DuneFreshStartSnapshotList {
+    if($env:DST_HOSTING_BACKEND -eq 'docker'){return Get-DuneDockerFreshStartSnapshotList}
     $out = @()
     foreach ($s in (Get-DuneFreshStartSnapshots)) {
         # Unwrap the pre-fix {value=[...]; Count=N} wrapper so the displayed
@@ -2100,6 +2102,7 @@ function Get-DuneFreshStartSnapshotList {
 # (the data is character-bound and is destroyed with the character).
 function Invoke-DunePlayerSnapshotBuilds {
     param([string]$Ip, [long]$AccountId)
+    if($env:DST_HOSTING_BACKEND -eq 'docker'){return Invoke-DuneDockerPlayerSnapshotBuilds -Ip $Ip -AccountId $AccountId}
     if ($AccountId -le 0) { return @{ ok = $false; error = 'account_id is required.' } }
     $pawnID = Get-DunePlayerPawnFromAccount -Ip $Ip -AccountId $AccountId
     if ($pawnID -le 0) { return @{ ok = $false; error = "no pawn for account $AccountId." } }
@@ -2172,6 +2175,7 @@ SELECT
 # starter unlocks are never lost.
 function Invoke-DunePlayerRestoreBuilds {
     param([string]$Ip, [string]$Name, [bool]$SkipNpe = $false)
+    if($env:DST_HOSTING_BACKEND -eq 'docker'){return Invoke-DuneDockerPlayerRestoreBuilds -Ip $Ip -Name $Name -SkipNpe $SkipNpe}
     if (-not $Name) { return @{ ok = $false; error = 'name is required.' } }
     $snap = @(Get-DuneFreshStartSnapshots | Where-Object { [string]$_.name -eq $Name })
     if ($snap.Count -eq 0) { return @{ ok = $false; error = "no saved snapshot for '$Name' - snapshot the character before deleting it." } }

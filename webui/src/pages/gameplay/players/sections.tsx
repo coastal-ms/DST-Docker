@@ -1401,15 +1401,16 @@ function FreshStartForm({ busy, player, runAction }: {
   player: Player
   runAction: (def: ActionDef, exec: () => Promise<{ message: string }>) => void
 }) {
+  const docker = import.meta.env.VITE_DST_EDITION === 'docker'
   const [snap, setSnap] = useState<FreshStartSnapshot | null>(null)
   const [loading, setLoading] = useState(true)
   const refresh = useCallback(() => {
     setLoading(true)
     getFreshStartSnapshots()
-      .then(r => setSnap((r.snapshots || []).find(s => s.name.toLowerCase() === player.name.toLowerCase()) || null))
+      .then(r => setSnap((r.snapshots || []).find(s => docker ? String(s.account_id) === String(player.account_id) : s.name.toLowerCase() === player.name.toLowerCase()) || null))
       .catch(() => setSnap(null))
       .finally(() => setLoading(false))
-  }, [player.name])
+  }, [player.name, player.account_id, docker])
   useEffect(() => { refresh() }, [refresh])
   const localDef: ActionDef = { id: 'fresh-start', group: 'Progression', label: 'Fresh Start', icon: 'Sunrise', run: () => Promise.resolve({ message: '' }) }
 
@@ -1425,7 +1426,7 @@ function FreshStartForm({ busy, player, runAction }: {
 
       <div className="card p-3 space-y-2">
         <div className="font-medium text-text flex items-center gap-2"><Icon name="Save" size={14} /> Step 1 - Snapshot purchases</div>
-        <div className="text-text-dim text-xs">Saves {player.name}'s purchased CHOAM/MTX sets, pieces, and cosmetics to <code className="text-text">%APPDATA%\DuneServer\fresh-start-snapshots.json</code>. Do this <b className="text-text">before</b> deleting in-game (the data goes with the character).</div>
+        <div className="text-text-dim text-xs">Saves {player.name}'s purchased CHOAM/MTX sets, pieces, and cosmetics {docker ? 'in this world’s persistent DST configuration' : <>to <code className="text-text">%APPDATA%\DuneServer\fresh-start-snapshots.json</code></>}. Do this <b className="text-text">before</b> deleting in-game (the data goes with the character).</div>
         <button type="button" disabled={busy}
           className="px-3 py-2 rounded-lg bg-ibad/20 border border-ibad/50 text-text hover:bg-ibad/30 disabled:opacity-50 text-sm font-medium"
           onClick={() => runAction(localDef, async () => {
@@ -1443,7 +1444,7 @@ function FreshStartForm({ busy, player, runAction }: {
       </div>
 
       <div className="card p-3 space-y-2">
-        <div className="font-medium text-text flex items-center gap-2"><Icon name="Sunrise" size={14} /> Step 3 - Restore purchases by name</div>
+        <div className="font-medium text-text flex items-center gap-2"><Icon name="Sunrise" size={14} /> Step 3 - Restore purchases {docker ? 'to this account' : 'by name'}</div>
         {loading ? (
           <div className="text-text-dim text-xs flex items-center gap-2"><Icon name="Loader2" size={13} className="animate-spin" /> Checking snapshots...</div>
         ) : snap ? (
@@ -1453,7 +1454,7 @@ function FreshStartForm({ busy, player, runAction }: {
             <button type="button" disabled={busy}
               className="px-3 py-2 rounded-lg bg-info/20 border border-info/50 text-text hover:bg-info/30 disabled:opacity-50 text-sm font-medium"
               onClick={() => runAction(localDef, async () => {
-                const r = await restoreBuilds(player.name)
+                const r = await restoreBuilds(player.name, docker ? player.account_id : undefined)
                 return { message: r.message || `Restored purchases for ${player.name}.` }
               })}>
               Restore {player.name}'s purchases

@@ -2459,6 +2459,7 @@ export function resetFaction(accountId: number, faction: 'atreides' | 'harkonnen
 // them BEFORE the delete, then restore them by name onto the recreated character.
 export interface FreshStartSnapshot {
   name: string
+  account_id?: string | number
   saved_at: string
   sets: number
   pieces: number
@@ -2479,17 +2480,17 @@ export function getFreshStartSnapshots() {
   return api<{ ok: boolean; snapshots: FreshStartSnapshot[] }>('/api/gameplay/players/fresh-start/snapshots')
 }
 
-export function restoreBuilds(name: string) {
+export function restoreBuilds(name: string, accountId?: number) {
   return api<WriteResult>('/api/gameplay/players/fresh-start/restore', {
-    method: 'POST', body: JSON.stringify({ name }),
+    method: 'POST', body: JSON.stringify({ name, ...(accountId === undefined ? {} : { account_id: accountId }) }),
   })
 }
 
 // Same as restoreBuilds but also marks the tutorial as completed on the
 // restored character (Fresh Start + No NPE variant). Offline-only.
-export function restoreBuildsSkipNpe(name: string) {
+export function restoreBuildsSkipNpe(name: string, accountId?: number) {
   return api<WriteResult>('/api/gameplay/players/fresh-start/restore-skip-npe', {
-    method: 'POST', body: JSON.stringify({ name }),
+    method: 'POST', body: JSON.stringify({ name, ...(accountId === undefined ? {} : { account_id: accountId }) }),
   })
 }
 
