@@ -1,7 +1,15 @@
 # Qualified Docker surfaces. Authentication, ownership and local-only checks
 # still run in the shared dispatcher; this gate only selects native adapters.
+function Test-DuneDockerAccountManagementRoute {
+    param([string]$Method,[string]$Path)
+    if($Path -ceq '/api/remote-access/portal-accounts'){return $Method -in @('GET','POST')}
+    if($Path -cmatch '^/api/remote-access/portal-accounts/[a-f0-9]{32}$'){return $Method -in @('PUT','DELETE')}
+    return $Method -ceq 'POST' -and ($Path -ceq '/api/remote-access/portal-accounts/revoke-all-sessions' -or $Path -cmatch '^/api/remote-access/portal-accounts/[a-f0-9]{32}/(?:reset-password|revoke-sessions)$')
+}
+
 function Test-DuneDockerRouteQualified {
     param([string]$Method,[string]$Path)
+    if(Test-DuneDockerAccountManagementRoute -Method $Method -Path $Path){return $true}
     if($Path.StartsWith('/api/docker/file-browser/',[StringComparison]::Ordinal) -and $Method -in @('GET','HEAD','POST','PUT','PATCH','DELETE')){return $true}
     if($Method -eq 'GET' -and $Path -cmatch '^/api/docker/backup-exports/[a-f0-9]{32}$'){return $true}
     if($Method -eq 'POST' -and $Path -eq '/api/docker/backup-import'){return $true}

@@ -11,9 +11,9 @@ export function resolvePortalAccess(
 ) {
   return {
     isPlayer: accountLoginEnabled && role === 'player',
-    canAccessOwnerSurfaces: localViewer || !accountLoginEnabled || role === 'owner',
+    canAccessOwnerSurfaces: (localViewer && !dockerEdition) || !accountLoginEnabled || role === 'owner',
     canAccessServerUpdates: role !== 'player' && (localViewer || role === 'owner' || role === 'admin'),
-    canAccessSetup: localViewer || (dockerEdition && (!accountLoginEnabled || role === 'owner')),
+    canAccessSetup: dockerEdition ? (!accountLoginEnabled || role === 'owner') : localViewer,
   }
 }
 

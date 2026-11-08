@@ -27,6 +27,19 @@ afterEach(() => {
   sessionStorage.clear()
 })
 
+describe('Docker browser administration', () => {
+  it('keeps sign-in mandatory and offers server roles without loading game data', async () => {
+    const request = vi.spyOn(globalThis, 'fetch').mockImplementation(() => jsonResponse({accountLoginEnabled:true,accounts:[owner],roles:['owner','admin']}))
+    render(<PortalAccountsManager docker />)
+    expect(await screen.findByText('Create another account')).toBeInTheDocument()
+    expect(screen.getByText('Share this console address. Each user signs in with their own account. Account sign-in stays enabled.')).toBeInTheDocument()
+    expect(screen.queryByRole('option',{name:'Player',exact:true})).not.toBeInTheDocument()
+    expect(screen.queryByRole('button',{name:'Emergency: Disable account login'})).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Linked game character (required for Player)')).not.toBeInTheDocument()
+    expect(request.mock.calls.every(([url]) => String(url)==='/api/remote-access/portal-accounts')).toBe(true)
+  })
+})
+
 describe('PortalAccountsManager progressive setup', () => {
   it('creates the first Owner without a distracting role choice and advances to the shown-once password', async () => {
     let state = { accountLoginEnabled: false, accounts: [] as typeof owner[], roles: ['owner', 'admin'] }

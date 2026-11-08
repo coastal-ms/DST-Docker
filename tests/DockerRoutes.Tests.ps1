@@ -3,6 +3,14 @@ BeforeAll {
     Import-DstLib 'DockerRoutes.ps1'
 }
 Describe 'Docker adapter routing boundary' {
+    It 'bounds account administration to exact IDs and keeps login-mode changes closed' {
+        foreach($method in @('GET','POST')){Test-DuneDockerAccountManagementRoute -Method $method -Path '/api/remote-access/portal-accounts'|Should -BeTrue}
+        foreach($method in @('PUT','DELETE')){Test-DuneDockerAccountManagementRoute -Method $method -Path ('/api/remote-access/portal-accounts/'+('a'*32))|Should -BeTrue}
+        foreach($suffix in @('reset-password','revoke-sessions')){Test-DuneDockerAccountManagementRoute -Method POST -Path ('/api/remote-access/portal-accounts/'+('a'*32)+'/'+$suffix)|Should -BeTrue}
+        foreach($path in @('/api/remote-access/portal-account-mode','/api/remote-access/portal-accounts/verify-owner','/api/remote-access/portal-accounts/../reset-password')){Test-DuneDockerRouteQualified -Method POST -Path $path|Should -BeFalse}
+        Test-DuneDockerRouteQualified -Method PUT -Path '/api/remote-access/portal-account-mode'|Should -BeFalse
+    }
+
     It 'qualifies exact base and storage adapters without broad prefixes' {
         foreach($path in @('/api/gameplay/blueprints/export','/api/gameplay/bases/export')){Test-DuneDockerRouteQualified -Method GET -Path $path|Should -BeTrue}
         foreach($path in @('/api/gameplay/blueprints/import','/api/gameplay/storage/repair-all','/api/gameplay/storage/rename','/api/gameplay/storage/give-item','/api/gameplay/storage/give-items','/api/gameplay/storage/delete-item','/api/gameplay/storage/set-item-stack','/api/gameplay/bases/destroy-claim')){

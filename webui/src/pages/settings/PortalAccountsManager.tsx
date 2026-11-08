@@ -18,7 +18,7 @@ interface PlayerOption {
   name: string
 }
 
-export function PortalAccountsManager() {
+export function PortalAccountsManager({ docker = false }: { docker?: boolean } = {}) {
   const [state, setState] = useState<PortalAccountsState | null>(null)
   const [players, setPlayers] = useState<PlayerOption[]>([])
   const [username, setUsername] = useState('')
@@ -50,10 +50,10 @@ export function PortalAccountsManager() {
 
   useEffect(() => {
     void load().catch(e => setError(e instanceof Error ? e.message : String(e)))
-    void api<{ players: PlayerOption[] }>('/api/gameplay/players')
+    if (!docker) void api<{ players: PlayerOption[] }>('/api/gameplay/players')
       .then(result => setPlayers(result.players ?? []))
       .catch(() => setPlayers([]))
-  }, [])
+  }, [docker])
 
   const run = async (action: () => Promise<void>) => {
     setBusy(true); setError(''); setMessage('')
@@ -122,11 +122,11 @@ export function PortalAccountsManager() {
           <div>
             <label htmlFor="portal-account-role" className="block text-sm font-medium mb-1">Role</label>
             <select id="portal-account-role" value={role} onChange={e => setRole(e.target.value as 'owner' | 'admin' | 'player')} className="w-full px-3 py-2 rounded-lg bg-surface-2 border border-border">
-              <option value="player">Player</option><option value="admin">Admin</option><option value="owner">Owner</option>
+              {!docker && <option value="player">Player</option>}<option value="admin">Admin</option><option value="owner">Owner</option>
             </select>
           </div>
         )}
-        <div>
+        {!docker && <div>
           <label htmlFor="portal-account-character" className="block text-sm font-medium mb-1">Linked game character (required for Player)</label>
           <select id="portal-account-character" value={characterId} onChange={e => {
             setCharacterId(e.target.value)
@@ -135,7 +135,7 @@ export function PortalAccountsManager() {
             <option value="">No character link</option>
             {players.map(player => <option key={player.account_id} value={String(player.account_id)}>{player.name}</option>)}
           </select>
-        </div>
+        </div>}
         <div>
           <label htmlFor="portal-account-password" className="block text-sm font-medium mb-1">Initial password (optional)</label>
           <input id="portal-account-password" type="password" minLength={12} maxLength={128} value={explicitPassword} onChange={e => setExplicitPassword(e.target.value)} className="w-full px-3 py-2 rounded-lg bg-surface-2 border border-border" placeholder="Leave blank to generate securely" />
@@ -169,14 +169,14 @@ export function PortalAccountsManager() {
   const accountList = (
     <div className="grid gap-3 lg:grid-cols-2 2xl:grid-cols-3">
       {state?.accounts.map(account => (
-        <div key={account.id} className="bg-surface-2 border border-border rounded-lg p-3 flex flex-col gap-3 min-w-0">
+        <div key={account.id} role="group" aria-label={`Portal account ${account.username}`} className="bg-surface-2 border border-border rounded-lg p-3 flex flex-col gap-3 min-w-0">
           <div className="flex items-start gap-2 min-w-0">
             <div className="min-w-0 flex-1">
               <div className="font-medium truncate" title={account.username}>{account.username}</div>
               <div className="text-xs text-text-dim break-words">
                 {account.gameCharacterLabel ? `Linked: ${account.gameCharacterLabel}` : 'No character link'}
                 {account.mustChangePassword ? ' — password change required' : ''}
-                {account.locallyVerified ? ' — owner password verified locally' : ''}
+                {!docker && account.locallyVerified ? ' — owner password verified locally' : ''}
               </div>
             </div>
             <label className="text-xs text-text-dim">
@@ -194,12 +194,12 @@ export function PortalAccountsManager() {
                 }}
                 className="min-h-9 rounded-lg bg-surface border border-border px-2 text-sm text-text"
               >
-                <option value="player">Player</option><option value="admin">Admin</option>
+                {(!docker || account.role === 'player') && <option value="player">Player</option>}<option value="admin">Admin</option>
                 <option value="owner">Owner</option>
               </select>
             </label>
           </div>
-          <label className="text-xs text-text-muted">
+          {!docker && <label className="text-xs text-text-muted">
             Linked game character
             <select aria-label={`Character for ${account.username}`} value={account.gameCharacterId}
               disabled={busy} className="w-full min-h-9 rounded-lg bg-surface border border-border px-2 text-sm text-text"
@@ -216,7 +216,7 @@ export function PortalAccountsManager() {
                 <option value={account.gameCharacterId}>{account.gameCharacterLabel || account.gameCharacterId} (unavailable)</option>}
               {players.map(player => <option key={player.account_id} value={String(player.account_id)}>{player.name}</option>)}
             </select>
-          </label>
+          </label>}
           <div className="mt-auto grid grid-cols-2 gap-2">
             <button className="btn-secondary justify-center px-2 py-1.5 text-xs" disabled={busy} onClick={() => void run(async () => {
               const result = await resetPortalAccountPassword(account.id)
@@ -237,11 +237,13 @@ export function PortalAccountsManager() {
     </div>
   )
 
+  if (docker && state && !state.accountLoginEnabled) return <div role="alert">Account sign-in must remain enabled for Docker. Recover account access on the Docker host before managing accounts.</div>
+
   return (
     <section className="border-t border-border pt-5 space-y-4" aria-labelledby="portal-accounts-title">
       <div>
         <h3 id="portal-accounts-title" className="font-semibold flex items-center gap-2"><Icon name="Users" size={16} /> Browser Portal accounts</h3>
-        <p className="text-xs text-text-dim mt-1">Owners have full remote access except host-only actions. Admins can operate the server and manage players; host configuration, files, credentials, Database, Sietches, Experimental and Settings remain restricted. Players can view status and maps, warm maps and manage only their linked character.</p>
+        <p className="text-xs text-text-dim mt-1">{docker ? 'Owners manage server configuration and browser accounts. Admins can operate the server and manage players; host configuration, files, credentials, Database, Sietches, Experimental and Settings remain restricted. New accounts must change their initial password at first sign-in.' : 'Owners have full remote access except host-only actions. Admins can operate the server and manage players; host configuration, files, credentials, Database, Sietches, Experimental and Settings remain restricted. Players can view status and maps, warm maps and manage only their linked character.'}</p>
       </div>
       {error && <div role="alert" className="text-sm text-danger bg-danger/10 border border-danger/40 rounded-lg px-3 py-2">{error}</div>}
       {message && <div className="text-sm text-success bg-success/10 border border-success/30 rounded-lg px-3 py-2">{message}</div>}
@@ -321,9 +323,9 @@ export function PortalAccountsManager() {
         <div className="space-y-4">
           <div className="border border-success/40 bg-success/10 rounded-lg p-4 space-y-2">
             <div className="font-semibold text-success flex items-center gap-2"><Icon name="Check" size={16} /> Account login Enabled</div>
-            <p className="text-sm text-text-muted">Use the Browser Portal QR or link above. It is now a stable token-free URL; users sign in with their portal account.</p>
-            <button className="btn-danger" disabled={busy} onClick={() => void toggleMode(false)}>Emergency: Disable account login</button>
-            <p className="text-xs text-text-dim">Disabling locally immediately revokes account sessions and restores legacy magic-link access.</p>
+            <p className="text-sm text-text-muted">{docker ? 'Share this console address. Each user signs in with their own account. Account sign-in stays enabled.' : 'Use the Browser Portal QR or link above. It is now a stable token-free URL; users sign in with their portal account.'}</p>
+            {!docker && <><button className="btn-danger" disabled={busy} onClick={() => void toggleMode(false)}>Emergency: Disable account login</button>
+            <p className="text-xs text-text-dim">Disabling locally immediately revokes account sessions and restores legacy magic-link access.</p></>}
           </div>
           {passwordPanel}
           <div className="border border-border rounded-lg p-4 space-y-3">

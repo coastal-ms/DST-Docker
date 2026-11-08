@@ -1,4 +1,4 @@
-# Dune Server — HTTP server (PowerShell HttpListener)
+﻿# Dune Server — HTTP server (PowerShell HttpListener)
 #
 # Serves the built React SPA from <DistRoot> and dispatches /api/* and /ws/*
 # to route handlers registered via Register-DuneRoute.
@@ -916,6 +916,7 @@ function Test-DuneLaunchToken {
 
 function Test-DuneAccountModeLaunchAccess {
     param($Request)
+    if($env:DST_HOSTING_BACKEND -eq 'docker'){return $false}
     if (-not (Test-DuneLaunchToken -Request $Request)) { return $false }
     if (Test-DuneLocalOnlyRequest -Request $Request) { return $true }
     try {
@@ -1385,7 +1386,7 @@ function Invoke-DuneContext {
         $publicPortalAuth = $rawPath -in @('/api/portal-auth/status', '/api/portal-auth/login')
         $portalSessionAuth = $null
         $launchAccess = $false
-        $isLocalRequest = Test-DuneLocalOnlyRequest -Request $req
+        $isLocalRequest = $env:DST_HOSTING_BACKEND -ne 'docker' -and (Test-DuneLocalOnlyRequest -Request $req)
 
         $isPortalAuthBody = $rawPath.StartsWith('/api/portal-auth/') -or $rawPath.StartsWith('/api/remote-access/portal-account') -or $rawPath -eq '/api/docker/owner/setup'
         if ($isPortalAuthBody -and $req.HasEntityBody -and
@@ -1446,7 +1447,10 @@ function Invoke-DuneContext {
             if ($r.Method -ne $method) { continue }
             $m = $r.Regex.Match($rawPath)
             if ($m.Success) {
-                if ($r.LocalOnly -and -not $isLocalRequest) {
+                $nativeAccountOwner=$env:DST_HOSTING_BACKEND -eq 'docker' -and
+                    (Test-DuneDockerAccountManagementRoute -Method $method -Path $rawPath) -and
+                    $portalSessionAuth.ok -and $portalSessionAuth.account.role -ceq 'owner'
+                if ($r.LocalOnly -and -not $isLocalRequest -and -not $nativeAccountOwner) {
                     Write-DuneError -Response $res -Status 403 -Message 'This API is available only from the host machine.'
                     return
                 }

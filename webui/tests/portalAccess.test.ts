@@ -5,6 +5,13 @@ import { canAccessCommand } from '../src/auth/commandAccess'
 import { LEGACY_ROUTE_MANIFEST } from '../src/platform/routes'
 
 describe('Browser Portal role access', () => {
+  it('requires an Owner account for Docker configuration even in a loopback browser', () => {
+    for (const role of ['admin', 'player', null] as const) {
+      expect(resolvePortalAccess(true, true, role, true).canAccessOwnerSurfaces).toBe(false)
+      expect(resolvePortalAccess(true, true, role, true).canAccessSetup).toBe(false)
+    }
+    expect(resolvePortalAccess(true, true, 'owner', true).canAccessOwnerSurfaces).toBe(true)
+  })
   it('allows Docker setup for authenticated remote owners while retaining Windows host-only setup', () => {
     expect(resolvePortalAccess(false, true, 'owner', true).canAccessSetup).toBe(true)
     expect(resolvePortalAccess(false, true, 'admin', true).canAccessSetup).toBe(false)

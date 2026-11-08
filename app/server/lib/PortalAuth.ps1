@@ -22,6 +22,15 @@ function Get-DunePortalAuthDirectory {
     return $dir
 }
 
+function Clear-DunePortalManagedAccountCookie {
+    param($Response,[hashtable]$RouteParams,[string]$AccountId)
+    if($env:DST_HOSTING_BACKEND -eq 'docker'){
+        $principal=Get-DuneRouteRequestPrincipal -RouteParams $RouteParams
+        if([string]$principal.account.id -cne $AccountId){return}
+    }
+    Clear-DunePortalSessionCookie $Response
+}
+
 function Get-DunePortalAccountsPath { return (Join-Path (Get-DunePortalAuthDirectory) 'accounts.json') }
 function Get-DunePortalSessionsPath { return (Join-Path (Get-DunePortalAuthDirectory) 'sessions.json') }
 function Get-DunePortalAuditPath { return (Join-Path (Get-DunePortalAuthDirectory) 'audit.log') }

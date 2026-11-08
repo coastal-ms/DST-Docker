@@ -101,13 +101,14 @@ Register-DuneRoute -Method GET -Path '/api/remote-access/portal-accounts' -Local
         accountLoginEnabled = [bool]$store.accountLoginEnabled
         nativeAppsBlockedInAccountMode = $true
         accounts = @($store.accounts | ForEach-Object { Get-DunePortalPublicAccount $_ })
-        roles = @('owner','admin','player')
+        roles = $(if($env:DST_HOSTING_BACKEND -eq 'docker'){@('owner','admin')}else{@('owner','admin','player')})
     }
 }
 
 Register-DuneRoute -Method POST -Path '/api/remote-access/portal-accounts' -LocalOnly -Handler {
     param($req, $res, $routeParams, $body)
     try {
+        if($env:DST_HOSTING_BACKEND -eq 'docker' -and [string](Get-DunePortalBodyValue $body 'role') -cnotin @('owner','admin')){throw 'Choose Owner or Admin for Docker server administration.'}
         $result = New-DunePortalAccount `
             -Username ([string](Get-DunePortalBodyValue $body 'username')) `
             -Role ([string](Get-DunePortalBodyValue $body 'role')) `
@@ -135,6 +136,7 @@ Register-DuneRoute -Method PUT -Path '/api/remote-access/portal-accounts/{id}' -
             if ($null -ne $enabledValue) { $account.enabled = [bool]$enabledValue }
             $role = [string](Get-DunePortalBodyValue $body 'role')
             if ($role) {
+                if($env:DST_HOSTING_BACKEND -eq 'docker' -and $role -cnotin @('owner','admin')){throw 'Choose Owner or Admin for Docker server administration.'}
                 if ($role -notin @('owner','admin','player')) { throw 'Invalid role.' }
                 $account.role = $role
             }
@@ -156,7 +158,7 @@ Register-DuneRoute -Method PUT -Path '/api/remote-access/portal-accounts/{id}' -
             Revoke-DunePortalSessions -AccountId ([string]$account.id)
             return $account
         }
-        if (-not $updated.enabled) { Clear-DunePortalSessionCookie $res }
+        if (-not $updated.enabled) { Clear-DunePortalManagedAccountCookie -Response $res -RouteParams $routeParams -AccountId ([string]$updated.id) }
         Write-DuneJson -Response $res -Body @{ account = Get-DunePortalPublicAccount $updated }
     } catch {
         Write-DuneError -Response $res -Status 400 -Message $_.Exception.Message
@@ -180,7 +182,7 @@ Register-DuneRoute -Method DELETE -Path '/api/remote-access/portal-accounts/{id}
             Save-DunePortalAccountStore $store
             Revoke-DunePortalSessions -AccountId ([string]$account.id)
         }
-        Clear-DunePortalSessionCookie $res
+        Clear-DunePortalManagedAccountCookie -Response $res -RouteParams $routeParams -AccountId ([string]$routeParams.id)
         Write-DuneJson -Response $res -Body @{ ok = $true }
     } catch {
         Write-DuneError -Response $res -Status 400 -Message $_.Exception.Message
@@ -191,7 +193,7 @@ Register-DuneRoute -Method POST -Path '/api/remote-access/portal-accounts/{id}/r
     param($req, $res, $routeParams, $body)
     try {
         $password = Reset-DunePortalAccountPassword -AccountId ([string]$routeParams.id)
-        Clear-DunePortalSessionCookie $res
+        Clear-DunePortalManagedAccountCookie -Response $res -RouteParams $routeParams -AccountId ([string]$routeParams.id)
         Write-DuneJson -Response $res -Body @{ ok = $true; oneTimePassword = $password }
     } catch {
         Write-DuneError -Response $res -Status 400 -Message $_.Exception.Message
@@ -201,7 +203,7 @@ Register-DuneRoute -Method POST -Path '/api/remote-access/portal-accounts/{id}/r
 Register-DuneRoute -Method POST -Path '/api/remote-access/portal-accounts/{id}/revoke-sessions' -LocalOnly -Handler {
     param($req, $res, $routeParams, $body)
     Revoke-DunePortalSessions -AccountId ([string]$routeParams.id)
-    Clear-DunePortalSessionCookie $res
+    Clear-DunePortalManagedAccountCookie -Response $res -RouteParams $routeParams -AccountId ([string]$routeParams.id)
     Write-DuneJson -Response $res -Body @{ ok = $true }
 }
 
