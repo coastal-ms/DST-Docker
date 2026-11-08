@@ -21,6 +21,30 @@ class RecordingEngine(engine.Engine):
 
 
 class EngineTests(unittest.TestCase):
+    def test_game_stop_completes_after_its_full_grace_period_without_removing_storage(self):
+        project='a'*32
+        class Client(RecordingEngine):
+            def __init__(self):super().__init__();self.stopped=False
+            def assert_owned(self,identifier,owner,component=None):
+                self.assertions=(identifier,owner,component)
+                return {'State':{'Status':'exited' if self.stopped else 'running'}}
+            def exec_internal(self,*args):return '7 1000 DuneSandboxServ\n' if args[-1][0]=='ps' else ''
+            def request(self,method,path,body=None,expected=None,timeout=30):
+                self.calls.append((method,path,body));self.stopped=True
+        client=Client()
+        with patch('engine.time.monotonic',side_effect=[0,121]):client.graceful_game_stop('owned-game',project,'game-1')
+        self.assertEqual(client.calls,[('POST','/containers/owned-game/stop?t=0',None)])
+        self.assertEqual(client.assertions,('owned-game',project,'game-1'))
+
+    def test_game_stop_rechecks_ownership_before_timeout_completion(self):
+        project='a'*32
+        class Client(RecordingEngine):
+            def exec_internal(self,*args):return '7 1000 DuneSandboxServ\n' if args[-1][0]=='ps' else ''
+        client=Client({'io.dst.managed':'true','io.dst.project':'foreign','io.dst.component':'game-1'})
+        with patch('engine.time.monotonic',side_effect=[0,121]):
+            with self.assertRaises(engine.EngineError):client.graceful_game_stop('foreign-game',project,'game-1')
+        self.assertFalse(any(call[0]=='POST' for call in client.calls))
+
     def test_tank_override_is_owned_hagga_only_and_keeps_official_reference_validation(self):
         project='a'*32; official='registry.funcom.com/funcom/self-hosting/seabass-server:2173753-0-shipping'; image='sha256:'+'b'*64
         class Client(RecordingEngine):

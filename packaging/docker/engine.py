@@ -721,7 +721,16 @@ class Engine:
         while time.monotonic()<deadline:
             if self.assert_owned(identifier,project,component)['State']['Status']=='exited':return
             time.sleep(.5)
-        raise EngineError('The game has not finished its graceful shutdown. Its container was preserved for review.')
+        # Match Docker/Kubernetes shutdown semantics after the full game grace
+        # period. A stuck PreShutdown process must not leave the world half
+        # stopped indefinitely. Recheck ownership before stopping that container.
+        observed=self.assert_owned(identifier,project,component)
+        if observed['State']['Status']=='exited':return
+        if observed['State']['Status']!='running':
+            raise EngineError('The game container changed state during shutdown and needs review.')
+        self.request('POST','/containers/'+identifier+'/stop?t=0',expected=(204,304),timeout=30)
+        if self.assert_owned(identifier,project,component)['State']['Status']!='exited':
+            raise EngineError('The game container has not completed its stop.')
 
     def retire_game_container(self,identifier,project,component):
         if not re.fullmatch(r'game-[1-9][0-9]*',component):raise ValueError('Only an owned stopped game container can be replaced.')
