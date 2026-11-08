@@ -13,6 +13,8 @@ function Test-DuneDockerRouteQualified {
     if($Method -eq 'GET' -and ($Path -in @('/api/v1/inventory/players','/api/v1/inventory/items','/api/v1/inventory/items/occurrences') -or $Path -cmatch '^/api/v1/inventory/items/[A-Za-z0-9_][A-Za-z0-9_().-]{0,199}/occurrences$')){return $true}
     if($Method -eq 'POST' -and $Path -eq '/api/v1/inventory/refresh'){return $true}
     if($Method -eq 'GET' -and ($Path -eq '/api/gameplay/vehicles' -or $Path -cmatch '^/api/gameplay/vehicles/[1-9][0-9]{0,15}/integrity$')){return $true}
+    if($Method -eq 'GET' -and $Path -eq '/api/gameconfig/ini-backups'){return $true}
+    if($Method -eq 'POST' -and $Path -in @('/api/gameconfig/ini-backups/download','/api/gameconfig/ini-backups/delete')){return $true}
     if($Method -eq 'GET' -and $Path -in @('/api/v1/maps/catalog','/api/v1/maps/deep-desert','/api/v1/maps/deep-desert/layers/active-spice','/api/v1/maps/deep-desert/layers/public-poi')){return $true}
     if($Path -eq '/api/gameconfig/regis-tanks' -and $Method -in @('GET','PUT')){return $true}
     if($Path -eq '/api/gameconfig/regis-tanks/recover' -and $Method -eq 'POST'){return $true}

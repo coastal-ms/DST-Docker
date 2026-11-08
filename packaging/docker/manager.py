@@ -857,7 +857,7 @@ def start_services(state,engine,publish_gateway=True):
 def prepare_settings_service(state,engine):
     own=engine.inspect(os.environ['HOSTNAME'])
     control=next(mount['Name'] for mount in own['Mounts'] if mount.get('Destination')=='/map-control' and mount.get('Type')=='volume')
-    image=engine.request('GET','/images/dst-docker-manager%3Alocal/json')['Id']
+    image=own['Image']
     entry=state.get('settingsService')
     if entry:
         previous=engine.assert_owned(entry['id'],state['id'],'settings')
@@ -891,15 +891,20 @@ def write_settings(state,engine,request):
 def read_settings(state,engine,key):
     if not isinstance(key,str) or key not in {'game','engine','server'}:
         raise ValueError('Choose a supported server INI file.')
+    return settings_request(state,engine,{'action':'read','file':key})
+
+
+def settings_request(state,engine,payload):
     # The management console remains usable with the world stopped. Only this
     # world's isolated file helper may start; never any game or database service.
     entry=state.get('settingsService')
-    if not entry or engine.assert_owned(entry['id'],state['id'],'settings')['State']['Status']!='running':
+    observed=engine.assert_owned(entry['id'],state['id'],'settings') if entry else None
+    if not observed or observed['State']['Status']!='running' or observed.get('Image')!=engine.inspect(os.environ['HOSTNAME'])['Image']:
         prepare_settings_service(state,engine)
     deadline=time.monotonic()+5
     while True:
         try:
-            reply=settings_client.request({'action':'read','file':key})
+            reply=settings_client.request(payload)
             break
         except (FileNotFoundError,ConnectionRefusedError):
             if time.monotonic()>=deadline:raise ValueError('The server settings service did not become ready.') from None
@@ -1526,6 +1531,11 @@ def dispatch(request, engine=None):
         if action=='maps.floor':return set_map_floor(state,engine,request.get('map'),request.get('enabled'))
         if action=='maps.party-sharing':return set_party_sharing(state,engine,request.get('map'),request.get('shared'))
         if action=='settings.read':return read_settings(state,engine,request.get('file'))
+        if action in {'settings.backups.list','settings.backups.inspect','settings.backups.read','settings.backups.delete-checked'}:
+            payload={'action':action.removeprefix('settings.')}
+            if action=='settings.backups.read':payload.update(path=request.get('path'),sha256=request.get('sha256'))
+            if action=='settings.backups.delete-checked':payload['files']=request.get('files')
+            return settings_request(state,engine,payload)
         if action=='settings.write':return write_settings(state,engine,request)
         if action=='settings.startup':return set_startup_settings(state,engine,request.get('values'))
         if action=='settings.defaults':return engine.read_game_defaults(state['services']['game-1']['id'],state['id'])
@@ -1600,7 +1610,7 @@ class Handler(socketserver.StreamRequestHandler):
         try:
             raw = self.rfile.readline(4*1024*1024+1)
             request=json.loads(raw)
-            limit=4*1024*1024 if request.get('action') in {'settings.write','settings.startup'} else 65536
+            limit=4*1024*1024 if request.get('action') in {'settings.write','settings.startup'} else 256*1024 if request.get('action')=='settings.backups.delete-checked' else 65536
             if len(raw)>limit: raise ValueError('Management request exceeds its limit.')
             _,uid,_=struct.unpack('3i',self.connection.getsockopt(socket.SOL_SOCKET,socket.SO_PEERCRED,12))
             authorize_peer(uid,request.get('action'))

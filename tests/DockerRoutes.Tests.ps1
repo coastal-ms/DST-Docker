@@ -3,6 +3,15 @@ BeforeAll {
     Import-DstLib 'DockerRoutes.ps1'
 }
 Describe 'Docker adapter routing boundary' {
+    It 'allows only native server INI backup list, download and delete methods' {
+        Test-DuneDockerRouteQualified -Method GET -Path '/api/gameconfig/ini-backups'|Should -BeTrue
+        foreach($path in @('/api/gameconfig/ini-backups/download','/api/gameconfig/ini-backups/delete')){
+            Test-DuneDockerRouteQualified -Method POST -Path $path|Should -BeTrue
+            Test-DuneDockerRouteQualified -Method GET -Path $path|Should -BeFalse
+        }
+        Test-DuneDockerRouteQualified -Method DELETE -Path '/api/gameconfig/ini-backups'|Should -BeFalse
+    }
+
     It 'qualifies fleet and bounded integrity reads while preserving vehicle mutation gates' {
         foreach($path in @('/api/gameplay/vehicles','/api/gameplay/vehicles/700204/integrity')){
             Test-DuneDockerRouteQualified -Method GET -Path $path|Should -BeTrue

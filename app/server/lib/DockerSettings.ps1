@@ -1,6 +1,14 @@
 function Invoke-DuneDockerSettingsReader {
     param([Parameter(Mandatory)][hashtable]$Request)
-    $reply=Invoke-DuneDockerManager -Request @{action='settings.read';file=$Request.file}
+    $payload=switch([string]$Request.action){
+        'read' {@{action='settings.read';file=$Request.file}}
+        'backups.list' {@{action='settings.backups.list'}}
+        'backups.inspect' {@{action='settings.backups.inspect'}}
+        'backups.read' {@{action='settings.backups.read';path=$Request.path;sha256=$Request.sha256}}
+        'backups.delete-checked' {@{action='settings.backups.delete-checked';files=$Request.files}}
+        default {throw 'Unsupported server settings read request.'}
+    }
+    $reply=Invoke-DuneDockerManager -Request $payload
     if(-not $reply.ok){throw $reply.error}
     return $reply.data
 }

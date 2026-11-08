@@ -25,7 +25,7 @@ def create(state,engine,control):
     if directory.is_symlink():raise ValueError('The settings control directory is unsupported.')
     directory.mkdir(mode=0o770,exist_ok=True)
     os.chown(directory,-1,10001);directory.chmod(0o770)
-    image=engine.request('GET','/images/dst-docker-manager%3Alocal/json')['Id']
+    image=engine.inspect(os.environ['HOSTNAME'])['Image']
     spec={'Image':image,'User':'1000:10001',
           'Entrypoint':['python3','-B','/opt/dst-manager/settings_service.py'],
           'Labels':{'io.dst.managed':'true','io.dst.project':project,'io.dst.component':'settings'},

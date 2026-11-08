@@ -10,7 +10,8 @@ class SettingsAdapterTests(unittest.TestCase):
     def setUp(self):
         self.project='a'*32
         self.state={'id':self.project,'desiredState':'stopped','services':{'game-1':{'id':'owned-game','phase':'prepared'}}}
-        self.engine=Mock(spec=['assert_owned','request'])
+        self.engine=Mock(spec=['assert_owned','request','inspect'])
+        self.engine.inspect.return_value={'Image':'own-helper-image'}
         self.engine.assert_owned.return_value={'State':{'Status':'exited'},'Mounts':[
             {'Type':'volume','Name':'dst-'+self.project+'-game-1-saved','Destination':'/home/dune/server/DuneSandbox/Saved'}]}
         def request(method,path,body=None):
@@ -25,6 +26,7 @@ class SettingsAdapterTests(unittest.TestCase):
             settings_adapter.create(self.state,self.engine,'control')
         spec=self.engine.request.call_args.args[2]
         self.assertEqual(spec['User'],'1000:10001')
+        self.assertEqual(spec['Image'],'own-helper-image')
         self.assertEqual(spec['HostConfig']['NetworkMode'],'none')
         self.assertTrue(spec['HostConfig']['ReadonlyRootfs'])
         self.assertTrue(spec['HostConfig']['Init'])
@@ -82,9 +84,17 @@ class SettingsAdapterTests(unittest.TestCase):
     def test_running_helper_is_reused_and_file_errors_are_not_retried(self):
         self.state['settingsService']={'id':'owned-helper'}
         self.engine.assert_owned.return_value['State']['Status']='running'
+        self.engine.assert_owned.return_value['Image']='own-helper-image'
         with patch('manager.prepare_settings_service') as prepare,patch('manager.settings_client.request',return_value={'ok':False,'error':'Unsupported encoding.'}) as client:
             with self.assertRaisesRegex(ValueError,'Unsupported encoding'):manager.read_settings(self.state,self.engine,'game')
             prepare.assert_not_called();client.assert_called_once()
+
+    def test_running_old_helper_is_upgraded_before_using_new_backup_actions(self):
+        self.state['settingsService']={'id':'owned-helper'}
+        self.engine.assert_owned.return_value.update(State={'Status':'running'},Image='old-helper-image')
+        with patch('manager.prepare_settings_service') as prepare,patch('manager.settings_client.request',return_value={'ok':True,'data':{'backups':[]}}):
+            self.assertEqual(manager.settings_request(self.state,self.engine,{'action':'backups.inspect'}),{'backups':[]})
+            prepare.assert_called_once_with(self.state,self.engine)
 
     def test_read_cannot_start_helper_during_busy_or_interrupted_world_operation(self):
         for guard in [{'operation':{'phase':'running'}},{'restore':{'phase':'recovery-required'}},{'pendingResourceChange':{'anything':True}}]:

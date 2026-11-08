@@ -1,5 +1,6 @@
 from pathlib import Path
 import hashlib
+import base64
 import os
 import tempfile
 import unittest
@@ -100,6 +101,35 @@ class SavedSettingsTests(unittest.TestCase):
         with patch.object(self.store,'backup_snapshot',side_effect=fail_second):
             with self.assertRaises(OSError):self.store.backup_files(['game','engine'])
         self.assertEqual(self.file.read_bytes(),self.original.encode());self.assertEqual(engine.read_bytes(),b'original engine')
+
+    def test_checked_backup_export_and_delete_preserve_active_files_and_changed_backups(self):
+        server=self.root/'UserServerCustomSettings.ini';server.write_bytes(b'custom server\r\n')
+        current=self.store.read('server');self.store.write('server','changed server',current['revision'],True)
+        self.store.backup_files(['game'])
+        rows=self.store.dispatch({'action':'backups.inspect'})['backups'];self.assertEqual(len(rows),2)
+        for row in rows:
+            exported=self.store.dispatch({'action':'backups.read','path':row['path'],'sha256':row['sha256']})
+            data=base64.b64decode(exported['base64']);self.assertEqual(hashlib.sha256(data).hexdigest(),row['sha256'])
+        changed=rows[0];(self.root/'.dst-backups'/changed['name']).write_bytes(b'external change')
+        with self.assertRaises(SettingsConflict):self.store.dispatch({'action':'backups.read','path':changed['path'],'sha256':changed['sha256']})
+        removed=self.store.dispatch({'action':'backups.delete-checked','files':rows})
+        self.assertEqual(removed['deleted'],1);self.assertFalse(removed['results'][0]['ok'])
+        self.assertEqual(server.read_bytes(),b'changed server');self.assertEqual(self.file.read_bytes(),self.original.encode())
+        self.assertEqual((self.root/'.dst-backups'/changed['name']).read_bytes(),b'external change')
+
+    def test_checked_backups_reject_active_traversal_symlink_large_and_malformed_selections(self):
+        self.store.backup_files(['game']);row=self.store.inspect_backups()['backups'][0]
+        for path in ['/srv/UserSettings/UserGame.ini','../outside',row['path']+'/child']:
+            with self.assertRaises(ValueError):self.store.dispatch({'action':'backups.read','path':path,'sha256':row['sha256']})
+            with self.assertRaises(ValueError):self.store.delete_checked_backups([row,{'path':path,'sha256':row['sha256']}])
+            self.assertEqual(len(self.store.inspect_backups()['backups']),1)
+        with self.assertRaises(ValueError):self.store.dispatch({'action':'backups.read','path':row['path']})
+        with self.assertRaises(ValueError):self.store.delete_checked_backups([row,row])
+        path=self.root/'.dst-backups'/row['name'];path.unlink();path.symlink_to(self.file)
+        self.assertEqual(self.store.inspect_backups(),{'backups':[]})
+        with self.assertRaises(OSError):self.store.checked_backup(row['path'],row['sha256'])
+        path.unlink();path.write_bytes(b'x'*(MAX_FILE+1))
+        with self.assertRaises(ValueError):self.store.checked_backup(row['path'],row['sha256'])
 
 
 if __name__=='__main__':unittest.main()

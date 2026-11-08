@@ -1,5 +1,6 @@
 function Test-DuneServerIniBackupPath {
     param([string]$Path)
+    if($env:DST_HOSTING_BACKEND -eq 'docker'){return $Path -cmatch '^/srv/UserSettings/\.dst-backups/User(?:Game|Engine|ServerCustomSettings)\.ini-[0-9]{8}T[0-9]{6}Z-[a-f0-9]{12}\.bak$'}
     return $Path -cmatch '^/srv/(?:UserSettings|Config/LinuxServer)/(?:UserGame|UserEngine|UserServerCustomSettings|Game|Engine|ServerCustomSettings)\.ini(?:(?:\.operator)?\.dstbak-[0-9-]+|\.pre-restore(?:-[0-9-]+)?|\.dst-vehicle[a-z0-9-]*)$'
 }
 
@@ -12,6 +13,7 @@ function Invoke-DuneServerIniBackupCommand {
 
 function Get-DuneServerIniBackups {
     param([string]$Ip, $Target)
+    if($env:DST_HOSTING_BACKEND -eq 'docker'){return Invoke-DuneDockerSettingsReader -Request @{action='backups.inspect'}}
     if (-not $Target) { $Target = Resolve-DuneRetailServerSettingsTarget -Ip $Ip }
     $lines = Invoke-DuneServerIniBackupCommand -Ip $Ip -Target $Target -Command @'
 set -eu
@@ -49,7 +51,8 @@ function Assert-DuneServerIniBackupSelection {
 function Export-DuneServerIniBackups {
     param([string]$Ip, [object[]]$Files)
     Assert-DuneServerIniBackupSelection -Files $Files
-    $target = Resolve-DuneRetailServerSettingsTarget -Ip $Ip
+    $native=$env:DST_HOSTING_BACKEND -eq 'docker'
+    $target = if(-not $native){Resolve-DuneRetailServerSettingsTarget -Ip $Ip}else{$null}
     Add-Type -AssemblyName System.IO.Compression
     $stream = New-Object IO.MemoryStream
     $archive = New-Object IO.Compression.ZipArchive($stream, [IO.Compression.ZipArchiveMode]::Create, $true)
@@ -65,7 +68,7 @@ f='$path'
 [ "`$(stat -c %s "`$f")" -le 1048576 ]
 base64 "`$f"
 "@
-            $encoded = (Invoke-DuneServerIniBackupCommand -Ip $Ip -Target $target -Command $command) -join ''
+            $encoded = if($native){(Invoke-DuneDockerSettingsReader -Request @{action='backups.read';path=$path;sha256=[string]$file.sha256}).base64}else{(Invoke-DuneServerIniBackupCommand -Ip $Ip -Target $target -Command $command) -join ''}
             $bytes = [Convert]::FromBase64String($encoded)
             $total += $bytes.Length
             if ($bytes.Length -gt 1048576 -or $total -gt 33554432) { throw 'Backup selection exceeds the download size limit.' }
@@ -84,6 +87,7 @@ base64 "`$f"
 function Remove-DuneServerIniBackups {
     param([string]$Ip, [object[]]$Files)
     Assert-DuneServerIniBackupSelection -Files $Files
+    if($env:DST_HOSTING_BACKEND -eq 'docker'){return Invoke-DuneDockerSettingsReader -Request @{action='backups.delete-checked';files=@($Files)}}
     $target = Resolve-DuneRetailServerSettingsTarget -Ip $Ip
     $results = @(
         foreach ($file in $Files) {

@@ -11,6 +11,14 @@ BeforeAll {
 }
 
 Describe 'Offline settings reads use guarded Docker management' {
+    It 'keeps backup requests distinct from active-file reads' {
+        Mock Invoke-DuneDockerManager {param($Request);@{ok=$true;data=@{action=$Request.action}}}
+        (Invoke-DuneDockerSettingsReader -Request @{action='backups.list'}).action | Should -Be 'settings.backups.list'
+        (Invoke-DuneDockerSettingsReader -Request @{action='backups.inspect'}).action | Should -Be 'settings.backups.inspect'
+        {Invoke-DuneDockerSettingsReader -Request @{action='exec';file='game'}} | Should -Throw '*Unsupported*'
+        Should -Invoke Invoke-DuneDockerManager -Times 0 -ParameterFilter {$Request.action -eq 'settings.read'}
+    }
+
     It 'requests only the selected known INI and returns the helper snapshot' {
         Mock Invoke-DuneDockerManager { @{ok=$true;data=@{raw='Manual=42';revision=('a'*64)}} }
         $result=Read-DuneDockerSettingsFile -File game

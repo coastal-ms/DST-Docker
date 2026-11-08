@@ -1,5 +1,6 @@
 """Narrow saved-INI I/O service. No network, shell execution or Docker socket."""
 import hashlib
+import base64
 import json
 import os
 from pathlib import Path
@@ -98,7 +99,71 @@ class SavedSettings:
         if request.get('action')=='backups.list':return self.backups()
         if request.get('action')=='backups.delete':return self.delete_backups(request.get('paths'))
         if request.get('action')=='backups.create':return self.backup_files(request.get('files'))
+        if request.get('action')=='backups.inspect':return self.inspect_backups()
+        if request.get('action')=='backups.read':
+            if not isinstance(request.get('sha256'),str) or not re.fullmatch(r'[a-f0-9]{64}',request['sha256']):raise ValueError('A current INI backup checksum is required.')
+            with self.lock:
+                _,data=self.checked_backup(request.get('path'),request.get('sha256'))
+                return {'base64':base64.b64encode(data).decode('ascii')}
+        if request.get('action')=='backups.delete-checked':return self.delete_checked_backups(request.get('files'))
         raise ValueError('Unsupported settings action.')
+
+    def checked_backup(self,path,expected=None):
+        prefix='/srv/UserSettings/.dst-backups/'
+        if not isinstance(path,str) or not path.startswith(prefix) or not re.fullmatch(r'User(?:Game|Engine|ServerCustomSettings)\.ini-\d{8}T\d{6}Z-[a-f0-9]{12}\.bak',path[len(prefix):]):
+            raise ValueError('Choose a recognized server INI backup.')
+        root=self.root()/'.dst-backups'
+        if root.is_symlink() or not root.is_dir():raise ValueError('The settings backup directory is unsupported.')
+        target=root/path[len(prefix):]
+        descriptor=os.open(target,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+        with os.fdopen(descriptor,'rb') as stream:
+            before=os.fstat(stream.fileno())
+            if not stat.S_ISREG(before.st_mode) or before.st_size>MAX_FILE:raise ValueError('The server INI backup is unsupported or exceeds 1 MiB.')
+            data=stream.read(MAX_FILE+1)
+            after=os.fstat(stream.fileno())
+        current=target.lstat()
+        identity=lambda value:(value.st_dev,value.st_ino,value.st_size,value.st_mtime_ns,value.st_ctime_ns)
+        if len(data)>MAX_FILE or identity(before)!=identity(after) or identity(before)!=identity(current):
+            raise SettingsConflict('The server INI backup changed. Refresh and retry.')
+        digest=hashlib.sha256(data).hexdigest()
+        if expected is not None and (not isinstance(expected,str) or not re.fullmatch(r'[a-f0-9]{64}',expected) or expected!=digest):
+            raise SettingsConflict('The server INI backup changed. Refresh and retry.')
+        return {'path':path,'name':target.name,'folder':'UserSettings/.dst-backups','size':len(data),'modified':int(before.st_mtime),'sha256':digest},data
+
+    def inspect_backups(self):
+        with self.lock:
+            root=self.root()/'.dst-backups'
+            if root.is_symlink():raise ValueError('The settings backup directory is unsupported.')
+            if not root.exists():return {'backups':[]}
+            result=[]
+            for path in root.iterdir():
+                if not re.fullmatch(r'User(?:Game|Engine|ServerCustomSettings)\.ini-\d{8}T\d{6}Z-[a-f0-9]{12}\.bak',path.name) or path.is_symlink():continue
+                row,_=self.checked_backup('/srv/UserSettings/.dst-backups/'+path.name)
+                result.append(row)
+                if len(result)>500:raise ValueError('More than 500 server INI backups are present. Use the server file browser to archive older backups first.')
+            return {'backups':sorted(result,key=lambda row:(row['modified'],row['name']),reverse=True)}
+
+    def delete_checked_backups(self,files):
+        if not isinstance(files,list) or not 1<=len(files)<=500 or any(not isinstance(row,dict) for row in files):raise ValueError('Select between 1 and 500 INI backups.')
+        paths=[row.get('path') for row in files]
+        if any(not isinstance(path,str) for path in paths) or len(set(paths))!=len(paths):raise ValueError('Invalid or duplicate INI backup selection.')
+        if any(not re.fullmatch(r'/srv/UserSettings/\.dst-backups/User(?:Game|Engine|ServerCustomSettings)\.ini-\d{8}T\d{6}Z-[a-f0-9]{12}\.bak',row['path']) or not isinstance(row.get('sha256'),str) or not re.fullmatch(r'[a-f0-9]{64}',row['sha256']) for row in files):
+            raise ValueError('A recognized INI backup path and current checksum are required.')
+        with self.lock:
+            results=[]
+            for row in files:
+                if not isinstance(row.get('sha256'),str) or not re.fullmatch(r'[a-f0-9]{64}',row['sha256']):raise ValueError('A current INI backup checksum is required.')
+                try:
+                    checked,_=self.checked_backup(row['path'],row['sha256'])
+                    target=self.root()/'.dst-backups'/checked['name']
+                    target.unlink()
+                    results.append({'path':row['path'],'ok':True})
+                except (SettingsConflict,FileNotFoundError):results.append({'path':row['path'],'ok':False})
+            root=self.root()/'.dst-backups'
+            descriptor=os.open(root,os.O_RDONLY)
+            try:os.fsync(descriptor)
+            finally:os.close(descriptor)
+            return {'deleted':sum(row['ok'] for row in results),'results':results}
 
     def backup_snapshot(self,key,before):
         backups=self.root()/'.dst-backups'
