@@ -2579,6 +2579,7 @@ WHERE id = $pawnID::bigint;
 
 function Invoke-DunePlayerCompleteContracts {
     param([string]$Ip, [long]$AccountId, [string[]]$ContractIds)
+    if($env:DST_HOSTING_BACKEND -eq 'docker'){return Invoke-DuneDockerPlayerContracts -Ip $Ip -AccountId $AccountId -ContractIds $ContractIds}
     if ($AccountId -le 0) { return @{ ok = $false; error = 'account_id is required.' } }
     if (-not $ContractIds -or $ContractIds.Count -eq 0) {
         return @{ ok = $false; error = 'contract_ids[] is required.' }
@@ -2645,6 +2646,7 @@ function Invoke-DunePlayerCompleteContracts {
 
 function Invoke-DunePlayerReverseContracts {
     param([string]$Ip, [long]$AccountId, [string[]]$ContractIds)
+    if($env:DST_HOSTING_BACKEND -eq 'docker'){return Invoke-DuneDockerPlayerContracts -Ip $Ip -AccountId $AccountId -ContractIds $ContractIds -Reverse}
     if ($AccountId -le 0) { return @{ ok = $false; error = 'account_id is required.' } }
     if (-not $ContractIds -or $ContractIds.Count -eq 0) {
         return @{ ok = $false; error = 'contract_ids[] is required.' }

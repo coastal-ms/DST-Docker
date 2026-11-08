@@ -39,6 +39,7 @@ function Test-DuneDockerLandsraadRoute {
 
 function Test-DuneDockerRouteQualified {
     param([string]$Method,[string]$Path)
+    if($Method -ceq 'POST' -and $Path -cin @('/api/gameplay/players/contract/complete','/api/gameplay/players/contracts/complete','/api/gameplay/players/contracts/reverse')){return $true}
     if($Method -ceq 'GET' -and $Path -cin @('/api/gameplay/players/fresh-start/snapshots','/api/gameplay/players/fresh-start/snapshots-path')){return $true}
     if($Method -ceq 'POST' -and $Path -cin @('/api/gameplay/players/fresh-start/snapshot','/api/gameplay/players/fresh-start/restore','/api/gameplay/players/fresh-start/restore-skip-npe')){return $true}
     if($Method -ceq 'POST' -and $Path -cin @('/api/gameplay/players/max-augment-attributes','/api/gameplay/players/repair-orphaned-building-pieces')){return $true}

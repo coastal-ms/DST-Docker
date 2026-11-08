@@ -3,6 +3,13 @@ BeforeAll {
     Import-DstLib 'DockerRoutes.ps1'
 }
 Describe 'Docker adapter routing boundary' {
+    It 'opens only the three exact native contract mutation methods' {
+        foreach($path in @('/api/gameplay/players/contract/complete','/api/gameplay/players/contracts/complete','/api/gameplay/players/contracts/reverse')){
+            Test-DuneDockerRouteQualified -Method POST -Path $path|Should -BeTrue
+            foreach($method in @('GET','PUT','DELETE')){Test-DuneDockerRouteQualified -Method $method -Path $path|Should -BeFalse}
+            Test-DuneDockerRouteQualified -Method POST -Path ($path+'/extra')|Should -BeFalse
+        }
+    }
     It 'bounds native purchase snapshot and restore routes to exact existing methods' {
         foreach($path in @('/api/gameplay/players/fresh-start/snapshots','/api/gameplay/players/fresh-start/snapshots-path')){
             Test-DuneDockerRouteQualified -Method GET -Path $path|Should -BeTrue
