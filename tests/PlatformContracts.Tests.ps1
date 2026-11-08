@@ -70,6 +70,8 @@ Describe 'Platform capability registry' {
             $env:DST_HOSTING_BACKEND = 'docker'
             $ids = @(Get-DuneCapabilitiesForPrincipal -Principal @{type='portal-account';role='owner'} -RuntimePlatform linux).id
             $ids | Should -Contain 'inventory.read'
+            $ids | Should -Contain 'base.manage'
+            $ids | Should -Contain 'base.manage.destructive'
             $ids | Should -Not -Contain 'vehicle.rename'
             $ids | Should -Not -Contain 'player.manage.self'
             @(Get-DuneCapabilitiesForPrincipal -Principal @{type='anonymous'} -RuntimePlatform linux).Count | Should -Be 0

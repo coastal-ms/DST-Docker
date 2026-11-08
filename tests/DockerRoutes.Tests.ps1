@@ -3,6 +3,15 @@ BeforeAll {
     Import-DstLib 'DockerRoutes.ps1'
 }
 Describe 'Docker adapter routing boundary' {
+    It 'qualifies exact base and storage adapters without broad prefixes' {
+        foreach($path in @('/api/gameplay/blueprints/export','/api/gameplay/bases/export')){Test-DuneDockerRouteQualified -Method GET -Path $path|Should -BeTrue}
+        foreach($path in @('/api/gameplay/blueprints/import','/api/gameplay/storage/repair-all','/api/gameplay/storage/rename','/api/gameplay/storage/give-item','/api/gameplay/storage/give-items','/api/gameplay/storage/delete-item','/api/gameplay/storage/set-item-stack','/api/gameplay/bases/destroy-claim')){
+            Test-DuneDockerRouteQualified -Method POST -Path $path|Should -BeTrue
+            Test-DuneDockerRouteQualified -Method DELETE -Path $path|Should -BeFalse
+        }
+        Test-DuneDockerRouteQualified -Method POST -Path '/api/gameplay/storage/delete-all'|Should -BeFalse
+    }
+
     It 'allows only native server INI backup list, download and delete methods' {
         Test-DuneDockerRouteQualified -Method GET -Path '/api/gameconfig/ini-backups'|Should -BeTrue
         foreach($path in @('/api/gameconfig/ini-backups/download','/api/gameconfig/ini-backups/delete')){

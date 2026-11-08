@@ -5,7 +5,7 @@ BeforeAll {
     Import-DstLib 'GameplayWorld.ps1'
     Import-DstLib 'Database.ps1'
     function global:Invoke-DuneSqlQuery { throw 'Test must mock Invoke-DuneSqlQuery.' }
-    function global:ConvertTo-DuneRowMaps { param($Result) return @($Result.rows) }
+    function global:ConvertTo-DuneRowMaps { param($Result) return ,@($Result.rows) }
 }
 
 AfterAll {
@@ -14,6 +14,15 @@ AfterAll {
 }
 
 Describe 'Storage overview container coverage' -Tag 'Pure' {
+    It 'reports success only when an exact totem actor was actually removed' {
+        Mock Invoke-DuneSqlQuery { @{ok=$true;rows=@()} }
+        $absent=Invoke-DuneDestroyClaim -Ip fixture -TotemId 42
+        $absent.ok|Should -BeFalse
+        $absent.error|Should -Match 'not found'
+        Mock Invoke-DuneSqlQuery { @{ok=$true;rows=@(@{totem_id='42'})} }
+        (Invoke-DuneDestroyClaim -Ip fixture -TotemId 42).ok|Should -BeTrue
+    }
+
     It 'selects placeables by real storage inventory instead of class-name text' {
         $script:DuneStorageListSql | Should -Match 'inv\.inventory_type = 4'
         $script:DuneStorageListSql | Should -Not -Match "building_type ILIKE"

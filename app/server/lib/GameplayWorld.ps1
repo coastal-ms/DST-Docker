@@ -781,6 +781,13 @@ END
     # blueprint (many instances/placeables) builds a multi-KB SQL payload that
     # overflows the Windows ~32 KB command-line limit, surfacing as
     # 'The filename or extension is too long' when the ssh process is started.
+    if($env:DST_HOSTING_BACKEND -eq 'docker'){
+        # The native PostgreSQL driver returns result tables rather than psql
+        # notices. Return the exact generated identities in the same transaction.
+        $do="BEGIN; CREATE TEMP TABLE dst_blueprint_result(bp bigint,item bigint) ON COMMIT DROP;`n"+
+            $do.Replace("RAISE NOTICE 'DST_BP_RESULT bp=% item=%', v_bp, v_item;",'INSERT INTO dst_blueprint_result VALUES(v_bp,v_item);')+
+            "`nSELECT 'DST_BP_RESULT bp='||bp::text||' item='||item::text FROM dst_blueprint_result; COMMIT;"
+    }
     $raw = Invoke-DuneSqlRawStdin -Ip $Ip -Sql $do -TimeoutSec 180
     if (Test-DunePsqlError -Output $raw) {
         return @{ ok = $false; error = (Get-DunePsqlErrorMessage -Output $raw) }
@@ -788,6 +795,9 @@ END
     $bpId = 0L; $itemId = 0L
     $m = [regex]::Match($raw, 'DST_BP_RESULT bp=(\d+) item=(\d+)')
     if ($m.Success) { $bpId = [long]$m.Groups[1].Value; $itemId = [long]$m.Groups[2].Value }
+    if($env:DST_HOSTING_BACKEND -eq 'docker' -and ($bpId -le 0 -or $itemId -le 0)){
+        return @{ok=$false;error='The import result could not be identified. Inspect the player inventory before retrying; the blueprint may already have been imported.'}
+    }
     $msg = "Imported $($instancesRaw.Count) pieces + $($placeablesRaw.Count) placeables + $($pentashieldsRaw.Count) pentashields -> blueprint #$bpId (item $itemId) in player inventory"
     return @{ ok = $true; message = $msg; blueprint_id = $bpId; item_id = $itemId }
 }
@@ -935,7 +945,8 @@ RETURNING id::text AS totem_id;
 "@
     $res = Invoke-DuneSqlQuery -Ip $Ip -Sql $sql -ReadOnly $false -MaxRows 1 -TimeoutSec 30
     if (-not $res.ok) { return @{ ok = $false; error = $res.error } }
-    $affected = @(ConvertTo-DuneRowMaps -Result $res).Count
+    $rows = ConvertTo-DuneRowMaps -Result $res
+    $affected = $rows.Count
     if ($affected -eq 0) {
         return @{ ok = $false; error = "Claim (totem $TotemId) not found - it may have already been released." }
     }

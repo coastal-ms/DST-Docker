@@ -14,6 +14,29 @@ BeforeAll {
 }
 
 Describe 'Portable Self-Hosted blueprint compatibility' {
+    It 'returns exact native generated identities from the import transaction rather than driver notices' {
+        $previous=$env:DST_HOSTING_BACKEND
+        try{
+            $env:DST_HOSTING_BACKEND='docker'
+            Mock Invoke-DuneSqlQuery { @{ok=$true;rows=@()} }
+            Mock Invoke-DuneSqlRawStdin {
+                param($Sql)
+                $Sql|Should -Match '^BEGIN; CREATE TEMP TABLE dst_blueprint_result'
+                $Sql|Should -Match 'INSERT INTO dst_blueprint_result VALUES\(v_bp,v_item\)'
+                $Sql|Should -Not -Match 'RAISE NOTICE'
+                $Sql|Should -Match "FROM dst_blueprint_result; COMMIT;"
+                'DST_BP_RESULT bp=40 item=50'
+            }
+            $result=Import-DuneBlueprintLive -Ip docker -PlayerPawnId 7 -Blueprint @{instances=@(@{instance_id=0;building_type='Wall';x=0;y=0;z=0;rotation=0});placeables=@();pentashields=@()}
+            $result.blueprint_id|Should -Be 40
+            $result.item_id|Should -Be 50
+            Mock Invoke-DuneSqlRawStdin {'DO'}
+            $missing=Import-DuneBlueprintLive -Ip docker -PlayerPawnId 7 -Blueprint @{instances=@(@{instance_id=0;building_type='Wall';x=0;y=0;z=0;rotation=0});placeables=@();pentashields=@()}
+            $missing.ok|Should -BeFalse
+            $missing.error|Should -Match 'Inspect the player inventory before retrying'
+        }finally{$env:DST_HOSTING_BACKEND=$previous}
+    }
+
     It 'normalizes zero-based IDs and remaps pentashields before generating SQL' {
         $global:CapturedBlueprintSql = ''
         Mock Invoke-DuneSqlQuery { @{ ok = $true; rows = @() } }
