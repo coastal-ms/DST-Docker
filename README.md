@@ -101,6 +101,8 @@ Stop the battlegroup before applying different allocations. Saving never stops i
 
 ## Development scope
 
+Optional in-game commands are configured on **Players → Community tools**. They are off by default, with separate command and channel selections. Messages are consumed once; DST does not save a chat history. Cooldown timestamps prevent repeated use, and switching the listener off removes its queue.
+
 This is an unfinished Docker preview. Some DST actions still need Linux/browser adapters, and clean-machine installation and upgrade acceptance are not complete. The existing DST interface and feature behavior are the parity baseline.
 
 See [Docker development details](packaging/docker/README.md) for the current implementation and remaining work. VM-data migration and Discord portal login are deferred.
