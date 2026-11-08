@@ -9,6 +9,14 @@ Register-DuneRoute -Method PUT -Path '/api/docker/file-browser/{path*}' -StreamB
 Register-DuneRoute -Method PATCH -Path '/api/docker/file-browser/{path*}' -StreamBody -Handler $script:DuneDockerFileBrowserHandler
 Register-DuneRoute -Method DELETE -Path '/api/docker/file-browser/{path*}' -StreamBody -Handler $script:DuneDockerFileBrowserHandler
 
+$script:DuneDockerDirectorHandler={param($req,$res,$routeParams,$body) Invoke-DuneDockerDirector -Request $req -Response $res}
+Register-DuneRoute -Method GET -Path '/api/docker/director/{path*}' -StreamBody -Handler $script:DuneDockerDirectorHandler
+Register-DuneRoute -Method HEAD -Path '/api/docker/director/{path*}' -StreamBody -Handler $script:DuneDockerDirectorHandler
+Register-DuneRoute -Method POST -Path '/api/docker/director/{path*}' -StreamBody -Handler $script:DuneDockerDirectorHandler
+Register-DuneRoute -Method PUT -Path '/api/docker/director/{path*}' -StreamBody -Handler $script:DuneDockerDirectorHandler
+Register-DuneRoute -Method PATCH -Path '/api/docker/director/{path*}' -StreamBody -Handler $script:DuneDockerDirectorHandler
+Register-DuneRoute -Method DELETE -Path '/api/docker/director/{path*}' -StreamBody -Handler $script:DuneDockerDirectorHandler
+
 Register-DuneRoute -Method POST -Path '/api/docker/client-files/transform' -Handler {
     param($req,$res,$routeParams,$body)
     if($env:DST_HOSTING_BACKEND -ne 'docker'){Write-DuneError -Response $res -Status 404 -Message 'Docker hosting is not enabled.';return}

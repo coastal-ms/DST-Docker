@@ -4,6 +4,7 @@ import { MemoryBalancingControl } from '../src/components/MemoryBalancingControl
 
 const request = vi.hoisted(() => vi.fn())
 vi.mock('../src/api/client', () => ({ api: request }))
+vi.mock('../src/components/MemorySwapControl', () => ({ MemorySwapControl: () => null }))
 afterEach(() => { cleanup(); request.mockReset() })
 
 it('shows the saved mode and saves classic DST mode without a restart request', async () => {

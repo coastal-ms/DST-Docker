@@ -69,6 +69,7 @@ function Test-DuneDockerRouteQualified {
     if(Test-DuneDockerMarketBotRoute -Method $Method -Path $Path){return $true}
     if(Test-DuneDockerLandsraadRoute -Method $Method -Path $Path){return $true}
     if($Path.StartsWith('/api/docker/file-browser/',[StringComparison]::Ordinal) -and $Method -in @('GET','HEAD','POST','PUT','PATCH','DELETE')){return $true}
+    if($Path.StartsWith('/api/docker/director/',[StringComparison]::Ordinal) -and $Method -in @('GET','HEAD','POST','PUT','PATCH','DELETE')){return $true}
     if($Method -eq 'GET' -and $Path -cmatch '^/api/docker/backup-exports/[a-f0-9]{32}$'){return $true}
     if($Method -eq 'POST' -and $Path -eq '/api/docker/backup-import'){return $true}
     if($Method -eq 'GET' -and $Path -in @('/api/db/backup-schedule','/api/db/backup-history','/api/db/backup-dump-pods')){return $true}

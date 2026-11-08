@@ -34,6 +34,7 @@ import world_update
 import resource_policy
 import memory_swap
 import memory_swap_control
+import director_web
 import regis_compatibility
 import backup_schedule
 import backup_mirror_control
@@ -1505,6 +1506,7 @@ def dispatch(request, engine=None):
         # or maintenance operation is in progress. This touches only DST's queue.
         if action == 'chat.queue.delete':return chat_queue(state,engine,'delete')
         if action == 'files.endpoint': return file_browser.endpoint(state, engine)
+        if action == 'director.endpoint': return director_web.endpoint(state, engine)
         if action == 'regis.status': return regis_compatibility.status(state,engine)
         if action == 'regis.support': return regis_compatibility.support(state,engine)
         if action == 'memory-swap.status': return memory_swap_control.snapshot(state,engine)
@@ -1550,6 +1552,9 @@ def dispatch(request, engine=None):
             prepare_file_browser(state, engine)
             return file_browser.endpoint(state, engine)
         if action == 'files.write-access': return file_browser.endpoint(state, engine)
+        if action == 'director.write-access':
+            if state.get('desiredState')!='running':raise ValueError('Start the battlegroup before using Director controls.')
+            return director_web.endpoint(state,engine)
         if action=='resources.set':return set_resources(state,engine,request)
         if action=='memory.policy.set':
             if type(request.get('enabled')) is not bool:raise ValueError('Supply a JSON boolean for memory balancing.')

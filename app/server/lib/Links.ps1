@@ -64,7 +64,7 @@ function Get-DuneLinks {
         return @{
             vmRunning=$false; bgRunning=$running
             fileBrowser=@{available=$filesReady;url=$(if($filesReady){'/api/docker/file-browser/'}else{$null});reason=$(if($filesReady){$null}else{'Prepare Hagga Basin saved files before opening File Browser.'})}
-            director=@{available=$running;url=$(if($running){'http://127.0.0.1:{0}/' -f [int]$reply.data.plan.ports.director}else{$null});reason=$(if($running){$null}else{'Battlegroup not running'})}
+            director=@{available=$running;url=$(if($running){'/api/docker/director/'}else{$null});reason=$(if($running){$null}else{'Battlegroup not running'})}
         }
     }
 
