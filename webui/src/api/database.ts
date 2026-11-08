@@ -88,13 +88,20 @@ export type BackupDeleteResult = {
   failed: { path: string; reason: string }[]
   message?: string
   error?: string
+  pending?: boolean
 }
 
-export function deleteBackups(opts: { paths: string[] }) {
-  return api<BackupDeleteResult>('/api/db/backup-delete', {
+export async function deleteBackups(opts: { paths: string[] }) {
+  const result = await api<BackupDeleteResult>('/api/db/backup-delete', {
     method: 'POST',
     body: JSON.stringify({ paths: opts.paths }),
   })
+  if (import.meta.env.VITE_DST_EDITION === 'docker' && result.pending) {
+    const { waitDockerBackupCleanup } = await import('./docker')
+    await waitDockerBackupCleanup()
+    return { ...result, pending: false, deleted: opts.paths, message: `Deleted ${opts.paths.length} backup file(s).` }
+  }
+  return result
 }
 
 export function getBackupDumpPods() {

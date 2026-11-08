@@ -758,6 +758,10 @@ export type BackupPreset = {
 }
 
 export type BackupSchedule = {
+  backend?: 'docker'
+  schedulerError?: string
+  lastRun?: { phase: string; error?: string }
+  cleanup?: { phase: string; error?: string } | null
   enabled: boolean
   preset: string
   keepLast: number
@@ -778,6 +782,8 @@ export type BackupFile = {
   sizeBytes: number
   mtimeEpoch: number
   mtimeIso: string
+  verificationPhase?: string
+  verificationError?: string
 }
 
 export type BackupHistory = {
@@ -799,6 +805,7 @@ export type BackupDumpPod = {
   ownerKind?: string
   ownerName?: string
   ownerIsController?: boolean
+  protected?: boolean
 }
 
 export type BackupDumpPodList = {

@@ -29,6 +29,15 @@ Register-DuneRoute -Method PUT -Path '/api/db/backup-schedule' -Handler {
         Write-DuneError -Response $res -Status $ctx.status -Message $ctx.message
         return
     }
+    if($env:DST_HOSTING_BACKEND -eq 'docker'){
+        if($body -isnot [System.Collections.IDictionary]){Write-DuneError -Response $res -Status 400 -Message 'Supply a backup schedule object.';return}
+        $request=@{action='backups.schedule.set'}
+        foreach($key in @('preset','keepLast','keepLastPods','keepDaysPods')){if($body.Contains($key)){$request[$key]=$body[$key]}}
+        $result=Invoke-WithDuneLock -Name 'backup-schedule' -Script {Invoke-DuneDockerManager -Request $request}
+        if(-not $result.ok){Write-DuneError -Response $res -Status 400 -Message $result.error;return}
+        Write-DuneJson -Response $res -Body $result.data
+        return
+    }
     $preset = $null
     $keepLast = 0
     $keepLastPods = $null

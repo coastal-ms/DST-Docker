@@ -3,6 +3,11 @@
 function Test-DuneDockerRouteQualified {
     param([string]$Method,[string]$Path)
     if($Path.StartsWith('/api/docker/file-browser/',[StringComparison]::Ordinal) -and $Method -in @('GET','HEAD','POST','PUT','PATCH','DELETE')){return $true}
+    if($Method -eq 'GET' -and $Path -cmatch '^/api/docker/backup-exports/[a-f0-9]{32}$'){return $true}
+    if($Method -eq 'POST' -and $Path -eq '/api/docker/backup-import'){return $true}
+    if($Method -eq 'GET' -and $Path -in @('/api/db/backup-schedule','/api/db/backup-history','/api/db/backup-dump-pods')){return $true}
+    if($Method -eq 'PUT' -and $Path -eq '/api/db/backup-schedule'){return $true}
+    if($Method -eq 'POST' -and $Path -in @('/api/db/backup-delete','/api/db/prune-backup-dump-pods')){return $true}
     if($Path -eq '/api/docker/setup'){return $true}
     if($Method -eq 'GET' -and $Path -in @('/api/v1/maps/catalog','/api/v1/maps/deep-desert','/api/v1/maps/deep-desert/layers/active-spice','/api/v1/maps/deep-desert/layers/public-poi')){return $true}
     if($Path -eq '/api/gameconfig/regis-tanks' -and $Method -in @('GET','PUT')){return $true}

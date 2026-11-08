@@ -171,7 +171,7 @@
     "ws CONNECT /ws/terminal": "host.powershell.execute"
   },
   "groups": [
-    {"source":"Docker.ps1","capabilityId":"operation.topology","routeCount":15,"sha256":"0fb4060daf691c21b6ac123961db832400105c9ddf1253e68e084bc60add3053"},
+    {"source":"Docker.ps1","capabilityId":"operation.topology","routeCount":17,"sha256":"67df5ea00e13912246a3d19c2386cb629fe8069e67cfb3a50a260d28d2b89e4e"},
     {"source": "PlayerTeleports.ps1", "capabilityId": "operation.commands", "routeCount": 3, "sha256": "eff3d8bd567c9f2d366fbbb4123eb3c64b5faa8d39c89a6b521a76b9e1759c38"},
     {"source":"VmMapHelper.ps1","capabilityId":"map.observer","routeCount":4,"sha256":"54d29115d668c6eedf1f84d9f6bfaf140333072ecac03e906e9952e49075cfb1"},
     {"source": "Atlas.ps1", "capabilityId": "map.observer", "routeCount": 4, "sha256": "e6c5c95b2c67d97cba40e9cc7c4563bf1759221514a8626e6db9906c409045e9"},

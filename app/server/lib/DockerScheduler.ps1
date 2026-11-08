@@ -253,6 +253,7 @@ function Start-DuneDockerRestartScheduler {
             while(-not $Token.IsCancellationRequested){
                 $health=@{running=$true;lastTickUtc=[DateTimeOffset]::UtcNow.ToString('o');error=''}
                 try {Invoke-DuneDockerRestartScheduleTick}catch{$health.error=$_.Exception.Message;Write-DuneLog ('Docker restart scheduler: '+$_.Exception.Message) 'WARN'}
+                try {if(Get-Command Remove-DuneDockerBackupUploadCache -ErrorAction SilentlyContinue){Remove-DuneDockerBackupUploadCache}}catch{Write-DuneLog ('Docker backup upload cleanup: '+$_.Exception.Message) 'WARN'}
                 try {Invoke-DuneDiscordStateMonitorTick}catch{Write-DuneLog ('Docker state notifications: '+$_.Exception.Message) 'WARN'}
                 Write-DuneDockerSchedulerJson -Path (Get-DuneDockerSchedulerHealthPath) -Value $health
                 if($Token.WaitHandle.WaitOne(30000)){break}

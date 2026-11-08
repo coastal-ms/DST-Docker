@@ -32,12 +32,15 @@ import service_generations
 import world_update
 import resource_policy
 import regis_compatibility
+import backup_schedule
 import sys
+import shutil
 
 STATE = Path('/projects')
 CONFIG = Path('/app-config/DuneServer')
 SOCKET = Path('/control/manager.sock')
 LOCK = threading.Lock()
+BACKUP_WORKER = None
 
 
 class OperationBusyError(ValueError):pass
@@ -86,10 +89,13 @@ def observe_backup_jobs(state,engine):
     changed=False
     for entry in state.get('backups',{}).values():
         if entry['phase']=='running':
-            observed=engine.assert_owned(entry['job'],state['id'],'db-backup')
+            imported=entry.get('source')=='import'
+            component='db-import' if imported else 'db-backup'
+            observed=engine.assert_owned(entry['job'],state['id'],component)
             if observed['State']['Status']=='exited':
-                report=finished_backup_report(engine,entry['job'],state['id'],'db-backup')
-                valid=observed['State'].get('ExitCode')==0 and report.get('ok') and report.get('name')==entry['name'] and report.get('mode')=='create'
+                report=finished_backup_report(engine,entry['job'],state['id'],component)
+                valid=observed['State'].get('ExitCode')==0 and report.get('ok') and report.get('name')==entry['name'] and report.get('mode')==('import' if imported else 'create')
+                if imported:valid=valid and report.get('uploadId')==entry['uploadId'] and report.get('sha256')==entry['sha256'] and report.get('bytes')==entry['bytes']
                 valid=valid and bool(re.fullmatch(r'[a-f0-9]{64}',report.get('sha256',''))) and type(report.get('bytes')) is int and report['bytes']>0
                 entry.update(phase='completed' if valid else 'failed',finishedAt=time.time())
                 if valid:entry.update(sha256=report['sha256'],bytes=report['bytes'])
@@ -104,6 +110,17 @@ def observe_backup_jobs(state,engine):
                 verification.update(phase='completed' if valid else 'failed',finishedAt=time.time())
                 if valid:verification['restored']=report['restored']
                 else:verification['error']=report.get('error','The restore rehearsal failed. The original database was preserved.')
+                changed=True
+        exported=entry.get('export')
+        if exported and exported['phase']=='running':
+            observed=engine.assert_owned(exported['job'],state['id'],'db-export')
+            if observed['State']['Status']=='exited':
+                report=finished_backup_report(engine,exported['job'],state['id'],'db-export')
+                valid=(observed['State'].get('ExitCode')==0 and report.get('ok') and report.get('id')==exported['id'] and
+                       report.get('name')==entry['name'] and report.get('sha256')==entry.get('sha256') and report.get('bytes')==entry.get('bytes'))
+                exported.update(phase='completed' if valid else 'failed',finishedAt=time.time())
+                if valid:exported['download']='/api/docker/backup-exports/'+exported['id']
+                else:exported['error']='Backup export failed its verification. The original backup was preserved.'
                 changed=True
     if changed:save(state)
 
@@ -161,12 +178,15 @@ def public_state(state, engine):
                     if heartbeat.get('serverId'):row['gameServerId']=heartbeat['serverId']
     if state.get('operation',{}).get('phase')!='running':
         observe_backup_jobs(state,engine)
+        observe_backup_cleanup(state,engine)
     backups=[]
     for identifier,entry in state.get('backups',{}).items():
-        row={key:entry[key] for key in ['name','phase','createdAt','finishedAt','bytes','sha256','error','operationId'] if key in entry}
+        row={key:entry[key] for key in ['name','phase','createdAt','finishedAt','bytes','sha256','error','operationId','scheduledSlot','requestId','source','uploadId'] if key in entry}
         row['id']=identifier
         if entry.get('verification'):
             row['verification']={key:entry['verification'][key] for key in ['phase','finishedAt','restored','error'] if key in entry['verification']}
+        if entry.get('export'):
+            row['export']={key:entry['export'][key] for key in ('id','phase','error','download') if key in entry['export']}
         backups.append(row)
     browser = state.get('fileBrowser')
     browser_status = None
@@ -184,18 +204,24 @@ def public_state(state, engine):
             'connectionServices':connections,'services':services,'desiredState':state.get('desiredState','stopped'),
             'plan':public_plan(state['worldPlan']) if state.get('worldPlan') else None,
             'operation':state.get('operation'),'backups':sorted(backups,key=lambda row:row['createdAt'],reverse=True),
+            'backupCleanup':{key:state['backupCleanup'][key] for key in ('phase','error','startedAt') if key in state['backupCleanup']} if state.get('backupCleanup') else None,
             'pendingMemoryChange':state.get('pendingMemoryChange'),
             'update':{key:state['updateRun'][key] for key in ('id','phase','build','error','recoveryError','committed','startedAt','finishedAt') if key in state['updateRun']} if state.get('updateRun') else None,
             'restore':{key:state['restore'][key] for key in ['id','name','phase','startedAt','finishedAt'] if key in state['restore']} if state.get('restore') else None}
 
 
-def start_backup(state,engine,backup_id=None):
+def start_backup(state,engine,backup_id=None,scheduled_resume=None):
     if state['phase']!='database-ready':raise ValueError('Prepare the game schema before creating backups.')
-    for entry in state.get('backups',{}).values():
+    for identifier,entry in state.get('backups',{}).items():
+        if scheduled_resume==identifier:continue
         if entry['phase'] in {'preparing','running'} or entry.get('verification',{}).get('phase') in {'preparing','running'}:
             raise ValueError('Another backup operation is in progress or needs recovery.')
     database=state['database']
-    engine.assert_owned(database['id'],state['id'],'postgres')
+    observed=engine.assert_owned(database['id'],state['id'],'postgres')
+    resume_entry=state.get('backups',{}).get(scheduled_resume,{})
+    existing_status=engine.assert_owned(resume_entry['job'],state['id'],'db-backup')['State']['Status'] if resume_entry.get('job') else None
+    if existing_status not in {'running','exited'} and (observed['State']['Status']!='running' or observed['State'].get('Health',{}).get('Status')!='healthy'):
+        raise ValueError('The game database must already be healthy before creating a backup. No database or maps were started.')
     images=assets_state()['images']
     tags=[tag for entry in images if entry['archive']=='battlegroup/server-db-utils.tar' for tag in entry['tags']]
     if len(tags)!=1:raise ValueError('Official database tools are unavailable.')
@@ -204,9 +230,18 @@ def start_backup(state,engine,backup_id=None):
     mounts=[mount for mount in own.get('Mounts',[]) if mount.get('Destination')=='/projects' and mount.get('Type')=='volume']
     if len(mounts)!=1:raise ValueError('Private backup control storage is unavailable.')
     entries=state.setdefault('backups',{})
-    if backup_id is None:
+    if scheduled_resume:
+        entry=entries.get(scheduled_resume)
+        if not entry or entry.get('requestId')!=state.get('scheduledBackup',{}).get('requestId') or entry.get('phase') not in {'preparing','running'}:
+            raise ValueError('The scheduled backup recovery record does not match.')
+        backup_id=scheduled_resume;mode='create';record=entry
+    elif backup_id is None:
         backup_id=uuid.uuid4().hex
         entry={'phase':'preparing','createdAt':time.time(),'name':'backup-'+str(int(time.time()))+'-'+secrets.token_hex(4)+'.dump'}
+        if state.get('scheduledBackup',{}).get('phase')=='dispatching':
+            entry['scheduledSlot']=state['scheduledBackup']['slot']
+            entry['requestId']=state['scheduledBackup']['requestId']
+            state['scheduledBackup'].update(phase='running',backupId=backup_id)
         if state.get('operation',{}).get('id'):entry['operationId']=state['operation']['id']
         entries[backup_id]=entry;save(state)
         mode='create';record=entry
@@ -217,11 +252,231 @@ def start_backup(state,engine,backup_id=None):
         if entry['phase']!='completed':raise ValueError('The backup is not ready for a restore rehearsal.')
         mode='verify';record={'phase':'preparing','createdAt':time.time()}
         entry['verification']=record;save(state)
-    identifier=engine.create_backup_job(state['id'],tags[0],database['network'],mounts[0]['Name'],
-        'dst-'+state['id']+'-backups',Path('/opt/dst-manager/backup-job.py').read_text(),mode,entry['name'],entry.get('sha256'))
+    arguments=(state['id'],tags[0],database['network'],mounts[0]['Name'],
+               'dst-'+state['id']+'-backups',Path('/opt/dst-manager/backup-job.py').read_text(),mode,entry['name'],entry.get('sha256'))
+    identifier=engine.create_backup_job(*arguments,**({'request_id':entry['requestId']} if mode=='create' and entry.get('requestId') else {}))
     record.update(phase='running',job=identifier);save(state)
-    engine.lifecycle(identifier,state['id'],'start')
+    if mode=='create' and entry.get('requestId'):
+        observed=engine.assert_owned(identifier,state['id'],'db-backup')
+        if observed['State']['Status']=='created':engine.lifecycle(identifier,state['id'],'start')
+        elif observed['State']['Status'] not in {'running','exited'}:raise ValueError('The scheduled backup job needs review.')
+    else:engine.lifecycle(identifier,state['id'],'start')
     return public_state(state,engine)
+
+
+def start_backup_cleanup(state,engine,ids):
+    if state.get('backupCleanup'):raise ValueError('Finish the previous backup cleanup before deleting more files.')
+    if not isinstance(ids,list) or not 1<=len(ids)<=100 or any(not isinstance(value,str) for value in ids) or len(set(ids))!=len(ids):raise ValueError('Select one to100 distinct backup records.')
+    protected={value.get('backupId') for value in (state.get('restore',{}),state.get('updateRun',{}))}
+    files=[]
+    for identifier in ids:
+        entry=state.get('backups',{}).get(identifier)
+        if not entry or entry['phase']!='completed' or identifier in protected or entry.get('verification',{}).get('phase') in {'preparing','running'} or entry.get('export',{}).get('phase') in {'preparing','running'}:
+            raise ValueError('A selected backup is active, protected for recovery, or not ready for deletion.')
+        files.append({'name':entry['name'],'sha256':entry['sha256']})
+    # Persist before create; an ambiguous create/start never authorizes a
+    # second job or an unrelated deletion. The pending record blocks restores.
+    state['backupCleanup']={'id':uuid.uuid4().hex,'ids':ids,'files':files,'phase':'preparing','startedAt':time.time()};save(state)
+    identifier=engine.create_backup_cleanup_job(state['id'],files,state['backupCleanup']['id'])
+    state['backupCleanup'].update(job=identifier,phase='running');save(state)
+    engine.lifecycle(identifier,state['id'],'start')
+
+
+def observe_backup_cleanup(state,engine):
+    record=state.get('backupCleanup')
+    if not record:return
+    if not record.get('job'):
+        raise ValueError('Interrupted backup cleanup needs review; no replacement job was issued.')
+    observed=engine.assert_owned(record['job'],state['id'],'db-files')
+    if observed['State']['Status']!='exited':return
+    report=finished_backup_report(engine,record['job'],state['id'],'db-files')
+    expected=[row['name'] for row in record['files']]
+    if observed['State'].get('ExitCode')!=0 or not report.get('ok') or report.get('deleted')!=expected:
+        record.update(phase='failed',error='Backup cleanup needs review. No additional files were removed.');save(state)
+        return
+    for identifier in record['ids']:
+        state['backups'][identifier].update(phase='deleted',deletedAt=time.time())
+    state['lastBackupCleanup']={**record,'phase':'completed','finishedAt':time.time()}
+    state.pop('backupCleanup');save(state)
+
+
+def recover_backup_cleanup(state,engine):
+    record=state.get('backupCleanup')
+    if not record:raise ValueError('There is no pending backup cleanup.')
+    if record.get('job'):
+        observed=engine.assert_owned(record['job'],state['id'],'db-files')
+        if observed['State']['Status']=='running':return
+        if observed['State']['Status']=='exited':
+            observe_backup_cleanup(state,engine)
+            if not state.get('backupCleanup'):return
+            record['previousJob']=record.pop('job');record['id']=uuid.uuid4().hex
+        elif observed['State']['Status']!='created':raise ValueError('The pending cleanup container needs review.')
+    identifier=engine.create_backup_cleanup_job(state['id'],record['files'],record['id'])
+    record.update(job=identifier,phase='running');record.pop('error',None);save(state)
+    engine.lifecycle(identifier,state['id'],'start')
+
+
+def start_backup_export(state,engine,backup_id):
+    entry=state.get('backups',{}).get(backup_id) if isinstance(backup_id,str) else None
+    if not entry or entry['phase']!='completed':raise ValueError('Choose a completed backup to download.')
+    if state.get('backupCleanup'):raise ValueError('Finish pending backup cleanup before preparing a download.')
+    directory=Path('/control/backup-exports')
+    if directory.is_symlink():raise ValueError('Private backup export storage needs review.')
+    directory.mkdir(mode=0o750,parents=True,exist_ok=True);directory.chmod(0o750);os.chown(directory,-1,10001)
+    if shutil.disk_usage(directory).free<entry['bytes']+512*1024**2:raise ValueError('Backup export needs space for a temporary copy plus512 MiB free.')
+    active={row['export']['id'] for row in state.get('backups',{}).values() if row.get('export',{}).get('phase') in {'preparing','running'}}
+    previous=sorted((path for path in directory.glob('*.dump') if re.fullmatch(r'[a-f0-9]{32}',path.stem) and not path.is_symlink() and path.stem not in active),key=lambda path:path.stat().st_mtime,reverse=True)
+    for old in previous[2:]:old.unlink()
+    record=entry.get('export')
+    if not record or record['phase'] not in {'preparing','running'}:
+        record={'id':uuid.uuid4().hex,'phase':'preparing','startedAt':time.time()};entry['export']=record;save(state)
+    request={'id':record['id'],'name':entry['name'],'sha256':entry['sha256'],'bytes':entry['bytes']}
+    identifier=engine.create_backup_export_job(state['id'],request)
+    record.update(job=identifier,phase='running');save(state)
+    observed=engine.assert_owned(identifier,state['id'],'db-export')
+    if observed['State']['Status']=='created':engine.lifecycle(identifier,state['id'],'start')
+    elif observed['State']['Status'] not in {'running','exited'}:raise ValueError('The backup export container needs review.')
+
+
+def start_backup_import(state,engine,request):
+    upload=request.get('uploadId')
+    if (request.get('trustedSource') is not True or not isinstance(upload,str) or not re.fullmatch(r'[a-f0-9]{32}',upload) or
+        not isinstance(request.get('sha256'),str) or not re.fullmatch(r'[a-f0-9]{64}',request['sha256']) or
+        type(request.get('bytes')) is not int or not 5<=request['bytes']<=25*1024**3):
+        raise ValueError('Confirm the trusted source and supply a bounded PostgreSQL custom backup upload.')
+    if state.get('backupCleanup'):raise ValueError('Finish pending backup cleanup before importing another backup.')
+    entries=state.setdefault('backups',{})
+    entry=entries.get(upload)
+    if entry:
+        if entry.get('source')!='import' or entry.get('uploadId')!=upload or entry.get('sha256')!=request['sha256'] or entry.get('bytes')!=request['bytes']:
+            raise ValueError('The existing import does not match this upload.')
+        if entry['phase']=='deleted':raise ValueError('This import was deleted. Select the backup again for a new upload.')
+        if entry['phase'] in {'completed','failed'}:return
+    elif any(row.get('phase') in {'preparing','running'} or row.get('verification',{}).get('phase') in {'preparing','running'} for row in entries.values()):
+        raise ValueError('Wait for the active backup or restore rehearsal before importing another backup.')
+    tags=[tag for item in assets_state()['images'] if item['archive']=='battlegroup/server-db-utils.tar' for tag in item['tags']]
+    if len(tags)!=1:raise ValueError('Official database tools are unavailable.')
+    engine.ensure_package_image('/assets/server/images/battlegroup/server-db-utils.tar',tags[0])
+    if entry is None:
+        entry={'source':'import','uploadId':upload,'sha256':request['sha256'],'bytes':request['bytes'],
+               'phase':'preparing','createdAt':time.time(),'name':'backup-'+str(int(time.time()))+'-'+secrets.token_hex(4)+'.dump'}
+        entries[upload]=entry;save(state)
+    payload={key:entry[key] for key in ('uploadId','name','sha256','bytes')}
+    identifier=engine.create_backup_import_job(state['id'],tags[0],payload,Path('/opt/dst-manager/backup_import.py').read_text())
+    entry.update(phase='running',job=identifier);save(state)
+    observed=engine.assert_owned(identifier,state['id'],'db-import')
+    if observed['State']['Status']=='created':engine.lifecycle(identifier,state['id'],'start')
+    elif observed['State']['Status'] not in {'running','exited'}:raise ValueError('The import container needs review.')
+
+
+def protected_backup_jobs(state):
+    protected={state.get('restore',{}).get('job'),state.get('backupCleanup',{}).get('job')}
+    for entry in state.get('backups',{}).values():
+        if entry.get('phase') in {'preparing','running'}:protected.add(entry.get('job'))
+        if entry.get('verification',{}).get('phase') in {'preparing','running'}:protected.add(entry['verification'].get('job'))
+        if entry.get('export',{}).get('phase') in {'preparing','running'}:protected.add(entry['export'].get('job'))
+    return protected
+
+
+def prune_backup_jobs(state,engine,keep_last,keep_days):
+    if type(keep_last) is not int or not 0<=keep_last<=100 or type(keep_days) is not int or not 0<=keep_days<=365:
+        raise ValueError('Choose job retention from zero to100 jobs and zero to365 days.')
+    observe_backup_jobs(state,engine)
+    protected=protected_backup_jobs(state)
+    jobs=engine.backup_jobs(state['id']);terminal=[row for row in jobs if row['state']=='exited']
+    deleted=[];kept=[];now=time.time()
+    for index,job in enumerate(terminal):
+        expired=(keep_last>0 and index>=keep_last) or (keep_days>0 and now-job['createdAt']>keep_days*86400)
+        if expired and job['id'] not in protected:
+            engine.remove_backup_job(state['id'],job);deleted.append(job)
+        else:kept.append(job)
+    return {'ok':True,'deleted':deleted,'kept':kept,'total':len(jobs)}
+
+
+def backup_schedule_tick(engine=None,now=None):
+    engine=engine or Engine();now=time.time() if now is None else now
+    with LOCK:
+        state=project_state()
+        if state.get('operation',{}).get('phase')=='running':return
+        observe_backup_jobs(state,engine)
+        observe_backup_cleanup(state,engine)
+        for entry in state.get('backups',{}).values():
+            if entry.get('source')=='import' and entry.get('phase') in {'preparing','running'}:
+                if entry['phase']=='preparing' or engine.assert_owned(entry['job'],state['id'],'db-import')['State']['Status']=='created':
+                    start_backup_import(state,engine,{**{key:entry[key] for key in ('uploadId','sha256','bytes')},'trustedSource':True})
+        config=backup_schedule.settings(state)
+        run=state.get('scheduledBackup',{})
+        if run.get('phase') in {'dispatching','running'}:
+            entry=state.get('backups',{}).get(run.get('backupId'))
+            if not entry:
+                # May be a crash before or after job creation. Do not guess
+                # that the request was never dispatched and duplicate it.
+                run.update(phase='review-required',error='Interrupted scheduled backup needs review before another dispatch.');save(state);return
+            if entry['phase']=='preparing' or (entry['phase']=='running' and engine.assert_owned(entry['job'],state['id'],'db-backup')['State']['Status']=='created'):
+                start_backup(state,engine,scheduled_resume=run['backupId']);return
+            if entry['phase']=='completed':
+                run.update(phase='completed',finishedAt=entry.get('finishedAt',now));save(state)
+                ids=backup_schedule.retained_ids(state,config['keepLast'])[:100]
+                if ids and not state.get('backupCleanup'):start_backup_cleanup(state,engine,ids)
+            elif entry['phase']=='failed':
+                run.update(phase='failed',error=entry.get('error','Backup failed.'),finishedAt=now);save(state)
+            return
+        if run.get('phase')=='review-required' or state.get('backupCleanup'):return
+        if run.get('phase')=='completed' and config['preset']!='Off':
+            ids=backup_schedule.retained_ids(state,config['keepLast'])[:100]
+            if ids:start_backup_cleanup(state,engine,ids);return
+            prune_backup_jobs(state,engine,config['keepLastPods'],config['keepDaysPods'])
+        at=backup_schedule.due(state,now)
+        if at is None:return
+        # Defer while maintenance/another backup is active. Never start a
+        # stopped database or any game to satisfy a timer.
+        if state.get('phase')!='database-ready' or state.get('restore',{}).get('phase') in {'stopping','preparing','restoring','recovering','recovery-required'} or state.get('updateRun',{}).get('phase','completed') not in world_update.TERMINAL:return
+        if any(state.get(key) for key in ('pendingMemoryChange','pendingResourceChange','pendingRegisChange','pendingAddressChange')):return
+        if any(row.get('phase') in {'preparing','running'} or row.get('verification',{}).get('phase') in {'preparing','running'} for row in state.get('backups',{}).values()):return
+        database=state.get('database',{})
+        if not database.get('id'):return
+        observed=engine.assert_owned(database['id'],state['id'],'postgres')
+        if observed['State']['Status']!='running' or observed['State'].get('Health',{}).get('Status')!='healthy':return
+        state['scheduledBackup']={'slot':at,'phase':'dispatching','requestId':uuid.uuid4().hex,'startedAt':now};save(state)
+        start_backup(state,engine)
+
+
+def run_backup_scheduler():
+    while True:
+        try:backup_schedule_tick()
+        except Exception:
+            # Keep failures observable without taking down the control socket.
+            with LOCK:
+                state=project_state()
+                if state.get('operation',{}).get('phase')!='running':
+                    state['backupSchedulerError']='Automatic backup needs review. Existing database and backup records were retained.';save(state)
+        time.sleep(30)
+
+
+def recover_scheduled_backup(state,engine):
+    run=state.get('scheduledBackup',{})
+    if run.get('phase') not in {'review-required','dispatching','running'} or not re.fullmatch(r'[a-f0-9]{32}',str(run.get('requestId',''))):
+        raise ValueError('There is no identified interrupted scheduled backup to resume.')
+    if run.get('backupId') in state.get('backups',{}):
+        start_backup(state,engine,scheduled_resume=run['backupId']);run.pop('error',None);return
+    expected='dst-'+state['id']+'-db-backup-'+run['requestId']
+    jobs=[row for row in engine.backup_jobs(state['id']) if row['name']==expected and row['component']=='db-backup']
+    if len(jobs)>1:raise ValueError('More than one helper matches the recorded backup identity; review is required.')
+    if jobs:
+        observed=engine.assert_owned(jobs[0]['id'],state['id'],'db-backup')
+        values=dict(value.split('=',1) for value in observed.get('Config',{}).get('Env',[]) if '=' in value)
+        name=values.get('DST_BACKUP_NAME','')
+        if values.get('DST_BACKUP_MODE')!='create' or not re.fullmatch(r'backup-[0-9]+-[a-f0-9]{8}\.dump',name):raise ValueError('The existing helper does not match the saved backup operation.')
+        identifier=uuid.uuid4().hex
+        state.setdefault('backups',{})[identifier]={'phase':'preparing','name':name,'createdAt':jobs[0]['createdAt'],
+            'scheduledSlot':run['slot'],'requestId':run['requestId'],'job':jobs[0]['id']}
+        run.update(phase='running',backupId=identifier);run.pop('error',None);save(state)
+        start_backup(state,engine,scheduled_resume=identifier)
+    else:
+        # A deterministic Docker job name also guards a late create response.
+        # Its factory adopts a matching existing job, or rejects any mismatch.
+        run.update(phase='dispatching');run.pop('error',None);save(state)
+        start_backup(state,engine)
 
 
 def restore_backup(state,engine,backup_id,confirmation,keep_maintenance=False):
@@ -519,6 +774,21 @@ def ensure_database_ready(state,engine,timeout=90):
         if time.monotonic()>=deadline:
             raise ValueError('The game database did not become ready. Check its logs and retry Start Battlegroup; maps were not started.')
         time.sleep(0.25)
+
+
+def stop_database_only(state,engine):
+    database=state.get('database',{})
+    if not database.get('id') or state.get('phase')!='database-ready':raise ValueError('Complete database setup before using database controls.')
+    if state.get('desiredState','stopped')!='stopped':raise ValueError('Stop the battlegroup before stopping its database.')
+    for component,entry in state.get('services',{}).items():
+        if engine.assert_owned(entry['id'],state['id'],component)['State']['Status'] not in {'created','exited'}:
+            raise ValueError('Every battlegroup service must be stopped before its database can stop.')
+    if any(entry.get('phase') in {'preparing','running'} or entry.get('verification',{}).get('phase') in {'preparing','running'} for entry in state.get('backups',{}).values()):
+        raise ValueError('Wait for backup and restore jobs before stopping the database.')
+    observed=engine.assert_owned(database['id'],state['id'],'postgres')
+    if observed['State']['Status'] in {'created','exited'}:return
+    if observed['State']['Status'] not in {'running','restarting'}:raise ValueError('The database container needs review before stopping.')
+    engine.lifecycle(database['id'],state['id'],'stop')
 
 
 def start_services(state,engine,publish_gateway=True):
@@ -1128,6 +1398,8 @@ def run_operation(state,engine,request):
         if action=='database.create':provision_database(state,engine,request.get('port',18932))
         elif action=='database.initialize':initialize_database(state,engine)
         elif action=='database.migrate':migrate_database(state,engine)
+        elif action=='database.start':ensure_database_ready(state,engine)
+        elif action=='database.stop':stop_database_only(state,engine)
         elif action=='world.configure':configure_world(state,engine,request.get('profile',{}))
         elif action=='connections.prepare':prepare_connections(state,engine)
         elif action=='services.prepare':prepare_services(state,engine)
@@ -1155,6 +1427,11 @@ def run_operation(state,engine,request):
         elif action=='backups.create':start_backup(state,engine)
         elif action=='backups.verify':start_backup(state,engine,request.get('backupId',''))
         elif action=='backups.restore':restore_backup(state,engine,request.get('backupId',''),request.get('confirmation',''))
+        elif action=='backups.delete':start_backup_cleanup(state,engine,request.get('backupIds'))
+        elif action=='backups.cleanup.recover':recover_backup_cleanup(state,engine)
+        elif action=='backups.export':start_backup_export(state,engine,request.get('backupId'))
+        elif action=='backups.import':start_backup_import(state,engine,request)
+        elif action=='backups.schedule.recover':recover_scheduled_backup(state,engine)
         else:raise ValueError('Unsupported Docker operation.')
         state['operation'].update(phase='completed',finishedAt=time.time())
     except (ValueError,EngineError) as error:
@@ -1174,6 +1451,9 @@ def dispatch(request, engine=None):
         if action == 'regis.status': return regis_compatibility.status(state,engine)
         if action == 'regis.support': return regis_compatibility.support(state,engine)
         if action == 'assets.version': return installed_version()
+        if action=='backups.schedule.get':return backup_schedule.snapshot(state,time.time(),bool(BACKUP_WORKER and BACKUP_WORKER.is_alive()))
+        if action=='backups.history':return backup_schedule.history(state,request.get('recent',10))
+        if action=='backups.jobs':return {'jobs':[{**row,'protected':row['id'] in protected_backup_jobs(state)} for row in engine.backup_jobs(state['id'])]}
         if action=='memory.policy':return {'enabled':state.get('memoryBalancingEnabled',True)}
         if action=='resources.get':return resource_policy.snapshot(state,engine)
         if action=='scale.get':
@@ -1190,6 +1470,12 @@ def dispatch(request, engine=None):
         if state.get('pendingResourceChange') and action!='resources.set':raise ValueError('Finish the pending resource allocation first.')
         if state.get('pendingRegisChange') and action not in {'regis.set','regis.recover','services.stop','logs.export'}:
             raise ValueError('Finish or restore the pending Tank change in Server Settings before another server operation.')
+        if state.get('backupCleanup') and action in {'backups.create','backups.verify','backups.restore','backups.delete','backups.import','backups.schedule.recover','updates.apply','updates.recover','database.migrate'}:
+            raise ValueError('Finish or recover the pending backup cleanup before using backup or database maintenance controls.')
+        if action=='backups.schedule.set':
+            backup_schedule.configure(state,request,time.time());state.pop('backupSchedulerError',None);save(state)
+            return backup_schedule.snapshot(state,time.time(),bool(BACKUP_WORKER and BACKUP_WORKER.is_alive()))
+        if action=='backups.jobs.prune':return prune_backup_jobs(state,engine,request.get('keepLast',10),request.get('keepDays',0))
         if action == 'files.open':
             prepare_file_browser(state, engine)
             return file_browser.endpoint(state, engine)
@@ -1218,13 +1504,17 @@ def dispatch(request, engine=None):
             reply=settings_client.request({'action':'backups.create','files':request.get('files')})
             if not reply.get('ok'):raise ValueError(reply.get('error','Settings backups could not be created.'))
             return reply['data']
-        if action in {'database.create','database.initialize','database.migrate','world.configure','connections.prepare',
-                      'services.prepare','services.start','services.stop','services.restart','services.refresh-core-adapters','scale.prepare','maps.start','maps.stop','maps.restart','maps.observers.prepare','files.prepare','settings.prepare','regis.set','regis.recover','logs.export','updates.stage','updates.apply','updates.recover','rmq.publish','games.refresh-adapters','backups.create','backups.verify','backups.restore'}:
+        if action in {'database.create','database.initialize','database.migrate','database.start','database.stop','world.configure','connections.prepare',
+                      'services.prepare','services.start','services.stop','services.restart','services.refresh-core-adapters','scale.prepare','maps.start','maps.stop','maps.restart','maps.observers.prepare','files.prepare','settings.prepare','regis.set','regis.recover','logs.export','updates.stage','updates.apply','updates.recover','rmq.publish','games.refresh-adapters','backups.create','backups.verify','backups.restore','backups.delete','backups.cleanup.recover','backups.export','backups.import','backups.schedule.recover'}:
             if action=='regis.set' and (type(request.get('enabled')) is not bool or type(request.get('acknowledgeStoredTanks',False)) is not bool):
                 raise ValueError('Supply JSON booleans for Tank support and the stored-Tank acknowledgement.')
             if action=='updates.apply' and (not isinstance(request.get('expectedBuild'),str) or not re.fullmatch(r'[0-9]{1,18}',request['expectedBuild']) or type(request.get('allowOnline',False)) is not bool or type(request.get('withTanks',False)) is not bool):raise ValueError('Supply a valid build and JSON boolean online-player and Tank authorization.')
             if 'publishGateway' in request and (action!='services.start' or type(request['publishGateway']) is not bool):raise ValueError('Only a typed start can select gateway publication.')
             if action=='logs.export' and request.get('scope') not in {'battlegroup','operator'}:raise ValueError('Choose battlegroup or operator logs.')
+            if action in {'updates.apply','updates.recover','database.migrate','database.initialize','services.restart'} and any(
+                entry.get('phase') in {'preparing','running'} or entry.get('verification',{}).get('phase') in {'preparing','running'}
+                for entry in state.get('backups',{}).values()):
+                raise OperationBusyError('Wait for the active backup or restore rehearsal before database maintenance.')
             if 'requestId' in request:
                 if action not in {'services.restart','updates.apply'} or not isinstance(request['requestId'],str) or not re.fullmatch(r'[a-f0-9]{32}',request['requestId']):
                     raise ValueError('Invalid scheduled maintenance request identity.')
@@ -1316,4 +1606,6 @@ if __name__ == '__main__':
     server = socketserver.UnixStreamServer(str(SOCKET), Handler)
     os.chown(SOCKET, -1, 10001)
     SOCKET.chmod(0o660)
+    BACKUP_WORKER=threading.Thread(target=run_backup_scheduler,name='DuneBackupScheduler',daemon=True)
+    BACKUP_WORKER.start()
     server.serve_forever()

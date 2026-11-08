@@ -3,6 +3,13 @@ BeforeAll {
     Import-DstLib 'DockerRoutes.ps1'
 }
 Describe 'Docker adapter routing boundary' {
+    It 'exposes only the native browser backup routes and bounded download identities' {
+        foreach($path in @('/api/db/backup-schedule','/api/db/backup-history','/api/db/backup-dump-pods')){Test-DuneDockerRouteQualified -Method GET -Path $path|Should -BeTrue}
+        Test-DuneDockerRouteQualified -Method POST -Path '/api/docker/backup-import'|Should -BeTrue
+        Test-DuneDockerRouteQualified -Method GET -Path ('/api/docker/backup-exports/'+('a'*32))|Should -BeTrue
+        Test-DuneDockerRouteQualified -Method GET -Path '/api/docker/backup-exports/../manager.sock'|Should -BeFalse
+        Test-DuneDockerRouteQualified -Method POST -Path '/api/db/backup-upload'|Should -BeFalse
+    }
     It 'allows only typed resource reads and updates' {
         Test-DuneDockerRouteQualified -Method GET -Path '/api/docker/resources' | Should -BeTrue
         Test-DuneDockerRouteQualified -Method PUT -Path '/api/docker/resources' | Should -BeTrue

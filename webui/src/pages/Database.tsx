@@ -7,8 +7,9 @@ import { VmInfoCard } from './database/VmInfoCard'
 import { api } from '../api/client'
 import { showRoutineSuccess } from '../hooks/useReducedRoutineUi'
 import { isLocalViewer } from '../util/viewer'
-import { createDockerBackup } from '../api/docker'
+import { createDockerBackup, importDockerBackup, verifyDockerBackup, recoverDockerBackupCleanup, prepareDockerBackupDownload, recoverDockerScheduledBackup } from '../api/docker'
 import DockerRestoreDialog from './docker/DockerRestoreDialog'
+import { DockerDatabaseControl } from './docker/DockerDatabaseControl'
 import {
   getDbInfo,
   runSql,
@@ -494,6 +495,7 @@ export function Database() {
           </button>
         }
       />
+      {docker && <DockerDatabaseControl onChanged={() => { void loadDbInfo(); void forceRefresh() }} />}
       {showDockerRestore && <DockerRestoreDialog onClose={() => setShowDockerRestore(false)} onComplete={() => { setShowDockerRestore(false); showToast('ok', 'Backup restored.'); void forceRefresh() }} />}
 
       {toast && (
@@ -1116,6 +1118,8 @@ type BackupScheduleCardProps = {
 }
 
 function BackupScheduleCard({ vmRunning, showToast }: BackupScheduleCardProps) {
+  const docker = import.meta.env.VITE_DST_EDITION === 'docker'
+  const uploadInput = useRef<HTMLInputElement>(null)
   const [schedule, setSchedule] = useState<BackupSchedule | null>(null)
   const [history, setHistory]   = useState<BackupHistory  | null>(null)
   const [dumpPods, setDumpPods] = useState<BackupDumpPodList | null>(null)
@@ -1144,7 +1148,7 @@ function BackupScheduleCard({ vmRunning, showToast }: BackupScheduleCardProps) {
 
   const loadAll = useCallback(async () => {
     if (!vmRunning) {
-      setSchedule(null); setHistory(null); setDumpPods(null); setErr('VM is not running.')
+      setSchedule(null); setHistory(null); setDumpPods(null); setErr(docker ? 'Docker management is unavailable.' : 'VM is not running.')
       return
     }
     setLoading(true); setErr(null)
@@ -1158,7 +1162,7 @@ function BackupScheduleCard({ vmRunning, showToast }: BackupScheduleCardProps) {
       setHistory(hist)
       setDumpPods(pods)
       setDraftPreset(sched.preset === 'Custom' ? 'Off' : sched.preset)
-      setDraftKeepLast(sched.keepLast > 0 ? sched.keepLast : (sched.preset === 'Off' ? 8 : 0))
+      setDraftKeepLast(docker ? sched.keepLast : sched.keepLast > 0 ? sched.keepLast : (sched.preset === 'Off' ? 8 : 0))
       setDraftKeepDumpPods(sched.keepLastPods ?? 10)
       setDraftKeepDumpDays(sched.keepDaysPods ?? 0)
     } catch (e) {
@@ -1167,9 +1171,21 @@ function BackupScheduleCard({ vmRunning, showToast }: BackupScheduleCardProps) {
     } finally {
       setLoading(false)
     }
-  }, [vmRunning])
+  }, [vmRunning, docker])
 
   useEffect(() => { void loadAll() }, [loadAll])
+
+  useEffect(() => {
+    if (!docker || !vmRunning) return
+    // Refresh background work without overwriting unsaved retention drafts.
+    let closed = false
+    const timer = window.setInterval(() => {
+      void Promise.all([getBackupSchedule(), getBackupHistory({ recent: 200, logLines: 50 }), getBackupDumpPods()])
+        .then(([next, files, jobs]) => { if (!closed) { setSchedule(next); setHistory(files); setDumpPods(jobs) } })
+        .catch(() => { /* The next explicit refresh reports availability. */ })
+    }, 15000)
+    return () => { closed = true; window.clearInterval(timer) }
+  }, [docker, vmRunning])
 
   const dirty = useMemo(() => {
     if (!schedule) return false
@@ -1216,6 +1232,13 @@ function BackupScheduleCard({ vmRunning, showToast }: BackupScheduleCardProps) {
   }
 
   async function handleDownload(vmPath: string) {
+    if (docker) {
+      setTransferring(vmPath)
+      try { window.location.assign(await prepareDockerBackupDownload(vmPath)) }
+      catch (e) { showToast('err', `Download failed: ${e instanceof Error ? e.message : String(e)}`) }
+      finally { setTransferring(null) }
+      return
+    }
     const baseName = vmPath.split('/').pop() ?? 'backup.backup'
     // DST's scheduled backups now use Funcom's native `sh-<bg>-<ts>.backup`
     // name, so they already carry an extension. LEGACY scheduled files from
@@ -1235,7 +1258,27 @@ function BackupScheduleCard({ vmRunning, showToast }: BackupScheduleCardProps) {
     }
   }
 
+  async function handleVerify(path: string) {
+    if (!window.confirm('Rehearse restoring this trusted backup into a separate temporary database? Only verify backups from a source you trust. The current world is preserved, and the temporary database is removed afterward.')) return
+    setTransferring('verify:' + path)
+    try { await verifyDockerBackup(path); showToast('ok', 'Restore rehearsal passed. This backup is available in Restore.'); await loadAll() }
+    catch (e) { showToast('err', `Verification failed: ${e instanceof Error ? e.message : String(e)}`) }
+    finally { setTransferring(null) }
+  }
+
+  async function handleDockerUpload(file: File) {
+    if (!window.confirm(`Import ${file.name} as a separate backup? Only use a backup from a source you trust. This does not restore or start the world. Verify restore before using it to restore a world.`)) return
+    setTransferring('upload')
+    try {
+      await importDockerBackup(file)
+      showToast('ok', 'Imported as a separate backup. Verify restore before using Restore; the current world is unchanged.')
+      await loadAll()
+    } catch (e) { showToast('err', `Import failed: ${e instanceof Error ? e.message : String(e)}`) }
+    finally { setTransferring(null) }
+  }
+
   async function handleUpload() {
+    if (docker) { uploadInput.current?.click(); return }
     const localPath = await pickFileFromShell('pick-open-file', { id: 'backup-upload' })
     if (!localPath) return  // cancelled
     setTransferring('upload')
@@ -1253,7 +1296,7 @@ function BackupScheduleCard({ vmRunning, showToast }: BackupScheduleCardProps) {
 
   // Filename relative to the dump dir, for display + search.
   function backupRelName(path: string): string {
-    return path.replace(/^\/funcom\/artifacts\/database-dumps\//, '')
+    return path.replace(/^\/(?:funcom\/artifacts\/database-dumps|backups)\//, '')
   }
 
   // Filtered + sorted view of the full backup list.
@@ -1337,7 +1380,7 @@ function BackupScheduleCard({ vmRunning, showToast }: BackupScheduleCardProps) {
   function handleDeleteOne(path: string) {
     const ok = window.confirm(
       `Permanently delete this backup from the server?\n\n${backupRelName(path)}\n\n` +
-      'This removes the .backup file (and its .yaml sidecar) from the VM. It cannot be undone.'
+      (docker ? 'This removes the backup file from this world’s Docker backup storage. It cannot be undone.' : 'This removes the .backup file (and its .yaml sidecar) from the VM. It cannot be undone.')
     )
     if (!ok) return
     void runDelete([path])
@@ -1348,7 +1391,7 @@ function BackupScheduleCard({ vmRunning, showToast }: BackupScheduleCardProps) {
     if (paths.length === 0) return
     const ok = window.confirm(
       `Permanently delete ${paths.length} selected backup${paths.length === 1 ? '' : 's'} from the server?\n\n` +
-      'This removes the .backup files (and their .yaml sidecars) from the VM. It cannot be undone.'
+      (docker ? 'This removes the selected files from this world’s Docker backup storage. It cannot be undone.' : 'This removes the .backup files (and their .yaml sidecars) from the VM. It cannot be undone.')
     )
     if (!ok) return
     void runDelete(paths)
@@ -1408,9 +1451,11 @@ function BackupScheduleCard({ vmRunning, showToast }: BackupScheduleCardProps) {
     const ageCutoffMs = draftKeepDumpDays > 0 ? Date.now() - draftKeepDumpDays * 86400 * 1000 : null
     let count = 0
     dumpPods.pods.forEach((p, idx) => {
+      if (p.protected) return
       const exceededCount = draftKeepDumpPods > 0 && idx >= draftKeepDumpPods
       let exceededAge = false
-      if (ageCutoffMs !== null) {
+      if (ageCutoffMs !== null && docker && p.nameTimestamp) exceededAge = Date.parse(p.nameTimestamp) < ageCutoffMs
+      if (ageCutoffMs !== null && !docker) {
         const m = p.name.match(/-(?:dump|import)-(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})-pod$/)
         if (m) {
           const ts = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6])
@@ -1420,7 +1465,7 @@ function BackupScheduleCard({ vmRunning, showToast }: BackupScheduleCardProps) {
       if (exceededCount || exceededAge) count++
     })
     return count
-  }, [dumpPods, draftKeepDumpPods, draftKeepDumpDays])
+  }, [dumpPods, draftKeepDumpPods, draftKeepDumpDays, docker])
 
   const presetChoices = schedule?.presets ?? [
     { id: 'Off',            label: 'Disabled' },
@@ -1446,20 +1491,20 @@ function BackupScheduleCard({ vmRunning, showToast }: BackupScheduleCardProps) {
       bodyClassName="px-5 pb-5 flex flex-col"
       headerRight={
         <span className="text-xs text-text-muted hidden md:block">
-          Runs on the VM via root crontab. Edits write to <span className="font-mono">/etc/crontabs/root</span>.
+          {docker ? 'Runs in Docker independently of your browser.' : <>Runs on the VM via root crontab. Edits write to <span className="font-mono">/etc/crontabs/root</span>.</>}
         </span>
       }
     >
       <p className="text-sm text-text-muted mb-3">
-        Run <span className="font-mono">battlegroup backup</span> on a recurring schedule. Times are in the VM's
+        {docker ? <>Schedule PostgreSQL snapshots in this world&apos;s Docker backup storage. Times are UTC. The database must already be running; a timer never starts the world.</> : <>Run <span className="font-mono">battlegroup backup</span> on a recurring schedule. Times are in the VM&apos;s
         timezone (<span className="font-mono">{tzLabel}</span>). Backups land in{' '}
         <span className="font-mono">{history?.dumpDirPath ?? '/funcom/artifacts/database-dumps'}</span> alongside
-        Funcom's own ~3-hourly auto-backups.
+        Funcom&apos;s own ~3-hourly auto-backups.</>}
       </p>
 
       {!vmRunning && (
         <p className="text-xs text-warning mb-3 flex items-center gap-1.5">
-          <Icon name="AlertTriangle" size={12} /> VM must be running to read or edit the schedule.
+          <Icon name="AlertTriangle" size={12} /> {docker ? 'Docker management must be running to read or edit the schedule.' : 'VM must be running to read or edit the schedule.'}
         </p>
       )}
 
@@ -1473,13 +1518,20 @@ function BackupScheduleCard({ vmRunning, showToast }: BackupScheduleCardProps) {
         <p className="text-xs text-warning mb-3 flex items-start gap-1.5">
           <Icon name="AlertTriangle" size={12} className="mt-0.5 shrink-0" />
           <span>
-            crond does not appear to be running on the VM — schedule entries will not fire.
+            {docker ? 'The Docker backup worker is unavailable. Check the management service before enabling the schedule.' : <>crond does not appear to be running on the VM — schedule entries will not fire.
             Start it with <span className="font-mono">sudo rc-service crond start</span> (and{' '}
-            <span className="font-mono">sudo rc-update add crond default</span> to enable at boot).
+            <span className="font-mono">sudo rc-update add crond default</span> to enable at boot).</>}
           </span>
         </p>
       )}
 
+      {docker && (schedule?.schedulerError || schedule?.lastRun?.error || schedule?.cleanup) && <div className="text-xs text-warning mb-3">
+        {schedule.cleanup?.error || schedule.lastRun?.error || schedule.schedulerError || 'Backup file cleanup is in progress.'}
+        {schedule.cleanup && <button type="button" className="btn-secondary ml-2" disabled={deleting}
+          onClick={() => { setDeleting(true); void recoverDockerBackupCleanup().then(() => loadAll()).catch(e => showToast('err', String(e))).finally(() => setDeleting(false)) }}>Resume cleanup</button>}
+        {schedule.lastRun?.phase === 'review-required' && <button type="button" className="btn-secondary ml-2" disabled={saving}
+          onClick={() => { setSaving(true); void recoverDockerScheduledBackup().then(() => loadAll()).catch(e => showToast('err', String(e))).finally(() => setSaving(false)) }}>Resume scheduled backup</button>}
+      </div>}
       {schedule?.inferredFromUnmanaged && (
         <p className="text-xs text-info mb-3 flex items-start gap-1.5">
           <Icon name="Info" size={12} className="mt-0.5 shrink-0" />
@@ -1558,7 +1610,7 @@ function BackupScheduleCard({ vmRunning, showToast }: BackupScheduleCardProps) {
             onClick={() => void save()}
             disabled={!vmRunning || loading || saving}
             className="btn-primary"
-            title={dirty ? 'Install the new schedule on the VM' : 'Re-write the schedule on the VM (no unsaved changes)'}
+            title={docker ? 'Save the Docker backup schedule and retention' : dirty ? 'Install the new schedule on the VM' : 'Re-write the schedule on the VM (no unsaved changes)'}
           >
             <Icon name={saving ? 'Loader2' : 'Save'} size={14} className={saving ? 'animate-spin' : ''} />
             {saving ? 'Saving…' : 'Save schedule'}
@@ -1577,7 +1629,7 @@ function BackupScheduleCard({ vmRunning, showToast }: BackupScheduleCardProps) {
                   : <> · keep forever</>}
               </>
             : <strong className="text-text">Off</strong>}
-          {' · '}VM time <span className="font-mono">{schedule.vmNowUtc} ({tzLabel})</span>
+          {' · '}{docker ? 'Server time' : 'VM time'} <span className="font-mono">{schedule.vmNowUtc} ({tzLabel})</span>
         </p>
       )}
 
@@ -1597,11 +1649,16 @@ function BackupScheduleCard({ vmRunning, showToast }: BackupScheduleCardProps) {
               onClick={() => void handleUpload()}
               disabled={!vmRunning || !!transferring}
               className="btn-secondary text-xs py-1 px-2"
-              title="Upload a .backup file from your PC to the VM's dump directory"
+              title={docker ? 'Import a trusted PostgreSQL custom backup as a separate saved copy' : "Upload a .backup file from your PC to the VM's dump directory"}
             >
               <Icon name={transferring === 'upload' ? 'Loader2' : 'Upload'} size={12} className={transferring === 'upload' ? 'animate-spin' : ''} />
-              {transferring === 'upload' ? 'Uploading…' : 'Import backup'}
+              {transferring === 'upload' ? 'Importing…' : 'Import backup'}
             </button>
+            {docker && <input ref={uploadInput} type="file" accept=".dump,.backup" hidden aria-label="Choose a trusted database backup" onChange={event => {
+              const file = event.currentTarget.files?.[0]; event.currentTarget.value = ''
+              if (file) void handleDockerUpload(file)
+            }} />}
+
             <span className="text-xs text-text-dim">
               {history?.dumpDirSize ? <>Dump dir: <span className="font-mono">{history.dumpDirSize}</span></> : null}
             </span>
@@ -1685,6 +1742,10 @@ function BackupScheduleCard({ vmRunning, showToast }: BackupScheduleCardProps) {
                     <td className="py-1 px-2 text-text-dim truncate max-w-[16rem]" title={f.path}>{backupRelName(f.path)}</td>
                     <td className="py-1 px-2">
                       <div className="flex items-center gap-2 justify-end">
+                        {docker && <button type="button" className="text-info disabled:opacity-40 whitespace-nowrap" disabled={!!transferring || deleting || ['preparing', 'running'].includes(f.verificationPhase || '')}
+                          title={f.verificationError || 'Rehearse restore into a separate temporary database; the current world is preserved'} onClick={() => void handleVerify(f.path)}>
+                          {transferring === 'verify:' + f.path || ['preparing', 'running'].includes(f.verificationPhase || '') ? 'Verifying…' : f.verificationPhase === 'completed' ? 'Verified · Verify again' : 'Verify restore'}
+                        </button>}
                         <button
                           type="button"
                           onClick={() => void handleDownload(f.path)}
@@ -1728,14 +1789,14 @@ function BackupScheduleCard({ vmRunning, showToast }: BackupScheduleCardProps) {
           are handled by Keep last (count) above (separate retention). */}
       <div className="border-t border-border pt-3 mt-3">
         <div className="flex items-center justify-between gap-3 mb-2">
-          <div className="text-xs font-semibold text-text-muted">Completed backup &amp; restore pods</div>
+          <div className="text-xs font-semibold text-text-muted">{docker ? 'Finished backup helper jobs' : 'Completed backup & restore pods'}</div>
           <div className="text-xs text-text-dim">
             {dumpPods
-              ? <>Found <strong className="text-text">{dumpPods.count}</strong> terminal backup/restore pod{dumpPods.count === 1 ? '' : 's'} on the cluster.</>
+              ? <>Found <strong className="text-text">{dumpPods.count}</strong> {docker ? 'finished helper jobs.' : <>terminal backup/restore pod{dumpPods.count === 1 ? '' : 's'} on the cluster.</>}</>
               : <span className="italic">{vmRunning ? 'Loading…' : 'VM not running.'}</span>}
           </div>
         </div>
-        <p className="text-xs text-text-dim mb-2">Remove finished backup and restore jobs. Running jobs and database backup files are kept.</p>
+        <p className="text-xs text-text-dim mb-2">Remove finished backup and restore jobs. {docker ? 'Running jobs, recovery jobs and database backup files are kept.' : 'Running jobs and database backup files are kept.'}</p>
         <div className="flex flex-wrap items-end gap-3">
           <label className="flex flex-col gap-1 text-xs">
             <span className="text-text-muted font-medium">
@@ -1799,7 +1860,7 @@ function BackupScheduleCard({ vmRunning, showToast }: BackupScheduleCardProps) {
           </button>
         </div>
         <p className="text-xs text-text-dim mt-2 italic">
-          A pod is kept only if it's both within the count cap and younger than the age cap. Set either to <span className="font-mono">0</span> to disable that axis. <strong>Save retention</strong> persists the values; <strong>Prune now</strong> applies them this instant.
+          {docker ? 'Finished helper jobs are kept within the count and age caps; active recovery jobs are always kept.' : "A pod is kept only if it's both within the count cap and younger than the age cap."} Set either to <span className="font-mono">0</span> to disable that axis. <strong>Save retention</strong> persists the values; <strong>Prune now</strong> applies them this instant.
           {dumpPodsDirty && <span className="text-warning ml-1">• Unsaved changes.</span>}
         </p>
 
@@ -1811,7 +1872,7 @@ function BackupScheduleCard({ vmRunning, showToast }: BackupScheduleCardProps) {
         {dumpPods && dumpPods.count > 0 && (
           <details className="mt-3">
             <summary className="text-xs text-info hover:underline cursor-pointer">
-              Show enumerated pods ({dumpPods.count})
+              Show {docker ? 'helper jobs' : 'enumerated pods'} ({dumpPods.count})
             </summary>
             <div className="mt-2 max-h-64 overflow-y-auto border border-border rounded bg-surface-2/50">
               <table className="w-full text-xs font-mono">
@@ -1830,7 +1891,7 @@ function BackupScheduleCard({ vmRunning, showToast }: BackupScheduleCardProps) {
                     const exceededCount = draftKeepDumpPods > 0 && idx >= draftKeepDumpPods
                     const ageDays = p.ageMinutes != null ? Math.floor(p.ageMinutes / (60 * 24)) : null
                     const exceededAge = draftKeepDumpDays > 0 && ageDays != null && ageDays > draftKeepDumpDays
-                    const wouldDelete = exceededCount || exceededAge
+                    const wouldDelete = !p.protected && (exceededCount || exceededAge)
                     const ownerText = (p.ownerKind && p.ownerName)
                       ? `${p.ownerKind}/${p.ownerName}${p.ownerIsController ? ' *' : ''}`
                       : '—'
@@ -1848,7 +1909,7 @@ function BackupScheduleCard({ vmRunning, showToast }: BackupScheduleCardProps) {
                         <td className="px-2 py-1 whitespace-nowrap">
                           {wouldDelete
                             ? <span className="text-danger">prune {exceededCount ? '(count)' : ''}{exceededCount && exceededAge ? ' + ' : ''}{exceededAge ? '(age)' : ''}</span>
-                            : <span className="text-text-muted">keep</span>}
+                            : <span className="text-text-muted">{p.protected ? 'keep (recovery)' : 'keep'}</span>}
                         </td>
                       </tr>
                     )
@@ -1879,8 +1940,7 @@ function BackupScheduleCard({ vmRunning, showToast }: BackupScheduleCardProps) {
       )}
 
       <p className="text-xs text-text-dim mt-3 italic">
-        Note: this schedule lives in the VM's root crontab. If the VM is reprovisioned the schedule is lost
-        and must be re-installed from here.
+        {docker ? 'This schedule is saved with this Docker installation and runs while its management service is running, independently of this browser.' : <>Note: this schedule lives in the VM’s root crontab. If the VM is reprovisioned the schedule is lost and must be re-installed from here.</>}
       </p>
     </CollapsibleCard>
   )

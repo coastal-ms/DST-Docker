@@ -275,6 +275,7 @@ function Get-DuneBackupCronExprFromLine {
 }
 
 function Get-DuneBackupContext {
+    if($env:DST_HOSTING_BACKEND -eq 'docker'){return Get-DuneDockerBackupContext}
     if (-not (Get-Command Invoke-V6Ssh -ErrorAction SilentlyContinue)) {
         return @{ ok=$false; status=503; message='SSH helper unavailable (Db-Postgres.ps1 not loaded).' }
     }
@@ -471,6 +472,7 @@ function Get-DuneBackupSchedule {
         # never need to pass this.
         [switch]$SkipReconcile
     )
+    if($env:DST_HOSTING_BACKEND -eq 'docker'){return Get-DuneDockerBackupData -Request @{action='backups.schedule.get'}}
     # crond status + timezone probe + crontab fetch in a single SSH round-trip.
     $script = @'
 echo "__DST_SECTION:TZ"
@@ -627,6 +629,14 @@ function Set-DuneBackupSchedule {
         [Nullable[int]]$KeepLastPods = $null,
         [Nullable[int]]$KeepDaysPods = $null
     )
+    if($env:DST_HOSTING_BACKEND -eq 'docker'){
+        $request=@{action='backups.schedule.set';preset=$Preset;keepLast=$KeepLast}
+        if($null -ne $KeepLastPods){$request.keepLastPods=[int]$KeepLastPods}
+        if($null -ne $KeepDaysPods){$request.keepDaysPods=[int]$KeepDaysPods}
+        $reply=Invoke-DuneDockerManager -Request $request
+        if(-not $reply.ok){return @{ok=$false;status=400;message=$reply.error}}
+        return @{ok=$true}
+    }
     if (-not $script:DuneBackupPresets.ContainsKey($Preset)) {
         return @{ ok=$false; status=400; message="Unknown preset: $Preset" }
     }
@@ -754,6 +764,7 @@ function Get-DuneBackupHistory {
         [int]$Recent = 10,
         [int]$LogLines = 50
     )
+    if($env:DST_HOSTING_BACKEND -eq 'docker'){return Get-DuneDockerBackupData -Request @{action='backups.history';recent=$Recent}}
     if ($Recent -lt 1)   { $Recent = 1 }
     if ($Recent -gt 1000) { $Recent = 1000 }
     if ($LogLines -lt 1)    { $LogLines = 1 }
@@ -843,6 +854,7 @@ function Remove-DuneBackupFiles {
         [Parameter(Mandatory)][string]$Ip,
         [Parameter(Mandatory)][string[]]$Paths
     )
+    if($env:DST_HOSTING_BACKEND -eq 'docker'){return Remove-DuneDockerBackupFiles -Paths $Paths}
     # NOTE: $failed is List[object] (holds @{path;reason} hashtables). Do NOT
     # wrap a List[object] variable with @(...) — the array-subexpression operator
     # throws `ArgumentException: Argument types do not match` on a bare
@@ -941,6 +953,7 @@ $script:DuneBackupDumpPodNameRegex = '^[a-z0-9.-]+-(dump|import)-[0-9]{8}-[0-9]{
 
 function Get-DuneBackupDumpPods {
     param([Parameter(Mandatory)][string]$Ip)
+    if($env:DST_HOSTING_BACKEND -eq 'docker'){return @(Get-DuneDockerBackupJobs)}
     # Stream namespace|name|startTime|phase|ownerKind|ownerName|controller via
     # jsonpath. Avoids needing jq on the VM. We filter by phase + name regex
     # here so callers always get a canonical list (terminal dump-* pods only:
@@ -1050,6 +1063,7 @@ function Remove-DuneBackupDumpPods {
         [int]$KeepLast = 5,
         [int]$KeepDays = 0
     )
+    if($env:DST_HOSTING_BACKEND -eq 'docker'){return Remove-DuneDockerBackupJobs -KeepLast $KeepLast -KeepDays $KeepDays}
     if ($KeepLast -lt 0)   { $KeepLast = 0 }
     if ($KeepLast -gt 100) { $KeepLast = 100 }
     if ($KeepDays -lt 0)   { $KeepDays = 0 }

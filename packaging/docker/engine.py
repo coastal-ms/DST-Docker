@@ -9,6 +9,7 @@ import tarfile
 import secrets
 import time
 import hashlib
+import os
 from urllib.parse import quote
 from pathlib import Path
 
@@ -232,7 +233,7 @@ class Engine:
             except (ValueError,KeyError,TypeError):continue
         return result
 
-    def create_backup_job(self, project, image, network, state_volume, backup_volume, script, mode, name, expected_sha=None, retain_database=False):
+    def create_backup_job(self, project, image, network, state_volume, backup_volume, script, mode, name, expected_sha=None, retain_database=False,request_id=None):
         if not re.fullmatch(r'[a-f0-9]{32}',project) or mode not in {'create','verify'}:
             raise ValueError('Invalid owned backup job.')
         if not re.fullmatch(r'registry\.funcom\.com/funcom/self-hosting/seabass-server-db-utils:[A-Za-z0-9_.-]+',image):
@@ -241,6 +242,8 @@ class Engine:
         if not re.fullmatch(r'backup-[0-9]+-[a-f0-9]{8}\.dump',name):raise ValueError('Invalid backup name.')
         if type(retain_database) is not bool or (retain_database and mode!='verify'):
             raise ValueError('A retained database requires an internal restore qualification job.')
+        if request_id is not None and (mode!='create' or not isinstance(request_id,str) or not re.fullmatch(r'[a-f0-9]{32}',request_id)):
+            raise ValueError('Invalid scheduled backup identity.')
         environment=['DST_DATABASE_HOST=dst-'+project+'-postgres','DST_BACKUP_MODE='+mode,'DST_BACKUP_NAME='+name]
         if mode=='verify':
             if not isinstance(expected_sha,str) or not re.fullmatch(r'[a-f0-9]{64}',expected_sha):raise ValueError('Invalid backup checksum.')
@@ -248,18 +251,175 @@ class Engine:
             if retain_database:environment.append('DST_RETAIN_VERIFICATION=1')
         self.ensure_owned_volume(backup_volume,project,'backups')
         component='db-backup' if mode=='create' else 'db-verify'
-        identifier=self.request('POST','/containers/create?name=dst-'+project+'-'+component+'-'+secrets.token_hex(4),{
+        job_name='dst-'+project+'-'+component+'-'+(request_id or secrets.token_hex(4))
+        def existing():
+            found=self.request('GET','/containers/'+job_name+'/json',expected=(200,404))
+            if not found or not found.get('Id'):return None
+            self.assert_owned(found['Id'],project,component)
+            mounts=found.get('Mounts',[])
+            if (found.get('Config',{}).get('Image')!=image or found.get('Config',{}).get('Cmd')!=['/tmp/dst-job.py'] or
+                not all(value in found.get('Config',{}).get('Env',[]) for value in environment) or
+                found.get('HostConfig',{}).get('NetworkMode')!=network or len(mounts)!=2 or
+                {(row.get('Name'),row.get('Destination')) for row in mounts}!={(state_volume,'/run/dst'),(backup_volume,'/backups')}):
+                raise EngineError('The scheduled backup identity does not match its owned job.')
+            return found
+        found=existing() if request_id else None
+        if found:
+            if found['State']['Status']=='created':self.upload_component_files(found['Id'],project,component,{'tmp/dst-job.py':{'data':script}})
+            return found['Id']
+        try:identifier=self.request('POST','/containers/create?name='+job_name,{
             'Image':image,'Entrypoint':['python3'],'Cmd':['/tmp/dst-job.py'],'Env':environment,
             'Labels':{'io.dst.managed':'true','io.dst.project':project,'io.dst.component':component},
             'HostConfig':{'NetworkMode':network,'RestartPolicy':{'Name':'no'},
                           'Mounts':[{'Type':'volume','Source':state_volume,'Target':'/run/dst','ReadOnly':True},
                                     {'Type':'volume','Source':backup_volume,'Target':'/backups','ReadOnly':mode=='verify'}],
                           'LogConfig':{'Type':'json-file','Config':{'max-size':'10m','max-file':'2'}}}})['Id']
+        except EngineError:
+            found=existing() if request_id else None
+            if not found:raise
+            if found['State']['Status']=='created':self.upload_component_files(found['Id'],project,component,{'tmp/dst-job.py':{'data':script}})
+            return found['Id']
         self.upload_component_files(identifier,project,component,{'tmp/dst-job.py':{'data':script}})
         return identifier
 
+    def create_backup_cleanup_job(self,project,files,request_id):
+        if not re.fullmatch(r'[a-f0-9]{32}',project) or not isinstance(request_id,str) or not re.fullmatch(r'[a-f0-9]{32}',request_id) or not isinstance(files,list) or not 1<=len(files)<=100:
+            raise ValueError('Invalid backup cleanup request.')
+        for row in files:
+            if not isinstance(row,dict) or not re.fullmatch(r'backup-[0-9]+-[a-f0-9]{8}\.dump',str(row.get('name',''))) or not re.fullmatch(r'[a-f0-9]{64}',str(row.get('sha256',''))):
+                raise ValueError('Choose recorded backup files and checksums.')
+        volume='dst-'+project+'-backups'
+        labels=self.request('GET','/volumes/'+volume).get('Labels') or {}
+        if labels.get('io.dst.managed')!='true' or labels.get('io.dst.project')!=project:
+            raise EngineError('Backup storage does not belong to this installation.')
+        own=self.inspect(os.environ['HOSTNAME'])
+        name='dst-'+project+'-db-files-'+request_id
+        payload=json.dumps(files)
+        def existing():
+            found=self.request('GET','/containers/'+name+'/json',expected=(200,404))
+            if not found or not found.get('Id'):return None
+            self.assert_owned(found['Id'],project,'db-files')
+            mounts=found.get('Mounts',[])
+            if (found.get('Config',{}).get('Cmd')!=['-B','/opt/dst-manager/backup_storage.py'] or
+                'DST_BACKUP_FILES='+payload not in found.get('Config',{}).get('Env',[]) or
+                found.get('HostConfig',{}).get('NetworkMode')!='none' or len(mounts)!=1 or
+                mounts[0].get('Type')!='volume' or mounts[0].get('Name')!=volume or mounts[0].get('Destination')!='/backups'):
+                raise EngineError('The recorded backup cleanup identity does not match its owned job.')
+            return found['Id']
+        found=existing()
+        if found:return found
+        try:identifier=self.request('POST','/containers/create?name='+name,{
+            'Image':own['Image'],'User':'0:0','Entrypoint':['python3'],'Cmd':['-B','/opt/dst-manager/backup_storage.py'],
+            'Env':['DST_BACKUP_FILES='+payload],
+            'Labels':{'io.dst.managed':'true','io.dst.project':project,'io.dst.component':'db-files'},
+            'HostConfig':{'NetworkMode':'none','CapDrop':['ALL'],'SecurityOpt':['no-new-privileges:true'],
+                          'Memory':128*1024**2,'MemorySwap':128*1024**2,'NanoCpus':1_000_000_000,'PidsLimit':16,
+                          'Mounts':[{'Type':'volume','Source':volume,'Target':'/backups'}],
+                          'RestartPolicy':{'Name':'no'},'LogConfig':{'Type':'json-file','Config':{'max-size':'1m','max-file':'2'}}}})['Id']
+        except EngineError:
+            found=existing()
+            if found:return found
+            raise
+        # Fixed script in the manager image, never a client command or socket.
+        return identifier
+
+    def create_backup_export_job(self,project,request):
+        if (not re.fullmatch(r'[a-f0-9]{32}',project) or not isinstance(request,dict) or
+            not re.fullmatch(r'[a-f0-9]{32}',str(request.get('id',''))) or
+            not re.fullmatch(r'backup-[0-9]+-[a-f0-9]{8}\.dump',str(request.get('name',''))) or
+            not re.fullmatch(r'[a-f0-9]{64}',str(request.get('sha256',''))) or
+            type(request.get('bytes')) is not int or request['bytes']<=0):
+            raise ValueError('Choose a recorded completed backup export.')
+        volume='dst-'+project+'-backups'
+        labels=self.request('GET','/volumes/'+volume).get('Labels') or {}
+        if labels.get('io.dst.managed')!='true' or labels.get('io.dst.project')!=project:raise EngineError('Backup storage is not owned.')
+        own=self.inspect(os.environ['HOSTNAME'])
+        control=[row for row in own.get('Mounts',[]) if row.get('Type')=='volume' and row.get('Destination')=='/control']
+        if len(control)!=1:raise ValueError('Private export storage is unavailable.')
+        definition=self.request('GET','/volumes/'+control[0]['Name'])
+        if (definition.get('Labels') or {}).get('com.docker.compose.volume')!='dst-control':raise ValueError('Private export storage is not the control volume.')
+        name='dst-'+project+'-db-export-'+request['id'];payload=json.dumps(request)
+        def existing():
+            found=self.request('GET','/containers/'+name+'/json',expected=(200,404))
+            if not found or not found.get('Id'):return None
+            self.assert_owned(found['Id'],project,'db-export')
+            mounts=found.get('HostConfig',{}).get('Mounts',[])
+            if (found.get('Config',{}).get('Cmd')!=['-B','/opt/dst-manager/backup_storage.py'] or
+                'DST_BACKUP_EXPORT='+payload not in found.get('Config',{}).get('Env',[]) or len(mounts)!=2 or
+                found.get('HostConfig',{}).get('NetworkMode')!='none' or
+                not any(row.get('Source')==volume and row.get('Target')=='/backups' and row.get('ReadOnly') is True for row in mounts) or
+                not any(row.get('Source')==control[0]['Name'] and row.get('Target')=='/exports' and row.get('VolumeOptions',{}).get('Subpath')=='backup-exports' for row in mounts)):
+                raise EngineError('The recorded export does not match its owned job.')
+            return found['Id']
+        found=existing()
+        if found:return found
+        try:return self.request('POST','/containers/create?name='+name,{
+            'Image':own['Image'],'User':'0:0','Entrypoint':['python3'],'Cmd':['-B','/opt/dst-manager/backup_storage.py'],
+            'Env':['DST_BACKUP_EXPORT='+payload],
+            'Labels':{'io.dst.managed':'true','io.dst.project':project,'io.dst.component':'db-export'},
+            'HostConfig':{'NetworkMode':'none','CapDrop':['ALL'],'SecurityOpt':['no-new-privileges:true'],
+                          'Memory':128*1024**2,'MemorySwap':128*1024**2,'NanoCpus':1_000_000_000,'PidsLimit':16,
+                          'Mounts':[{'Type':'volume','Source':volume,'Target':'/backups','ReadOnly':True},
+                                    {'Type':'volume','Source':control[0]['Name'],'Target':'/exports','VolumeOptions':{'Subpath':'backup-exports'}}],
+                          'RestartPolicy':{'Name':'no'},'LogConfig':{'Type':'json-file','Config':{'max-size':'1m','max-file':'2'}}}})['Id']
+        except EngineError:
+            found=existing()
+            if found:return found
+            raise
+
+    def create_backup_import_job(self,project,image,request,script):
+        if (not re.fullmatch(r'[a-f0-9]{32}',project) or
+            not re.fullmatch(r'registry\.funcom\.com/funcom/self-hosting/seabass-server-db-utils:[A-Za-z0-9_.-]+',image) or
+            not isinstance(request,dict) or not re.fullmatch(r'[a-f0-9]{32}',str(request.get('uploadId',''))) or
+            not re.fullmatch(r'backup-[0-9]+-[a-f0-9]{8}\.dump',str(request.get('name',''))) or
+            not re.fullmatch(r'[a-f0-9]{64}',str(request.get('sha256',''))) or type(request.get('bytes')) is not int or not 5<=request['bytes']<=25*1024**3):
+            raise ValueError('Choose a bounded, owned PostgreSQL backup import.')
+        own=self.inspect(os.environ['HOSTNAME']);compose=(own.get('Config',{}).get('Labels') or {}).get('com.docker.compose.project','')
+        if not re.fullmatch(r'[a-z0-9][a-z0-9_-]{0,62}',compose):raise ValueError('The application installation identity is unavailable.')
+        filters=quote(json.dumps({'label':['com.docker.compose.project='+compose,'com.docker.compose.service=dst']}),safe='')
+        applications=self.request('GET','/containers/json?all=true&filters='+filters)
+        if len(applications)!=1:raise ValueError('Exactly one application instance is required for browser backup imports.')
+        app=self.inspect(applications[0]['Id'])
+        mounts=[row for row in app.get('Mounts',[]) if row.get('Type')=='volume' and row.get('Destination')=='/data/cache']
+        if len(mounts)!=1:raise ValueError('The application upload cache is unavailable.')
+        cache=mounts[0]['Name'];labels=self.request('GET','/volumes/'+cache).get('Labels') or {}
+        if labels.get('com.docker.compose.project')!=compose or labels.get('com.docker.compose.volume')!='dst-cache':raise ValueError('The selected upload cache does not belong to this installation.')
+        volume='dst-'+project+'-backups';self.ensure_owned_volume(volume,project,'backups')
+        payload=json.dumps(request);name='dst-'+project+'-db-import-'+request['uploadId']
+        def existing():
+            found=self.request('GET','/containers/'+name+'/json',expected=(200,404))
+            if not found or not found.get('Id'):return None
+            self.assert_owned(found['Id'],project,'db-import')
+            mounts=found.get('HostConfig',{}).get('Mounts',[])
+            if (found.get('Config',{}).get('Image')!=image or found.get('Config',{}).get('Cmd')!=['/tmp/dst-job.py'] or
+                'DST_BACKUP_IMPORT='+payload not in found.get('Config',{}).get('Env',[]) or
+                found.get('HostConfig',{}).get('NetworkMode')!='none' or len(mounts)!=2 or
+                not any(row.get('Source')==cache and row.get('Target')=='/incoming' and row.get('ReadOnly') is True and row.get('VolumeOptions',{}).get('Subpath')=='backup-transfers' for row in mounts) or
+                not any(row.get('Source')==volume and row.get('Target')=='/backups' for row in mounts)):
+                raise EngineError('The recorded import does not match its owned job.')
+            return found
+        found=existing()
+        if found:
+            if found['State']['Status']=='created':self.upload_component_files(found['Id'],project,'db-import',{'tmp/dst-job.py':{'data':script}})
+            return found['Id']
+        try:identifier=self.request('POST','/containers/create?name='+name,{
+            'Image':image,'User':'0:10001','Entrypoint':['python3'],'Cmd':['/tmp/dst-job.py'],'Env':['DST_BACKUP_IMPORT='+payload],
+            'Labels':{'io.dst.managed':'true','io.dst.project':project,'io.dst.component':'db-import'},
+            'HostConfig':{'NetworkMode':'none','CapDrop':['ALL'],'SecurityOpt':['no-new-privileges:true'],
+                          'Memory':256*1024**2,'MemorySwap':256*1024**2,'NanoCpus':1_000_000_000,'PidsLimit':24,
+                          'Mounts':[{'Type':'volume','Source':cache,'Target':'/incoming','ReadOnly':True,'VolumeOptions':{'Subpath':'backup-transfers'}},
+                                    {'Type':'volume','Source':volume,'Target':'/backups'}],
+                          'RestartPolicy':{'Name':'no'},'LogConfig':{'Type':'json-file','Config':{'max-size':'1m','max-file':'2'}}}})['Id']
+        except EngineError:
+            found=existing()
+            if not found:raise
+            if found['State']['Status']=='created':self.upload_component_files(found['Id'],project,'db-import',{'tmp/dst-job.py':{'data':script}})
+            return found['Id']
+        self.upload_component_files(identifier,project,'db-import',{'tmp/dst-job.py':{'data':script}})
+        return identifier
+
     def backup_report(self,identifier,project,component):
-        if component not in {'db-backup','db-verify','db-restore','db-migrate'}:raise ValueError('Invalid backup report component.')
+        if component not in {'db-backup','db-verify','db-restore','db-migrate','db-files','db-export','db-import'}:raise ValueError('Invalid backup report component.')
         self.assert_owned(identifier,project,component)
         connection=EngineConnection()
         try:
@@ -276,6 +436,25 @@ class Engine:
                 if not isinstance(result,dict):raise EngineError('Backup report format is invalid.')
                 return result
         except (tarfile.TarError,ValueError,OSError):raise EngineError('Backup report format is invalid.') from None
+
+    def backup_jobs(self,project):
+        if not re.fullmatch(r'[a-f0-9]{32}',project):raise ValueError('Invalid backup project.')
+        filters=quote(json.dumps({'label':['io.dst.project='+project,'io.dst.managed=true']}),safe='')
+        rows=self.request('GET','/containers/json?all=true&filters='+filters)
+        result=[]
+        for row in rows:
+            component=(row.get('Labels') or {}).get('io.dst.component')
+            if component not in {'db-backup','db-verify','db-files','db-restore','db-export','db-import'}:continue
+            result.append({'id':row['Id'],'name':(row.get('Names') or [''])[0].lstrip('/'),
+                           'component':component,'createdAt':row['Created'],'state':row['State']})
+        return sorted(result,key=lambda row:(row['createdAt'],row['id']),reverse=True)
+
+    def remove_backup_job(self,project,job):
+        if job.get('component') not in {'db-backup','db-verify','db-files','db-restore','db-export','db-import'}:raise ValueError('Only backup helper jobs may be cleaned up.')
+        observed=self.assert_owned(job['id'],project,job['component'])
+        if observed['State']['Status']!='exited':raise ValueError('A backup helper must finish before cleanup.')
+        # No force and no volume deletion. A start race is rejected by Docker.
+        self.request('DELETE','/containers/'+job['id']+'?v=false',expected=(204,))
 
     def ensure_owned_volume(self, name, project, component):
         if not name.startswith('dst-'+project+'-') or not re.fullmatch(r'[a-f0-9]{32}',project):
