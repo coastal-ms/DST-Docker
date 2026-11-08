@@ -1313,7 +1313,7 @@ def configure_world(state,engine,profile):
     if state['phase']!='database-ready': raise ValueError('Install the game database schema first.')
     if state.get('connections') and profile!=state.get('profile'):
         previous=state['profile']
-        if {key:value for key,value in profile.items() if key!='address'}!={key:value for key,value in previous.items() if key!='address'}:
+        if {key:value for key,value in profile.items() if key not in {'address','name'}}!={key:value for key,value in previous.items() if key not in {'address','name'}}:
             raise ValueError('These installed world settings need review before they can be changed.')
         return reconfigure_address(state,engine,profile)
     if state.get('partitionsPrepared'):
@@ -1338,6 +1338,17 @@ def configure_world(state,engine,profile):
     state.update(profile=profile,partitionsPrepared=True)
     save(state)
     return public_state(state,engine)
+
+
+def rename_world(state,engine,name):
+    if not state.get('profile'):raise ValueError('Prepare the world before renaming it.')
+    if not isinstance(name,str):raise ValueError('Enter a world name.')
+    profile=validate_profile({**state['profile'],'name':name.strip()})
+    if profile==state['profile']:return
+    resume=state.get('desiredState')=='running'
+    if resume:stop_services(state,engine)
+    configure_world(state,engine,profile)
+    if resume:start_services(state,engine)
 
 
 def migrate_database(state,engine):
@@ -1423,6 +1434,7 @@ def run_operation(state,engine,request):
         elif action=='database.start':ensure_database_ready(state,engine)
         elif action=='database.stop':stop_database_only(state,engine)
         elif action=='world.configure':configure_world(state,engine,request.get('profile',{}))
+        elif action=='world.rename':rename_world(state,engine,request.get('name'))
         elif action=='connections.prepare':prepare_connections(state,engine)
         elif action=='services.prepare':prepare_services(state,engine)
         elif action=='services.start':start_services(state,engine,publish_gateway=request.get('publishGateway',True))
@@ -1554,7 +1566,7 @@ def dispatch(request, engine=None):
             reply=settings_client.request({'action':'backups.create','files':request.get('files')})
             if not reply.get('ok'):raise ValueError(reply.get('error','Settings backups could not be created.'))
             return reply['data']
-        if action in {'database.create','database.initialize','database.migrate','database.start','database.stop','world.configure','connections.prepare',
+        if action in {'database.create','database.initialize','database.migrate','database.start','database.stop','world.configure','world.rename','connections.prepare',
                       'services.prepare','services.start','services.stop','services.restart','services.refresh-core-adapters','scale.prepare','maps.start','maps.stop','maps.restart','maps.observers.prepare','files.prepare','settings.prepare','regis.set','regis.recover','logs.export','updates.stage','updates.apply','updates.recover','rmq.publish','rmq.courier','games.refresh-adapters','backups.create','backups.verify','backups.restore','backups.delete','backups.cleanup.recover','backups.export','backups.import','backups.schedule.recover','backups.mirror.sync','backups.mirror.recover','world-restart.apply','world-restart.recover','world-restart.rollback','world-restart.research','world-restart.research-recover'}:
             if action in {'world-restart.apply','world-restart.rollback'} and request.get('confirmation')!=('RESTART WORLD' if action=='world-restart.apply' else 'ROLL BACK WORLD'):
                 raise ValueError('Supply the exact World Restart confirmation.')

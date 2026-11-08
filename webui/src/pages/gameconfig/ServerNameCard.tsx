@@ -13,7 +13,7 @@ import { ApiError } from '../../api/client'
 import { renameServer } from '../../api/server'
 
 const CONFIRM_PHRASE = 'RESTART'
-const MAX_LEN = 64
+const MAX_LEN = import.meta.env.VITE_DST_EDITION === 'docker' ? 50 : 64
 
 type Props = {
   vmRunning: boolean
@@ -93,7 +93,7 @@ export function ServerNameCard({ vmRunning, currentName, onRenamed }: Props) {
             className="btn-secondary shrink-0"
             onClick={openEditor}
             disabled={!vmRunning}
-            title={vmRunning ? 'Rename the server' : 'Start the VM first'}
+            title={vmRunning ? 'Rename the server' : import.meta.env.VITE_DST_EDITION === 'docker' ? 'Connect to Docker first' : 'Start the VM first'}
           >
             <Icon name="Pencil" size={14} /> Rename
           </button>
@@ -132,9 +132,9 @@ export function ServerNameCard({ vmRunning, currentName, onRenamed }: Props) {
           <div className="card p-3 border-warning/40 bg-warning/5 text-sm flex items-start gap-2">
             <Icon name="AlertTriangle" size={16} className="mt-0.5 shrink-0 text-warning" />
             <div className="text-xs text-text leading-relaxed">
-              Renaming <span className="font-medium">restarts your battlegroup</span>. All connected
-              players are disconnected, and the server briefly disappears from the in-game browser
-              before returning under the new name. Your world and player data are not affected.
+              {import.meta.env.VITE_DST_EDITION === 'docker'
+                ? 'Renaming restarts a running battlegroup and disconnects connected players. A stopped world stays stopped. Your world and player data are preserved.'
+                : <>Renaming <span className="font-medium">restarts your battlegroup</span>. All connected players are disconnected, and the server briefly disappears from the in-game browser before returning under the new name. Your world and player data are not affected.</>}
             </div>
           </div>
 

@@ -1,6 +1,7 @@
 // Diagnostics API — build a redacted log package the owner can attach in a
 // DST Discord support thread. Triggered from the Help dropdown.
 import { api } from './client'
+import { completeDockerCommand } from './dockerCommand'
 
 export interface DiagnosticBundle {
   ok: boolean
@@ -9,13 +10,22 @@ export interface DiagnosticBundle {
   fileCount: number
   sanitized: boolean
   warnings: string[]
+  browserDownload?: boolean
 }
 
-export function buildDiagnosticBundle() {
-  return api<DiagnosticBundle>('/api/diagnostics/bundle', {
+export async function buildDiagnosticBundle() {
+  const result = await api<DiagnosticBundle & { operationId?: string }>('/api/diagnostics/bundle', {
     method: 'POST',
     body: '{}',
   })
+  if (import.meta.env.VITE_DST_EDITION !== 'docker') return result
+  if (!result.ok || !result.operationId) throw new Error('The diagnostics export did not start.')
+  const download = await completeDockerCommand(result.operationId)
+  if (!download.downloaded) throw new Error('The diagnostics download was not prepared.')
+  return {
+    ok: true, path: '', sizeBytes: 0, fileCount: 0, sanitized: true, browserDownload: true,
+    warnings: download.complete ? [] : ['Some log sources were unavailable or truncated. See export-report.json in the ZIP.'],
+  } satisfies DiagnosticBundle
 }
 
 // VM memory-pressure finding for the Server Health red banner. Read-only,

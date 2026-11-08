@@ -453,13 +453,13 @@ export function MenuBar({ sidebarCollapsed, onToggleSidebar, sidebarAvailable = 
                 type="button"
                 onClick={onCreateDiagnosticsPackage}
                 className="w-full min-h-11 flex items-start gap-2 px-2.5 py-2 rounded text-sm text-text hover:bg-surface-2 transition-colors text-left"
-                title="Creates a redacted diagnostics ZIP on the server host and opens it in Explorer."
+                title={import.meta.env.VITE_DST_EDITION === 'docker' ? 'Downloads a redacted diagnostics ZIP.' : 'Creates a redacted diagnostics ZIP on the server host and opens it in Explorer.'}
               >
                 <Icon name="FileArchive" size={14} className="mt-0.5" />
                 <span className="flex-1">
                   <span className="block">Create Diagnostics Package</span>
                   <span className="block text-[11px] text-text-dim">
-                    Saves a redacted ZIP and opens it in Explorer
+                    {import.meta.env.VITE_DST_EDITION === 'docker' ? 'Downloads a redacted ZIP' : 'Saves a redacted ZIP and opens it in Explorer'}
                   </span>
                 </span>
               </button>
@@ -862,11 +862,11 @@ export function MenuBar({ sidebarCollapsed, onToggleSidebar, sidebarAvailable = 
                       Diagnostics package created
                     </h2>
                     <p className="text-sm text-text-muted leading-snug">
-                      Explorer opened the ZIP on the server host. Attach it in your DST Discord support thread.
+                      {diag.result.browserDownload ? 'Your browser downloaded the redacted ZIP. Attach it in your DST Discord support thread.' : 'Explorer opened the ZIP on the server host. Attach it in your DST Discord support thread.'}
                     </p>
                   </div>
                 </div>
-                <div className="mb-3 p-2.5 rounded bg-surface-2 border border-border text-xs">
+                {!diag.result.browserDownload && <div className="mb-3 p-2.5 rounded bg-surface-2 border border-border text-xs">
                   <div className="text-text-dim mb-0.5">Saved to</div>
                   <div className="text-text break-all font-mono">{diag.result.path}</div>
                   <div className="text-text-dim mt-1.5">
@@ -875,6 +875,7 @@ export function MenuBar({ sidebarCollapsed, onToggleSidebar, sidebarAvailable = 
                     {diag.result.sanitized ? ' · redacted' : ' · sanitization incomplete'}
                   </div>
                 </div>
+                }
                 {diag.result.warnings.length > 0 && (
                   <div className="mb-3 p-2.5 rounded bg-warning/10 border border-warning/30 text-xs text-warning space-y-1">
                     {diag.result.warnings.map((w, i) => (

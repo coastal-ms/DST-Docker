@@ -2973,6 +2973,14 @@ function Get-DuneServerName {
 function Set-DuneServerName {
     param([Parameter(Mandatory)][string]$Name)
 
+    if($env:DST_HOSTING_BACKEND -eq 'docker'){
+        $before=Invoke-DuneDockerManager -Request @{action='status'}
+        if(-not $before.ok){return @{ok=$false;status=503;message=$before.error}}
+        $reply=Invoke-DuneDockerManager -Request @{action='world.rename';name=$Name.Trim()}
+        if(-not $reply.ok){return @{ok=$false;status=409;message=$reply.error}}
+        return @{ok=$true;oldName=$before.data.profile.name;newName=$Name.Trim();operationId=$reply.data.operation.id;message='Server rename started. Follow progress in Operations.'}
+    }
+
     $ctx = Get-DuneGameConfigContext
     if (-not $ctx.ok) { return @{ ok=$false; status=$ctx.status; message=$ctx.message } }
     if (-not (Get-Command Set-V6BattlegroupTitle -ErrorAction SilentlyContinue)) {

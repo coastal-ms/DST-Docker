@@ -40,6 +40,16 @@ afterEach(() => {
 })
 
 describe('owner diagnostics package', () => {
+  it('reports a browser download without Explorer instructions or fabricated file counts', async () => {
+    diagnostics.build.mockResolvedValue({ ok: true, path: '', sizeBytes: 0, fileCount: 0, sanitized: true, warnings: [], browserDownload: true })
+    const user = userEvent.setup()
+    renderMenu()
+    await user.click(screen.getByRole('button', { name: 'Help' }))
+    await user.click(screen.getByRole('button', { name: /Create Diagnostics Package/ }))
+    expect(await screen.findByText(/Your browser downloaded the redacted ZIP/)).toBeInTheDocument()
+    expect(screen.queryByText('Saved to')).not.toBeInTheDocument()
+    expect(screen.queryByText(/Explorer opened/)).not.toBeInTheDocument()
+  })
   it('creates the package without opening GitHub and reports the exact result', async () => {
     const user = userEvent.setup()
     let finish!: (value: {

@@ -18,7 +18,8 @@ function Test-DuneDockerOwnerHostRoute {
     param([string]$Method,[string]$Path)
     return (Test-DuneDockerAccountManagementRoute -Method $Method -Path $Path) -or
         (Test-DuneDockerVehicleDeletionRoute -Method $Method -Path $Path) -or
-        ($Method -ceq 'PUT' -and $Path -ceq '/api/gameconfig/retail-startup-sync')
+        ($Method -ceq 'PUT' -and $Path -ceq '/api/gameconfig/retail-startup-sync') -or
+        ($Method -ceq 'POST' -and $Path -cin @('/api/diagnostics/bundle','/api/server/name'))
 }
 
 function Test-DuneDockerMarketBotRoute {
@@ -39,6 +40,8 @@ function Test-DuneDockerLandsraadRoute {
 
 function Test-DuneDockerRouteQualified {
     param([string]$Method,[string]$Path)
+    if($Method -ceq 'POST' -and $Path -ceq '/api/diagnostics/bundle'){return $true}
+    if($Method -ceq 'POST' -and $Path -ceq '/api/server/name'){return $true}
     if($Method -ceq 'GET' -and $Path -cin @('/api/pods','/api/pods/events')){return $true}
     if($Method -ceq 'GET' -and $Path -ceq '/api/player-portal/status'){return $true}
     if($Path -ceq '/api/player-portal/teleports' -and $Method -cin @('GET','POST','DELETE')){return $true}

@@ -1268,6 +1268,12 @@ done
 Register-DuneRoute -Method POST -Path '/api/diagnostics/bundle' -Handler {
     param($req, $res, $routeParams, $body)
     try {
+        if($env:DST_HOSTING_BACKEND -eq 'docker'){
+            $reply=Invoke-DuneDockerManager -Request @{action='logs.export';scope='operator'}
+            if(-not $reply.ok){Write-DuneError -Response $res -Status 409 -Message $reply.error;return}
+            Write-DuneJson -Response $res -Body @{ok=$true;operationId=$reply.data.operation.id}
+            return
+        }
         $result = New-DstDiagnosticBundle
         Write-DuneJson -Response $res -Body $result
     } catch {

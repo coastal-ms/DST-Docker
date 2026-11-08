@@ -3,6 +3,15 @@ BeforeAll {
     Import-DstLib 'DockerRoutes.ps1'
 }
 Describe 'Docker adapter routing boundary' {
+    It 'permits exact native Owner diagnostics and rename writes through the desktop-host boundary' {
+        Test-DuneDockerOwnerHostRoute -Method POST -Path '/api/diagnostics/bundle'|Should -BeTrue
+        Test-DuneDockerRouteQualified -Method POST -Path '/api/diagnostics/bundle'|Should -BeTrue
+        foreach($method in @('GET','PUT','DELETE')){Test-DuneDockerOwnerHostRoute -Method $method -Path '/api/diagnostics/bundle'|Should -BeFalse}
+        Test-DuneDockerOwnerHostRoute -Method POST -Path '/api/diagnostics/vm-health'|Should -BeFalse
+        Test-DuneDockerOwnerHostRoute -Method POST -Path '/api/server/name'|Should -BeTrue
+        Test-DuneDockerRouteQualified -Method POST -Path '/api/server/name'|Should -BeTrue
+        Test-DuneDockerOwnerHostRoute -Method PUT -Path '/api/server/name'|Should -BeFalse
+    }
     It 'connects player status and bookmarks without exposing other player-portal methods' {
         Test-DuneDockerRouteQualified -Method GET -Path '/api/player-portal/status'|Should -BeTrue
         Test-DuneDockerRouteQualified -Method POST -Path '/api/player-portal/status'|Should -BeFalse
