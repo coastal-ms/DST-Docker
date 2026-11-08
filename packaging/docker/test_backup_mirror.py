@@ -49,6 +49,20 @@ class MirrorTests(unittest.TestCase):
         self.assertEqual(list(outside.iterdir()),[])
 
 class MirrorConfigTests(unittest.TestCase):
+    def test_sudo_launch_keeps_new_storage_owned_and_accessible_by_original_user(self):
+        from unittest.mock import patch
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as tmp:
+            base=Path(tmp);account=SimpleNamespace(pw_uid=65534,pw_gid=65534,pw_dir=str(base/'user-home'))
+            with patch.dict(os.environ,{'SUDO_USER':'fixture','SUDO_UID':'65534','SUDO_GID':'65534'},clear=True),patch.object(mirror_config.pwd,'getpwnam',return_value=account):
+                folder=mirror_config.default_directory('fixture')
+                self.assertEqual(folder,base/'user-home/.local/state/dst-docker/backups/fixture')
+                output=base/'mirror.json';mirror_config.prepare('fixture',folder,output)
+                self.assertEqual(folder.stat().st_uid,65534);self.assertEqual((folder/mirror_config.MARKER).stat().st_uid,65534)
+                self.assertEqual(output.stat().st_uid,65534);self.assertEqual(output.stat().st_mode&0o777,0o600)
+                self.assertEqual((base/'user-home/.local/state').stat().st_uid,65534)
+            with patch.dict(os.environ,{'SUDO_USER':'fixture','SUDO_UID':'999','SUDO_GID':'65534'},clear=True),patch.object(mirror_config.pwd,'getpwnam',return_value=account):
+                with self.assertRaises(ValueError):mirror_config.launch_owner()
     def test_repeated_configuration_keeps_folder_and_marker_and_rejects_replacement(self):
         with tempfile.TemporaryDirectory() as tmp:
             base=Path(tmp);folder=base/'copies';output=base/'mirror.json'
