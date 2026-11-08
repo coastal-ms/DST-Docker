@@ -740,13 +740,24 @@ export function Database() {
         id="database.migration"
         icon="ServerCog"
         iconClassName="text-accent shrink-0"
-        title="Cross-VM / Cross-Battlegroup Migration"
+        title={docker ? 'Move a Docker backup to another installation' : 'Cross-VM / Cross-Battlegroup Migration'}
         titleClassName="text-sm font-semibold text-text"
         className="mb-6 border border-accent/40"
         headerClassName="px-5 pt-5 pb-2"
         bodyClassName="px-5 pb-5"
       >
-        <p className="text-xs text-text-dim mb-4">
+        {docker ? <>
+          <p className="text-xs text-text-dim mb-4">A database backup contains world data. It does not transfer the installation&apos;s token, server INIs, ports, accounts or Docker resource settings. Preserve the source installation and original archive until the destination has been checked in game.</p>
+          <ol className="list-decimal pl-5 space-y-2 text-xs text-text-muted">
+            <li>On the source, take a backup and use <strong className="text-text">Download</strong> in the Backups list. Keep the original archive.</li>
+            <li>Prepare the destination with a compatible server package and the intended battlegroup settings. Keep its battlegroup stopped.</li>
+            <li>On the destination&apos;s Database page, choose <strong className="text-text">Import backup</strong> and select the archive. Only import backups from a source you trust. Importing adds a separate backup without replacing the destination world.</li>
+            <li>Use <strong className="text-text">Start database</strong>, then <strong className="text-text">Verify restore</strong> on the imported row. This rehearses restoration in a separate temporary database.</li>
+            <li>Review the destination, then choose <strong className="text-text">Restore Backup</strong> and explicitly confirm the verified archive. This replaces the destination&apos;s world data.</li>
+            <li>Start the destination battlegroup when ready. Check character access, inventories, progression and bases before retiring the source.</li>
+          </ol>
+          <p className="mt-4 text-xs text-text-muted">A successful restore rehearsal verifies the archive can be restored; it does not prove in-game character access or compatibility with a different server build. VM migration has additional configuration requirements and is not covered by these Docker backup steps.</p>
+        </> : <><p className="text-xs text-text-dim mb-4">
           Keep the old VM and original backup until every character can log in with their inventory and progression.
         </p>
 
@@ -763,13 +774,13 @@ export function Database() {
 
         <div className="mt-4 rounded border border-warning/30 bg-warning/5 px-3 py-2 text-xs text-text-muted">
           <strong className="text-warning">Do not skip the two full restarts.</strong> The first clears stale pods after the database replacement. The second forces a clean operator reconciliation after the IP change settles. Do not delete the old VM or backup until every character has been verified.
-        </div>
+        </div></>}
       </CollapsibleCard>
 
-      {/* Configurable backup schedule (writes the VM's root crontab) */}
+      {/* Native manager schedule in Docker; VM crontab on Windows. */}
       <BackupScheduleCard vmRunning={vmRunning} showToast={showToast} />
 
-      {/* Local backup mirror — copies each new VM backup into a user-chosen folder. */}
+      {/* Native host folder in Docker; local Windows folder for VM backups. */}
       {docker ? <DockerBackupMirror /> : <BackupMirrorCard vmRunning={vmRunning} showToast={showToast} />}
 
       {/* Fix on-demand maps — captured output */}
