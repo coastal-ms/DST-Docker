@@ -54,7 +54,7 @@ The installer prepares missing prerequisites on supported Ubuntu/Debian hosts, e
 
 ## Open the portal
 
-When startup completes, the terminal prints an authenticated browser link. Open that complete link in your normal browser. Windows users can use their Windows browser; it does not need to run inside the WSL terminal.
+When startup completes, the terminal prints a private first-setup link. Open that complete link in your normal browser and choose your Owner username and password. After setup, open the console's IP address and port and sign in with that account. Windows users can use their Windows browser; it does not need to run inside the WSL terminal.
 
 The launcher prints links for the Linux host's IP addresses as well as localhost. In WSL NAT mode, its Linux address works from Windows. To use the Windows machine's LAN address, run `packaging/docker/Enable-DstDockerLan.ps1 -ListenAddress <Windows-LAN-IP>` from administrator Windows PowerShell after the console starts. Use `-WhatIf` to preview the specific forwarding and private-LAN firewall rule. Rerun it if WSL receives a new address.
 
@@ -66,6 +66,8 @@ If you need the portal link again:
 sh bin/dst-docker url
 ```
 
+Owners can manage browser accounts in **Settings → Browser Portal accounts**. Current Docker server roles are Owner and Admin. New accounts must replace their initial password at first sign-in. Owners can reset passwords, revoke sessions, change roles, disable accounts and delete accounts. The last enabled Owner is protected, and account sign-in stays enabled.
+
 ## Manage this installation
 
 Run these commands from the `DST-Docker` folder:
@@ -74,7 +76,7 @@ Run these commands from the `DST-Docker` folder:
 sh bin/dst-docker up      # Start the portal
 sh bin/dst-docker status  # Show portal container status
 sh bin/dst-docker logs    # Show recent portal logs
-sh bin/dst-docker url     # Print the authenticated browser link
+sh bin/dst-docker url     # Print the browser address / first-setup link
 sh bin/dst-docker down    # Stop the portal containers
 ```
 
