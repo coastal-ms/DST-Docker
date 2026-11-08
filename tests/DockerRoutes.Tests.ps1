@@ -3,6 +3,15 @@ BeforeAll {
     Import-DstLib 'DockerRoutes.ps1'
 }
 Describe 'Docker adapter routing boundary' {
+    It 'allows derived inventory reads and refresh without opening arbitrary item methods' {
+        foreach($path in @('/api/v1/inventory/players','/api/v1/inventory/items','/api/v1/inventory/items/occurrences','/api/v1/inventory/items/DT_Resource(1).Test/occurrences')) {
+            Test-DuneDockerRouteQualified -Method GET -Path $path|Should -BeTrue
+            Test-DuneDockerRouteQualified -Method DELETE -Path $path|Should -BeFalse
+        }
+        Test-DuneDockerRouteQualified -Method POST -Path '/api/v1/inventory/refresh'|Should -BeTrue
+        Test-DuneDockerRouteQualified -Method GET -Path '/api/v1/inventory/items/../occurrences'|Should -BeFalse
+        Test-DuneDockerRouteQualified -Method POST -Path '/api/v1/inventory/items'|Should -BeFalse
+    }
     It 'opens only qualified market reads without enabling vendor mutations' {
         foreach($path in @('/api/gameplay/status','/api/gameplay/market/items','/api/gameplay/market/listings','/api/gameplay/market/sales','/api/gameplay/market/stats','/api/gameplay/market/categories','/api/gameplay/market/catalog')) {
             Test-DuneDockerRouteQualified -Method GET -Path $path|Should -BeTrue

@@ -64,6 +64,18 @@
 }
 
 Describe 'Platform capability registry' {
+    It 'advertises qualified native inventory reads without unqualified Docker capabilities' {
+        $previousBackend = $env:DST_HOSTING_BACKEND
+        try {
+            $env:DST_HOSTING_BACKEND = 'docker'
+            $ids = @(Get-DuneCapabilitiesForPrincipal -Principal @{type='portal-account';role='owner'} -RuntimePlatform linux).id
+            $ids | Should -Contain 'inventory.read'
+            $ids | Should -Not -Contain 'vehicle.rename'
+            $ids | Should -Not -Contain 'player.manage.self'
+            @(Get-DuneCapabilitiesForPrincipal -Principal @{type='anonymous'} -RuntimePlatform linux).Count | Should -Be 0
+        } finally { $env:DST_HOSTING_BACKEND = $previousBackend }
+    }
+
     It 'loads a unique versioned registry with only known contract values' {
         $registry = Get-DuneCapabilityRegistry
         $registry.schemaVersion | Should -Be 1
