@@ -607,17 +607,24 @@ def resume_interrupted_restore(state,engine):
     finally:save(state)
 
 
-def prepare_connections(state,engine):
+def validate_connection_plan(state):
     if state['phase']!='database-ready' or not state.get('partitionsPrepared'):
         raise ValueError('Prepare the world database and layout first.')
     template=read_template()
     plan=plan_world(state['id'],state['profile'],template,assets_state(),state['database'],state.get('mapMemoryOverrides'),state.get('memorySwap'))
     previous=state.get('worldPlan')
     if previous:
-        # Add derived database addressing to early local-preview journals.
-        previous={**previous,'databaseName':state['database']['name'],'databasePort':state['database']['port']}
+        # Old journals predate optional swap metadata. Missing and null both
+        # mean the unconfigured/default policy, not a changed connection plan.
+        previous={**previous,'databaseName':state['database']['name'],'databasePort':state['database']['port'],
+                  'memorySwap':previous.get('memorySwap')}
     if previous and previous!=plan:
         raise ValueError('The installed connection plan differs from these settings. Stop and review it first.')
+    return template,plan
+
+
+def prepare_connections(state,engine):
+    template,plan=validate_connection_plan(state)
     state['worldPlan']=plan; save(state)
     tls=tls_for_plan(plan)
     tls_hash=hashlib.sha256(tls['ca.pem']+tls['cert.pem']).hexdigest()
@@ -1451,6 +1458,8 @@ def run_operation(state,engine,request):
         elif action=='services.start':start_services(state,engine,publish_gateway=request.get('publishGateway',True))
         elif action=='services.stop':stop_services(state,engine)
         elif action=='services.restart':
+            # Reject genuine plan conflicts before taking a healthy world down.
+            validate_connection_plan(state)
             stop_services(state,engine)
             start_services(state,engine)
         elif action in {'maps.start','maps.stop'}:control_map(state,engine,request.get('partition'),action=='maps.start',request.get('force',False))
