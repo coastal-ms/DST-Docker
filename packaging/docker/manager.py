@@ -992,8 +992,11 @@ def control_map(state,engine,partition,running,force=False,automatic=False):
     component='game-'+str(partition);entry=state.get('services',{}).get(component)
     map_info=next(row for row in plan['maps'] if row['map']==game['map'])
     def manual_floor():
-        if not automatic and map_info.get('initialReplicas',0)==0:
-            set_map_floor(state,engine,game['map'],running)
+        if not automatic:
+            if map_info.get('initialReplicas',0)==0:
+                set_map_floor(state,engine,game['map'],running)
+            else:
+                set_map_floor(state,engine,game['map'],running,allow_initial=True)
     if running:
         regis_compatibility.assert_prepared_images(state,engine,[component])
         observed=engine.assert_owned(entry['id'],state['id'],component) if entry and entry.get('id') else None
@@ -1196,9 +1199,9 @@ def map_policy(state,engine):
             'world':state['worldId'],'maps':state['worldPlan']['maps']}
 
 
-def set_map_floor(state,engine,map_name,enabled):
+def set_map_floor(state,engine,map_name,enabled,allow_initial=False):
     if type(enabled) is not bool:raise ValueError('enabled must be a JSON boolean.')
-    maps=[row for row in state['worldPlan']['maps'] if row['map']==map_name and row['initialReplicas']==0]
+    maps=[row for row in state['worldPlan']['maps'] if row['map']==map_name and (allow_initial or row['initialReplicas']==0)]
     if len(maps)!=1:raise ValueError('This map does not have a configurable warm floor.')
     policy=map_policy(state,engine)
     pins=dict(state.get('manualPins',{}))

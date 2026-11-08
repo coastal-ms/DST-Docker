@@ -467,6 +467,28 @@ class ManagerTests(unittest.TestCase):
         self.assertEqual(state['scalePending']['phase'],'interrupted')
         self.assertEqual(engine.execs,[])
 
+    def test_explicit_hagga_stop_and_start_update_the_live_director_floor(self):
+        state=manager.project_state();state.update(desiredState='running',worldId='sh-fixture',
+            scaler={'id':'scaler','phase':'prepared'},
+            services={'director':{'id':'director'},'game-1':{'id':'hagga','phase':'prepared'}},
+            worldPlan={'games':[{'partition':1,'map':'Survival_1'}],
+                       'maps':[{'map':'Survival_1','partitions':[1],'initialReplicas':1}]})
+        engine=Mock(spec=manager.Engine);engine.assert_owned.return_value={'State':{'Status':'running'}}
+        engine.read_director_config.return_value=b'[ Survival_1 ]\nMaxParties=12\nMinServers=1\n'
+        with patch.object(manager,'public_state',return_value={'services':[{'component':'game-1','players':0}]}):
+            manager.control_map(state,engine,1,False)
+            engine.set_director_floor.assert_called_once_with('scaler','director',state['id'],'Survival_1',0)
+            ini=next(iter(engine.upload_component_files.call_args.args[3].values()))['data']
+            self.assertIn('MinServers=0',ini);self.assertIn('MaxParties=12',ini)
+            self.assertFalse(state['manualPins']['game-1']);self.assertEqual(state['mapTargets']['game-1'],'stopped')
+            engine.set_director_floor.reset_mock()
+            manager.control_map(state,engine,1,True)
+            engine.set_director_floor.assert_called_once_with('scaler','director',state['id'],'Survival_1',1)
+            self.assertTrue(state['manualPins']['game-1'])
+        # The optional-map Warm API still cannot edit a required initial map.
+        with self.assertRaisesRegex(ValueError,'configurable warm floor'):
+            manager.set_map_floor(state,engine,'Survival_1',False)
+
     def test_map_floor_updates_only_installed_optional_map_and_keeps_custom_ini(self):
         state=manager.project_state();state.update(services={'director':{'id':'director'}},worldId='sh-fixture',
             worldPlan={'maps':[{'map':'SH_Arrakeen','partitions':[3],'initialReplicas':0}]})
