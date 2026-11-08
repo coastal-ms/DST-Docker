@@ -142,6 +142,10 @@ function Send-DuneRmqCourierMessage {
         [hashtable] $Extra
     )
 
+    if($env:DST_HOSTING_BACKEND -eq 'docker'){
+        return Send-DuneDockerRmqCommands -Courier @{exchange=$Exchange;routingKey=$RoutingKey;body=$BodyJson;type=$TypeStr} -Action $Action -Extra $Extra
+    }
+
     $ctx = Get-V6BroadcastContext
     if (-not $ctx.ok) { return $ctx }
     $ip  = $ctx.vm.ip

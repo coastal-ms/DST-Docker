@@ -449,9 +449,10 @@ export function Commands() {
     const fallbackSections: [string[], string[], string[]] = [[], [], []]
     const serverNames    = (cmdsState.data?.sectionNames ?? fallbackNames) as [string, string, string]
     const serverSections = (cmdsState.data?.sections     ?? fallbackSections) as [string[], string[], string[]]
-    const legacyDefaultNames = serverNames[0] === 'VM' && serverNames[1] === 'Battlegroup' && serverNames[2] === 'Tools'
+    const selectedNames = localNames ?? serverNames
+    const legacyDefaultNames = selectedNames[0] === 'VM' && selectedNames[1] === 'Battlegroup' && selectedNames[2] === 'Tools'
     return {
-      names:    localNames    ?? (docker && legacyDefaultNames ? fallbackNames : serverNames),
+      names:    docker && legacyDefaultNames ? fallbackNames : selectedNames,
       sections: localSections ?? serverSections,
     }
   }, [cmdsState.data, localNames, localSections, docker])

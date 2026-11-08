@@ -61,6 +61,28 @@ function Start-DuneDockerFuncomUpdate {
     return Invoke-DuneDockerManager -Request @{action='updates.apply';expectedBuild=[string]$version.latestBuild;allowOnline=$AllowOnline;withTanks=[bool]$WithTanks}
 }
 
+function Get-DuneDockerContainers {
+    $reply=Invoke-DuneDockerManager -Request @{action='status'}
+    if(-not $reply.ok){return @{ok=$false;status=503;message='Docker observations are unavailable.'}}
+    $metadata=$reply.data
+    $entries=@($metadata.services)+@($metadata.connectionServices)
+    if($metadata.database){$database=$metadata.database.Clone();$database.component='postgres';$database.desiredState=$metadata.desiredState;$entries+=@($database)}
+    $pods=@(foreach($entry in $entries){
+        if(-not $entry.component){continue}
+        $phase=switch($entry.state){running{'Running'};restarting{'Starting'};created{'Stopped'};exited{'Stopped'};default{'Unknown'}}
+        $ready=$entry.state -eq 'running'
+        if($entry.component -match '^game-(\d+)$'){$ready=$ready -and $entry.gameReady -eq $true}
+        elseif($entry.health){$ready=$ready -and $entry.health -eq 'healthy'}
+        $desired=if($entry.desiredState){[string]$entry.desiredState}else{[string]$metadata.desiredState}
+        $status=if($phase -eq 'Stopped' -and $desired -eq 'running'){'Unexpected stop'}elseif($entry.state -eq 'running' -and $entry.health -eq 'unhealthy'){'Unhealthy'}else{$phase}
+        $map=if($entry.component -match '^game-(\d+)$'){$partition=[int]$Matches[1];@($metadata.plan.games | Where-Object {$_.partition -eq $partition}) | Select-Object -First 1}else{$null}
+        @{backend='docker';namespace='docker';name=$(if($entry.name){[string]$entry.name}else{[string]$entry.component});component=[string]$entry.component;map=[string]$map.map;desiredState=$desired;
+          ready=$(if($ready){'1/1'}else{'0/1'});status=$status;phase=$phase;restarts=$null;node='Docker host';ip='';
+          startTime=$(if($entry.startedAt -gt 0){[DateTimeOffset]::FromUnixTimeSeconds([long]$entry.startedAt).ToString('o')}else{''})}
+    })
+    return @{ok=$true;pods=$pods;count=$pods.Count}
+}
+
 function Get-DuneDockerStatus {
     param([string]$SnapshotPath='/data/docker/status.json',[switch]$ForcePorts,[switch]$LifecycleOnly)
     $snapshot = @{ available=$false; stale=$true; error='Waiting for Docker observations.' }

@@ -20,7 +20,7 @@ from engine import Engine, EngineError
 from world_template import read_template, validate_profile, fresh_partition_sql
 from game_plan import plan_world, public_plan
 from connection_services import ensure_tls, queue_spec
-from rmq_commands import publish as publish_commands
+from rmq_commands import publish as publish_commands, publish_courier
 from rmq_chat import operate as chat_queue
 from scale_protocol import snapshot as scale_snapshot,parse_patch,scale_resource,native_director_ini,desired_partitions,party_sharing_ini,classic_automatic_maps
 import file_browser
@@ -154,7 +154,7 @@ def public_state(state, engine):
         row={'component':component,'phase':entry['phase']}
         if entry.get('id'):
             observed=engine.assert_owned(entry['id'],state['id'],component)
-            row.update(state=observed['State']['Status'],health=observed['State'].get('Health',{}).get('Status','unknown'))
+            row.update(name=observed.get('Name',component).lstrip('/'),state=observed['State']['Status'],health=observed['State'].get('Health',{}).get('Status','unknown'))
         connections.append(row)
     services=[]
     initial={partition for item in state.get('worldPlan',{}).get('maps',[]) for partition in item['partitions'][:item['initialReplicas']]}
@@ -166,7 +166,7 @@ def public_state(state, engine):
         row['desiredState']=desired
         if entry.get('id'):
             observed=engine.assert_owned(entry['id'],state['id'],component)
-            row.update(state=observed['State']['Status'],exitCode=observed['State'].get('ExitCode'))
+            row.update(name=observed.get('Name',component).lstrip('/'),state=observed['State']['Status'],exitCode=observed['State'].get('ExitCode'))
             if observed['State'].get('StartedAt'):
                 row['startedAt']=datetime.fromisoformat(observed['State']['StartedAt'].replace('Z','+00:00')).timestamp()
         services.append(row)
@@ -1442,6 +1442,7 @@ def run_operation(state,engine,request):
         elif action=='updates.apply':state['operation']['result']=world_update.NativeUpdate(state,engine,sys.modules[__name__]).apply(request.get('expectedBuild'),request.get('allowOnline',False),request.get('withTanks',False))
         elif action=='updates.recover':world_update.NativeUpdate(state,engine,sys.modules[__name__]).recover()
         elif action=='rmq.publish':state['operation']['result']=publish_commands(state,engine,request.get('fields'),request.get('authToken'),request.get('spacingMilliseconds',0))
+        elif action=='rmq.courier':state['operation']['result']=publish_courier(state,engine,request.get('courier'))
         elif action=='scale.prepare':prepare_scaler(state,engine)
         elif action=='scale.apply':apply_scale(state,engine,request)
         elif action=='services.refresh-core-adapters':refresh_core_adapters(state,engine)
@@ -1554,7 +1555,7 @@ def dispatch(request, engine=None):
             if not reply.get('ok'):raise ValueError(reply.get('error','Settings backups could not be created.'))
             return reply['data']
         if action in {'database.create','database.initialize','database.migrate','database.start','database.stop','world.configure','connections.prepare',
-                      'services.prepare','services.start','services.stop','services.restart','services.refresh-core-adapters','scale.prepare','maps.start','maps.stop','maps.restart','maps.observers.prepare','files.prepare','settings.prepare','regis.set','regis.recover','logs.export','updates.stage','updates.apply','updates.recover','rmq.publish','games.refresh-adapters','backups.create','backups.verify','backups.restore','backups.delete','backups.cleanup.recover','backups.export','backups.import','backups.schedule.recover','backups.mirror.sync','backups.mirror.recover','world-restart.apply','world-restart.recover','world-restart.rollback','world-restart.research','world-restart.research-recover'}:
+                      'services.prepare','services.start','services.stop','services.restart','services.refresh-core-adapters','scale.prepare','maps.start','maps.stop','maps.restart','maps.observers.prepare','files.prepare','settings.prepare','regis.set','regis.recover','logs.export','updates.stage','updates.apply','updates.recover','rmq.publish','rmq.courier','games.refresh-adapters','backups.create','backups.verify','backups.restore','backups.delete','backups.cleanup.recover','backups.export','backups.import','backups.schedule.recover','backups.mirror.sync','backups.mirror.recover','world-restart.apply','world-restart.recover','world-restart.rollback','world-restart.research','world-restart.research-recover'}:
             if action in {'world-restart.apply','world-restart.rollback'} and request.get('confirmation')!=('RESTART WORLD' if action=='world-restart.apply' else 'ROLL BACK WORLD'):
                 raise ValueError('Supply the exact World Restart confirmation.')
             if action=='world-restart.research' and request.get('confirmation')!='RESET RESEARCH':raise ValueError('Supply the exact research recovery confirmation.')

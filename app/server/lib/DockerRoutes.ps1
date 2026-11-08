@@ -39,6 +39,17 @@ function Test-DuneDockerLandsraadRoute {
 
 function Test-DuneDockerRouteQualified {
     param([string]$Method,[string]$Path)
+    if($Method -ceq 'GET' -and $Path -cin @('/api/pods','/api/pods/events')){return $true}
+    if($Method -ceq 'GET' -and $Path -ceq '/api/player-portal/status'){return $true}
+    if($Path -ceq '/api/player-portal/teleports' -and $Method -cin @('GET','POST','DELETE')){return $true}
+    # These existing DST operations use the shared SQL transport, which already
+    # selects the native Docker database connection. Keep their existing handlers.
+    if($Method -ceq 'POST' -and $Path -cin @('/api/gameplay/players/delete-account','/api/gameplay/players/delete-tutorials','/api/gameplay/players/wipe-codex','/api/gameplay/players/grant-all-tech')){return $true}
+    if($Method -ceq 'POST' -and $Path -cin @('/api/gameplay/players/progression-unlock','/api/gameplay/players/progression-reverse','/api/gameplay/players/faction/reset')){return $true}
+    if($Method -ceq 'GET' -and $Path -cin @('/api/gameplay/coriolis/seeds','/api/gameplay/storage/owner-debug')){return $true}
+    if($Path -ceq '/api/gameplay/welcome-back' -and $Method -cin @('GET','PUT')){return $true}
+    if($Method -ceq 'POST' -and $Path -cin @('/api/gameplay/coriolis/set-farm-seed','/api/gameplay/coriolis/set-map-seed','/api/gameplay/coriolis/set-partition-seed','/api/gameplay/vehicles/spawn')){return $true}
+    if($Method -ceq 'POST' -and $Path -ceq '/api/gameplay/chat/whisper'){return $true}
     if($Method -ceq 'POST' -and $Path -cin @('/api/gameplay/players/contract/complete','/api/gameplay/players/contracts/complete','/api/gameplay/players/contracts/reverse')){return $true}
     if($Method -ceq 'GET' -and $Path -cin @('/api/gameplay/players/fresh-start/snapshots','/api/gameplay/players/fresh-start/snapshots-path')){return $true}
     if($Method -ceq 'POST' -and $Path -cin @('/api/gameplay/players/fresh-start/snapshot','/api/gameplay/players/fresh-start/restore','/api/gameplay/players/fresh-start/restore-skip-npe')){return $true}

@@ -50,8 +50,7 @@ Register-DuneRoute -Method POST -Path '/api/gameplay/coriolis/set-farm-seed' -Ha
 Register-DuneRoute -Method POST -Path '/api/gameplay/coriolis/set-map-seed' -Handler {
     param($req, $res, $routeParams, $body)
     try {
-        $map = ''
-        if ($body -and $body.PSObject.Properties['map']) { $map = [string]$body.map }
+        $map = [string](Get-DuneBodyValue -Body $body -Name 'map')
         $seed = Get-DuneBodyInt -Body $body -Name 'seed'
         if (-not $map) { Write-DuneError -Response $res -Status 400 -Message 'map (string) is required.'; return }
         if ($null -eq $seed -or $seed -lt -1 -or $seed -gt 11) { Write-DuneError -Response $res -Status 400 -Message 'seed must be -1 (auto) or 0-11.'; return }

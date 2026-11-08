@@ -27,7 +27,7 @@ const WORKSPACE_ROUTES = WORKSPACE_MANIFEST.map(workspace => ({
 }))
 
 const LEGACY_ROUTES = LEGACY_ROUTE_MANIFEST
-  .filter(route => import.meta.env.VITE_DST_EDITION !== 'docker' || route.path !== '/solo')
+  .filter(route => import.meta.env.VITE_DST_EDITION !== 'docker' || !['/solo', '/sietches'].includes(route.path))
   .map(route => ({
   ...route,
   Component: lazy(import.meta.env.VITE_DST_EDITION === 'docker' && route.path === '/setup'
@@ -84,6 +84,7 @@ function InstalledApp() {
       <AppShell>
         <Routes>
           {import.meta.env.VITE_DST_EDITION === 'docker' && <Route path="/solo" element={<Navigate to="/" replace />} />}
+          {import.meta.env.VITE_DST_EDITION === 'docker' && <Route path="/sietches" element={<Navigate to="/map?view=lifecycle" replace />} />}
           {COMPATIBILITY_REDIRECTS.map(route => (
             <Route
               key={route.from}

@@ -39,6 +39,36 @@ end, Messages),
 
 def publish(state,engine,fields,auth_token,spacing):
     code=expression(fields,auth_token,spacing)
+    return deliver(state,engine,code,len(fields))
+
+
+def publish_courier(state,engine,courier):
+    if not isinstance(courier,dict) or set(courier)!={'exchange','routingKey','body','type'}:
+        raise ValueError('A typed courier message is required.')
+    if courier['exchange']!='chat.whispers' or courier['type']!='12':
+        raise ValueError('Unsupported courier channel.')
+    route=courier['routingKey'];body=courier['body']
+    if not isinstance(route,str) or not 1<=len(route)<=128 or not isinstance(body,str) or not 1<=len(body.encode('utf-8'))<=32768:
+        raise ValueError('Courier message exceeds its limits.')
+    envelope=json.loads(body)
+    if not isinstance(envelope,dict) or envelope.get('Type')!='ECourierMessageType::TextChat' or not isinstance(envelope.get('Content'),str):
+        raise ValueError('A text chat envelope is required.')
+    encoded=lambda value: 'base64:decode(<<"'+base64.b64encode(value.encode('utf-8')).decode()+'">>)'
+    code='''XName = rabbit_misc:r(<<"/">>, exchange, <<"chat.whispers">>),
+X = rabbit_exchange:lookup_or_die(XName),
+Body = '''+encoded(body)+''',
+RoutingKey = '''+encoded(route)+''',
+P = {list_to_atom("P_basic"), <<"Content">>, undefined, [], undefined,
+     undefined, undefined, undefined, undefined, <<"dst-'''+uuid.uuid4().hex+'''">>, undefined,
+     <<"12">>, <<"fls">>, <<"fls_backend">>, undefined},
+Content = rabbit_basic:build_content(P, Body),
+{ok, Msg} = rabbit_basic:message(XName, RoutingKey, Content),
+rabbit_queue_type:publish_at_most_once(X, Msg),
+{ok,enqueued,1}.'''
+    return deliver(state,engine,code,1)
+
+
+def deliver(state,engine,code,count):
     if state.get('desiredState')!='running':raise ValueError('Start the battlegroup before sending game commands.')
     broker=state.get('connections',{}).get('rmq-game',{})
     if not broker.get('id'):raise ValueError('The game message broker is unavailable.')
@@ -46,5 +76,5 @@ def publish(state,engine,fields,auth_token,spacing):
     if observed['State'].get('Health',{}).get('Status')!='healthy':raise ValueError('The game message broker is not ready.')
     output=engine.exec_internal(broker['id'],state['id'],'rmq-game',['/opt/rabbitmq/sbin/rabbitmqctl','eval',code])
     compact=''.join(output.split())
-    if '{ok,enqueued,'+str(len(fields))+'}' not in compact:raise ValueError('Broker delivery was not confirmed. Check the result before retrying.')
-    return {'enqueued':len(fields)}
+    if '{ok,enqueued,'+str(count)+'}' not in compact:raise ValueError('Broker delivery was not confirmed. Check the result before retrying.')
+    return {'enqueued':count}

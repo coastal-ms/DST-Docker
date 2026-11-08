@@ -1,6 +1,6 @@
 function Send-DuneDockerRmqCommands {
-    param([hashtable[]]$Fields,[int]$SpacingMilliseconds=0,[string]$Action='server-command',[hashtable]$Extra)
-    if(-not $Fields.Count){return @{ok=$false;status=400;message='At least one command is required.'}}
+    param([hashtable[]]$Fields,[int]$SpacingMilliseconds=0,[string]$Action='server-command',[hashtable]$Extra,[hashtable]$Courier)
+    if(-not $Courier -and -not $Fields.Count){return @{ok=$false;status=400;message='At least one command is required.'}}
     $packets=[Collections.Generic.List[object]]::new()
     $batch=[Collections.Generic.List[hashtable]]::new()
     $limit=[Math]::Max(1,[Math]::Min(128,[Math]::Floor(15000/[Math]::Max(1,$SpacingMilliseconds))))
@@ -12,9 +12,11 @@ function Send-DuneDockerRmqCommands {
         $batch.Add($field)
     }
     if($batch.Count){$packets.Add([object[]]$batch.ToArray())}
+    if($Courier){$packets.Add($Courier)}
     $sent=0
     foreach($packet in $packets){
-        $reply=Invoke-DuneDockerManager -Request @{action='rmq.publish';fields=[object[]]$packet;authToken=$script:DuneRmqAuthToken;spacingMilliseconds=$SpacingMilliseconds}
+        $request=if($Courier){@{action='rmq.courier';courier=$packet}}else{@{action='rmq.publish';fields=[object[]]$packet;authToken=$script:DuneRmqAuthToken;spacingMilliseconds=$SpacingMilliseconds}}
+        $reply=Invoke-DuneDockerManager -Request $request
         if(-not $reply.ok){return @{ok=$false;status=503;message=$reply.error;enqueued=$sent}}
         $id=$reply.data.operation.id;$deadline=[DateTime]::UtcNow.AddSeconds(45);$finished=$false
         while([DateTime]::UtcNow -lt $deadline){

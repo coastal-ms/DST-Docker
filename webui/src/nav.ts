@@ -42,7 +42,7 @@ export type NavItem = {
 
 export const LEGACY_NAV_ITEMS: readonly NavItem[] = [
   { to: '/',            label: 'Server Overview', icon: 'LayoutDashboard', group: 'overview', workspaceId: 'home', sidebarAlwaysVisible: true },
-  { to: '/pods',        label: 'Pods',          icon: 'Boxes',           group: 'overview', legacy: true },
+  { to: '/pods',        label: import.meta.env.VITE_DST_EDITION === 'docker' ? 'Containers' : 'Pods', icon: 'Boxes', group: 'overview', legacy: true },
   { to: '/operations',  label: 'Operations',    icon: 'Activity',        group: 'overview', workspaceId: 'operations' },
   { to: '/commands',    label: 'Commands',     icon: 'Zap',             group: 'terminal', legacy: true, inactivePaths: ['/commands?task=updates'] },
   { to: '/commands?task=updates', label: 'Server updates', icon: 'Download', group: 'terminal', serverUpdatesOnly: true, legacy: true, activePaths: ['/commands?task=updates'] },
@@ -105,7 +105,7 @@ export function getVisibleNavItems({
   soloOnly?: boolean
 }) {
   return NAV_ITEMS
-    .filter(item => import.meta.env.VITE_DST_EDITION !== 'docker' || item.to !== '/solo')
+    .filter(item => import.meta.env.VITE_DST_EDITION !== 'docker' || !['/solo', '/sietches'].includes(item.to))
     .filter(item => !soloOnly || isSoloDestination(item.to))
     .filter(item => includeSidebarHidden || !item.sidebarHidden)
     .filter(item => !item.localOnly || local)

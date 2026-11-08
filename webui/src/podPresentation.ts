@@ -1,6 +1,6 @@
 import type { PodSummary } from './api/pods'
 import { getBackupOpPodInfo, backupOpKindLabel, isFailedPodStatus } from './podClassification'
-import { mapLabelFromPodSlug } from './util/mapLabel'
+import { mapLabel, mapLabelFromPodSlug } from './util/mapLabel'
 
 export type PodGroup = 'maps' | 'services' | 'history'
 export function podPresentation(pod: PodSummary) {
@@ -46,13 +46,29 @@ export function podPresentation(pod: PodSummary) {
     if (role) { label = role[1]; description = role[2] }
   }
   if (terminal) group = 'history'
+  if (pod.backend === 'docker') {
+    const roles: Record<string, [string, string]> = {
+      postgres: ['Database', 'World and character data'],
+      director: ['Battlegroup director', 'Schedules game maps'],
+      gateway: ['Player gateway', 'Player connections'],
+      'text-router': ['Text router', 'Game chat routing'],
+      'rmq-game': ['Game message broker', 'Game messaging'],
+      'rmq-admin': ['Admin message broker', 'Administrative messaging'],
+    }
+    if (pod.component?.startsWith('game-')) {
+      group = 'maps'; label = mapLabel(pod.map) || pod.name; description = `Game map · ${pod.component}`
+    } else if (pod.component && roles[pod.component]) {
+      [label, description] = roles[pod.component]!
+    }
+  }
   const ready = pod.ready.match(/^(\d+)\/(\d+)$/)
   const fullyReady = !!ready && +ready[2]! > 0 && +ready[1]! === +ready[2]!
   const failed = isFailedPodStatus(pod.status) || /^Failed$/i.test(pod.phase)
   const healthy = !terminal && !failed && /^Running$/i.test(pod.phase) && fullyReady
-  const state = terminal ? (failed ? 'Failed attempt' : 'Completed')
+  const stopped = pod.backend === 'docker' && pod.desiredState === 'stopped' && pod.phase === 'Stopped'
+  const state = stopped ? 'Stopped' : terminal ? (failed ? 'Failed attempt' : 'Completed')
     : failed ? pod.status || 'Failed' : healthy ? 'Ready'
       : /^Running$/i.test(pod.phase) ? 'Not ready' : pod.status || pod.phase || 'Unknown'
-  const tone = terminal ? 'text-text-muted' : failed ? 'text-danger' : healthy ? 'text-success' : 'text-warning'
-  return { group, label, description, terminal, healthy, needsAttention: !terminal && !healthy, state, tone }
+  const tone = stopped || terminal ? 'text-text-muted' : failed ? 'text-danger' : healthy ? 'text-success' : 'text-warning'
+  return { group, label, description, terminal, healthy, needsAttention: !stopped && !terminal && !healthy, state, tone }
 }

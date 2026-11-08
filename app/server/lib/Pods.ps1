@@ -13,6 +13,7 @@
 # List every pod in the cluster with the columns the UI needs. Uses JSON output
 # so we don't have to parse kubectl's whitespace-aligned table.
 function Get-DunePodsList {
+    if($env:DST_HOSTING_BACKEND -eq 'docker'){return Get-DuneDockerContainers}
     $ctx = Get-DuneBackupContext
     if (-not $ctx.ok) {
         return @{ ok = $false; status = $ctx.status; message = $ctx.message }
@@ -128,6 +129,13 @@ function Get-DunePodEvents {
         [Parameter(Mandatory)][string]$Namespace,
         [Parameter(Mandatory)][string]$Name
     )
+    if($env:DST_HOSTING_BACKEND -eq 'docker'){
+        $list=Get-DuneDockerContainers
+        if(-not $list.ok){return $list}
+        $entry=@($list.pods | Where-Object {$_.namespace -ceq $Namespace -and $_.name -ceq $Name}) | Select-Object -First 1
+        if(-not $entry){return @{ok=$false;status=404;message='This container is not part of the selected Docker world.'}}
+        return @{ok=$true;namespace=$Namespace;name=$Name;events=@();describe=($entry|ConvertTo-Json -Depth 4)}
+    }
     $ctx = Get-DuneBackupContext
     if (-not $ctx.ok) {
         return @{ ok = $false; status = $ctx.status; message = $ctx.message }

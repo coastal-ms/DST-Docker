@@ -1241,7 +1241,8 @@ function Invoke-DuneEstablishFactionMembership {
     $tx = @"
 BEGIN;
 SELECT dune.complete_journey_story_nodes_for_player('$safeFls'::text, $nodesArr);
-SELECT dune.change_player_faction($ControllerId::bigint, $FactionId::smallint, 3::smallint, NOW()::timestamp);
+SELECT dune.change_player_faction($ControllerId::bigint, $FactionId::smallint, 3::smallint, NOW()::timestamp)
+WHERE NOT EXISTS (SELECT 1 FROM dune.player_faction WHERE actor_id=$ControllerId::bigint AND faction_id=$FactionId::smallint);
 SELECT dune.update_player_tags($AccountId::bigint, $tagsArr, ARRAY[]::text[]);
 SELECT dune.set_player_faction_reputation($ControllerId::bigint, $FactionId::smallint, $Rep::integer);
 $compSql
@@ -3224,7 +3225,17 @@ LIMIT 1;
 function Invoke-DunePlayerDeleteTutorials {
     param([string]$Ip, [long]$AccountId)
     if ($AccountId -le 0) { return @{ ok = $false; error = 'account_id is required.' } }
-    $sql = "SELECT dune.delete_all_tutorial_entries($AccountId::bigint);"
+    # The game stores tutorial entries against actors, not accounts. Resolve
+    # both character actors so the account selection cannot target another ID.
+    $sql = @"
+SELECT dune.delete_all_tutorial_entries(actor_id)
+FROM (
+    SELECT player_controller_id AS actor_id FROM dune.player_state WHERE account_id=$AccountId::bigint
+    UNION
+    SELECT player_pawn_id AS actor_id FROM dune.player_state WHERE account_id=$AccountId::bigint
+) player_actors
+WHERE actor_id IS NOT NULL;
+"@
     $r = Invoke-DuneSqlQuery -Ip $Ip -Sql $sql -ReadOnly $false -MaxRows 1 -TimeoutSec 30
     if (-not $r.ok) { return @{ ok = $false; error = "delete_all_tutorial_entries: $($r.error)" } }
     return @{ ok = $true; message = "Cleared tutorial flags for account $AccountId." }

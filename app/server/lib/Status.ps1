@@ -136,6 +136,7 @@ function Get-DuneVmResources {
 
 function Get-DuneVmStatus {
     param([switch]$Force, [switch]$SkipGuestRecovery)
+    if($env:DST_HOSTING_BACKEND -eq 'docker'){return (Get-DuneDockerStatus -LifecycleOnly).vm}
     if ((Get-Command Test-DuneSoloInstallation -ErrorAction SilentlyContinue) -and (Test-DuneSoloInstallation)) {
         return @{ exists=$false; running=$false; name=''; state='Not applicable'; ip=$null; uptime=0 }
     }
@@ -275,6 +276,7 @@ function Get-DuneBattlegroupSnapshotCached {
 
 function Get-DuneBattlegroupSnapshot {
     param([switch]$Force, $VmStatus)
+    if($env:DST_HOSTING_BACKEND -eq 'docker'){return (Get-DuneDockerStatus -LifecycleOnly).bg}
 
     if (-not $Force.IsPresent) {
         $cached = Get-DuneBattlegroupSnapshotCached

@@ -2,12 +2,16 @@
 import { api } from './client'
 
 export interface PodSummary {
+  backend?: 'docker'
+  component?: string
+  map?: string
+  desiredState?: string
   namespace: string
   name: string
   ready: string
   status: string
   phase: string
-  restarts: number
+  restarts: number | null
   node: string
   ip: string
   startTime: string

@@ -3,6 +3,34 @@ BeforeAll {
     Import-DstLib 'DockerRoutes.ps1'
 }
 Describe 'Docker adapter routing boundary' {
+    It 'connects player status and bookmarks without exposing other player-portal methods' {
+        Test-DuneDockerRouteQualified -Method GET -Path '/api/player-portal/status'|Should -BeTrue
+        Test-DuneDockerRouteQualified -Method POST -Path '/api/player-portal/status'|Should -BeFalse
+        foreach($method in @('GET','POST','DELETE')){Test-DuneDockerRouteQualified -Method $method -Path '/api/player-portal/teleports'|Should -BeTrue}
+        Test-DuneDockerRouteQualified -Method PUT -Path '/api/player-portal/teleports'|Should -BeFalse
+        Test-DuneDockerRouteQualified -Method GET -Path '/api/player-portal/teleports/extra'|Should -BeFalse
+        Test-DuneDockerRouteQualified -Method POST -Path '/api/pods/prune-terminal-director'|Should -BeFalse
+    }
+    It 'keeps shared world, inspection and broker tools on their existing methods' {
+        foreach($path in @('/api/gameplay/coriolis/set-farm-seed','/api/gameplay/coriolis/set-map-seed','/api/gameplay/coriolis/set-partition-seed','/api/gameplay/vehicles/spawn','/api/gameplay/chat/whisper')){
+            Test-DuneDockerRouteQualified -Method POST -Path $path|Should -BeTrue
+            Test-DuneDockerRouteQualified -Method GET -Path $path|Should -BeFalse
+            Test-DuneDockerRouteQualified -Method POST -Path ($path+'/extra')|Should -BeFalse
+        }
+        foreach($path in @('/api/gameplay/coriolis/seeds','/api/gameplay/storage/owner-debug')){
+            Test-DuneDockerRouteQualified -Method GET -Path $path|Should -BeTrue
+            Test-DuneDockerRouteQualified -Method POST -Path $path|Should -BeFalse
+        }
+        foreach($method in @('GET','PUT')){Test-DuneDockerRouteQualified -Method $method -Path '/api/gameplay/welcome-back'|Should -BeTrue}
+        Test-DuneDockerRouteQualified -Method DELETE -Path '/api/gameplay/welcome-back'|Should -BeFalse
+    }
+    It 'connects existing SQL-backed player tools without opening adjacent routes' {
+        foreach($path in @('/api/gameplay/players/delete-account','/api/gameplay/players/delete-tutorials','/api/gameplay/players/wipe-codex','/api/gameplay/players/grant-all-tech','/api/gameplay/players/progression-unlock','/api/gameplay/players/progression-reverse','/api/gameplay/players/faction/reset')){
+            Test-DuneDockerRouteQualified -Method POST -Path $path|Should -BeTrue
+            foreach($method in @('GET','PUT','DELETE')){Test-DuneDockerRouteQualified -Method $method -Path $path|Should -BeFalse}
+            Test-DuneDockerRouteQualified -Method POST -Path ($path+'/extra')|Should -BeFalse
+        }
+    }
     It 'opens only the three exact native contract mutation methods' {
         foreach($path in @('/api/gameplay/players/contract/complete','/api/gameplay/players/contracts/complete','/api/gameplay/players/contracts/reverse')){
             Test-DuneDockerRouteQualified -Method POST -Path $path|Should -BeTrue
