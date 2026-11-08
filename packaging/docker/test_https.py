@@ -11,6 +11,17 @@ tls=importlib.util.module_from_spec(spec);spec.loader.exec_module(tls)
 
 
 class HttpsTests(unittest.TestCase):
+    def test_sudo_proxy_metadata_is_readable_by_original_user_and_keeps_existing_mode(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output=Path(temporary)/'https.json'
+            output.write_text('{"old":true}');output.chmod(0o600)
+            with patch('mirror_config.launch_owner',return_value=(65534,65534,Path(temporary))):
+                tls.write_override(output,{'new':True},replace=True)
+                self.assertEqual(output.stat().st_uid,65534);self.assertEqual(output.stat().st_mode&0o777,0o600)
+                self.assertEqual(json.loads(output.read_text()),{'new':True})
+                fresh=Path(temporary)/'fresh.json';tls.write_override(fresh,{'new':True})
+                self.assertEqual(fresh.stat().st_uid,65534);self.assertEqual(fresh.stat().st_mode&0o777,0o600)
+            self.assertEqual(list(Path(temporary).glob('.dst-https-*')),[])
     def test_addresses_and_ports_are_validated_before_any_docker_work(self):
         for address in ('0.0.0.0','224.0.0.1','::1','host\nmalicious','example.com'):
             with self.assertRaises(ValueError):tls.validate('dst-preview',address,8443,8088)

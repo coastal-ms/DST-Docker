@@ -4,14 +4,36 @@ import argparse
 import hashlib
 import ipaddress
 import json
+import os
 from pathlib import Path
 import re
 import secrets
 import ssl
 import subprocess
+import tempfile
 
 # Official Caddy Linux amd64 image; this edition's game runtime is amd64.
 CADDY = 'caddy@sha256:fc9cbc100585871d18d4e451cca7021785c90a7006087427ae5ceb3e4efe6424'
+
+def write_override(output,value,replace=False):
+    # sudo is needed for Docker on some first installs. Keep the host's
+    # public proxy metadata accessible to that original Linux user afterward.
+    from mirror_config import launch_owner
+    uid,gid,_=launch_owner()
+    mode=(output.stat().st_mode&0o777) if replace else 0o600
+    if not replace:
+        with output.open('x',encoding='utf-8') as stream:
+            os.fchown(stream.fileno(),uid,gid);os.fchmod(stream.fileno(),mode)
+            json.dump(value,stream,indent=2);stream.write('\n');stream.flush();os.fsync(stream.fileno())
+        return
+    descriptor,temporary=tempfile.mkstemp(prefix='.dst-https-',dir=output.parent)
+    try:
+        with os.fdopen(descriptor,'w',encoding='utf-8') as stream:
+            os.fchown(stream.fileno(),uid,gid);os.fchmod(stream.fileno(),mode)
+            json.dump(value,stream,indent=2);stream.write('\n');stream.flush();os.fsync(stream.fileno())
+        os.replace(temporary,output)
+    finally:
+        if os.path.exists(temporary):os.unlink(temporary)
 
 
 def docker(*args, input=None):
@@ -133,9 +155,7 @@ for base in ('/tls-config','/tls-data'):os.chown(base,10001,10001)
            '-v', names[0] + ':/run/dst-tls:ro', '--entrypoint', 'caddy', CADDY,
            'validate', '--config', '/run/dst-tls/Caddyfile', '--adapter', 'caddyfile')
     output.parent.mkdir(parents=True, exist_ok=True)
-    with output.open('x', encoding='utf-8') as f:
-        json.dump(compose_override(args.project, f'https://{address}:{args.port}', args.upstream_port), f, indent=2)
-        f.write('\n')
+    write_override(output,compose_override(args.project,f'https://{address}:{args.port}',args.upstream_port))
     print(json.dumps({'override': str(output), 'url': f'https://{address}:{args.port}',
                       'servicesStarted': False, 'clientTrustInstalled': False}))
 
@@ -171,9 +191,7 @@ def update(args):
            '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true',
            '-v', args.project + '-dst-https-config:/tls', '--entrypoint', 'python3', args.app_image,
            '-c', writer, input=json.dumps(files))
-    temporary = output.with_suffix(output.suffix + '.new')
-    temporary.write_text(json.dumps(compose_override(args.project, f'https://{address}:{args.port}', args.upstream_port), indent=2) + '\n', encoding='utf-8')
-    temporary.replace(output)
+    write_override(output,compose_override(args.project,f'https://{address}:{args.port}',args.upstream_port),replace=True)
     print(json.dumps({'override': str(output), 'url': f'https://{address}:{args.port}',
                       'authorityPreserved': True, 'servicesStarted': False, 'clientTrustInstalled': False}))
 
