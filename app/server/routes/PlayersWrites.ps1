@@ -241,6 +241,7 @@ Register-DuneRoute -Method POST -Path '/api/gameplay/players/teleport-to-locatio
         if (-not $dest) { Write-DuneError -Response $res -Status 400 -Message 'destination is required.'; return }
         Invoke-DunePlayerWriteRoute -Response $res -Action {
             param($ip)
+            if($env:DST_HOSTING_BACKEND -eq 'docker'){return Invoke-DunePlayerTeleportToLocation -Ip $ip -AccountId $acc -Destination $dest}
             $off = Test-DunePlayerOfflineByAccount -Ip $ip -AccountId $acc
             if (-not $off.ok) {
                 return @{ ok = $false; error = "Player must be offline to teleport to a location. $($off.reason)" }
@@ -264,6 +265,7 @@ Register-DuneRoute -Method POST -Path '/api/gameplay/players/set-respawn' -Handl
         if (-not $dest) { Write-DuneError -Response $res -Status 400 -Message 'destination is required.'; return }
         Invoke-DunePlayerWriteRoute -Response $res -Action {
             param($ip)
+            if($env:DST_HOSTING_BACKEND -eq 'docker'){return Invoke-DunePlayerSetRespawn -Ip $ip -AccountId $acc -Destination $dest}
             $off = Test-DunePlayerOfflineByAccount -Ip $ip -AccountId $acc
             if (-not $off.ok) {
                 return @{ ok = $false; error = "Player must be offline to set a respawn point. $($off.reason)" }

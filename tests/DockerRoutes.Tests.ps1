@@ -183,3 +183,16 @@ Describe 'Native chat command route boundary' {
         foreach($path in @('/api/gameplay/chat-commands/exec','/api/gameplay/chat-commands/teleports/extra')){Test-DuneDockerRouteQualified -Method POST -Path $path|Should -BeFalse}
     }
 }
+
+Describe 'Native player coordinate method boundary' {
+    It 'opens only exact destination read teleport and respawn methods' {
+        Test-DuneDockerRouteQualified -Method GET -Path '/api/gameplay/players/teleport-destinations'|Should -BeTrue
+        Test-DuneDockerRouteQualified -Method POST -Path '/api/gameplay/players/teleport-destinations'|Should -BeFalse
+        foreach($suffix in @('teleport-to-player','teleport-to-location','set-respawn')){
+            $path='/api/gameplay/players/'+$suffix
+            Test-DuneDockerRouteQualified -Method POST -Path $path|Should -BeTrue
+            Test-DuneDockerRouteQualified -Method DELETE -Path $path|Should -BeFalse
+            Test-DuneDockerRouteQualified -Method POST -Path ($path+'/extra')|Should -BeFalse
+        }
+    }
+}

@@ -977,6 +977,7 @@ function Invoke-DunePlayerTeleportToPlayer {
         [long]$TargetPawnId,
         [Nullable[long]]$PartitionId = $null
     )
+    if($env:DST_HOSTING_BACKEND -eq 'docker'){return Invoke-DuneDockerPlayerTeleportToPlayer -Ip $Ip -SourcePawnId $SourcePawnId -TargetPawnId $TargetPawnId -PartitionId $PartitionId}
     if ($SourcePawnId -le 0) { return @{ ok = $false; error = 'source_pawn_id is required.' } }
     if ($TargetPawnId -le 0) { return @{ ok = $false; error = 'target_pawn_id is required.' } }
 
@@ -1081,6 +1082,7 @@ function Get-DuneTeleportDestinationById {
 # offline path uses.
 function Invoke-DunePlayerTeleportToLocation {
     param([string]$Ip, [long]$AccountId, [string]$Destination)
+    if($env:DST_HOSTING_BACKEND -eq 'docker'){return Invoke-DuneDockerPlayerDestinationPlacement -Ip $Ip -AccountId $AccountId -Destination $Destination}
     if ($AccountId -le 0) { return @{ ok = $false; error = 'account_id is required.' } }
     $dest = Get-DuneTeleportDestinationById -Id $Destination
     if (-not $dest) { return @{ ok = $false; error = "unknown destination '$Destination'." } }
@@ -1107,6 +1109,7 @@ function Invoke-DunePlayerTeleportToLocation {
 # to now so the new point sorts as the most recent. Offline-only at the route.
 function Invoke-DunePlayerSetRespawn {
     param([string]$Ip, [long]$AccountId, [string]$Destination)
+    if($env:DST_HOSTING_BACKEND -eq 'docker'){return Invoke-DuneDockerPlayerDestinationPlacement -Ip $Ip -AccountId $AccountId -Destination $Destination -Respawn}
     if ($AccountId -le 0) { return @{ ok = $false; error = 'account_id is required.' } }
     $dest = Get-DuneTeleportDestinationById -Id $Destination
     if (-not $dest) { return @{ ok = $false; error = "unknown destination '$Destination'." } }
