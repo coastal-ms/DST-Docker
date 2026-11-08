@@ -103,7 +103,11 @@ async function chooseFiles(folder = false) {
 
 export function chooseBrowserClientFiles() { return chooseFiles() }
 
-export async function chooseBrowserClientFolder() {
+export async function chooseBrowserClientFolder(options: { direct?: boolean } = {}) {
+  // Dune's normal Windows config is in AppData. Chromium blocks that entire
+  // tree in File System Access, even over trusted HTTPS. Folder imports use
+  // explicit File selections and remain available for that normal location.
+  if (!options.direct) return chooseFiles(true)
   const picker = (window as Window & { showDirectoryPicker?: (options: { mode: string; id: string }) => Promise<Directory> }).showDirectoryPicker
   if (!picker) return chooseFiles(true)
   let selected: Directory

@@ -527,12 +527,12 @@ export function GameConfig({ mode = 'standard', embedded = false, section = 'adv
     void refreshClient()
   }, [refreshClient])
 
-  const onBrowseClientDir = useCallback(async (filesOnly = false) => {
+  const onBrowseClientDir = useCallback(async (filesOnly = false, direct = false) => {
     setClientErr(null)
     setClientBusy(true)
     try {
       if (dockerEdition) {
-        const info = await (filesOnly ? chooseBrowserClientFiles() : chooseBrowserClientFolder())
+        const info = await (filesOnly ? chooseBrowserClientFiles() : chooseBrowserClientFolder({ direct }))
         setClientInfo(info); setClientDirInput(info.dir)
         setClientMsg(info.browserDelivery === 'download'
           ? 'Client files selected. Reviewed changes download with exact originals as backups; you install them manually while Dune is closed.'
@@ -1561,7 +1561,7 @@ export function GameConfig({ mode = 'standard', embedded = false, section = 'adv
             }
           >
             <p className="text-xs text-text-muted mb-3">These settings affect this PC on every server. Close Dune before applying changes.</p>
-            {dockerEdition && <p className="mb-3 text-xs text-text-muted">Select your client config folder, or select Game.ini and Engine.ini to download reviewed updates with original backups. Close Dune before installing downloaded files, then select them again to verify.</p>}
+            {dockerEdition && <p className="mb-3 text-xs text-text-muted">Choose your client config folder once; DST identifies Game.ini and Engine.ini. The browser calls this an upload, but DST reads only those two files and ignores other folder contents. Reviewed changes download with original backups. Close Dune, install the updated files, then select the folder again to verify. Browsers block direct writes to Dune&apos;s normal AppData folder, including over HTTPS.</p>}
             <label className="mb-3 flex items-start gap-3 rounded-lg border border-warning/30 bg-warning/5 p-3 cursor-pointer select-none">
               <input
                 type="checkbox"
@@ -1651,6 +1651,11 @@ export function GameConfig({ mode = 'standard', embedded = false, section = 'adv
                 <Icon name="Save" size={14} /> Save
               </button>}
             </div>
+            {dockerEdition && <details className="mt-3 text-xs text-text-muted">
+              <summary className="cursor-pointer">Advanced: writable working folders</summary>
+              <p className="mt-2 mb-2">Direct browser writes are available only for folders your browser permits. Use this for a working copy outside protected locations. It cannot grant access to AppData or install changes into the game&apos;s normal config folder.</p>
+              <button type="button" onClick={() => void onBrowseClientDir(false, true)} disabled={clientBusy} className="btn-secondary">Use writable working folder</button>
+            </details>}
             {clientInfo && (
               <div className="text-[11px] text-text-dim mt-2 font-mono break-all space-y-0.5">
                 {(['game', 'engine'] as const).map(file => {

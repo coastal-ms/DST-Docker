@@ -60,7 +60,7 @@ describe('Browser-selected player files', () => {
       return { client: client(body.files.game.raw), applied: 1, changes: body.mode === 'apply' ? { engine: { before: body.files.engine.raw, after: '[ConsoleVariables]\nVehicle.MaxVehiclesPerPlayer=20\n', created: false, applied: 1 } } : {} }
     })
     const module = await import('../src/api/browserClientFiles')
-    await module.chooseBrowserClientFolder()
+    await module.chooseBrowserClientFolder({ direct: true })
     const updates = [{ file: 'engine' as const, section: 'ConsoleVariables', key: 'Vehicle.MaxVehiclesPerPlayer', value: '20' }]
     await module.applyBrowserClientSettings(updates, true)
     expect(f.events).toEqual([])
@@ -80,7 +80,7 @@ describe('Browser-selected player files', () => {
       if (body.mode === 'apply') f.files.set('Engine.ini', '[Manual]\nDoNotOverwrite=yes\n')
       return { client: client(), applied: 1, changes: body.mode === 'apply' ? { engine: { before: body.files.engine.raw, after: 'desired', created: false, applied: 1 } } : {} }
     })
-    const module = await import('../src/api/browserClientFiles'); await module.chooseBrowserClientFolder()
+    const module = await import('../src/api/browserClientFiles'); await module.chooseBrowserClientFolder({ direct: true })
     await expect(module.applyBrowserClientSettings([{ file: 'engine', section: 'ConsoleVariables', key: 'Vehicle.MaxVehiclesPerPlayer', value: '20' }])).rejects.toThrow('changed outside this review')
     expect(f.events).toEqual([]); expect(f.files.get('Engine.ini')).toContain('DoNotOverwrite=yes')
   })
@@ -93,6 +93,19 @@ function selectedFile(name: string, text: string, bom = false) {
 }
 
 describe('Portable browser client downloads', () => {
+  it('imports the normal folder without invoking a protected-directory API even when HTTPS exposes it', async () => {
+    const picker = vi.fn(async () => { throw new DOMException('Protected AppData folder', 'NotAllowedError') })
+    Object.defineProperty(window, 'showDirectoryPicker', { configurable: true, value: picker })
+    request.mockImplementation(async () => ({ client: client(), changes: {} }))
+    const module = await import('../src/api/browserClientFiles')
+    const result = module.chooseBrowserClientFolder()
+    const input = document.querySelector<HTMLInputElement>('input[type="file"]')!
+    expect(input.hasAttribute('webkitdirectory')).toBe(true)
+    const file = Object.assign(selectedFile('Game.ini', '[Manual]\nKeep=original\n'), { webkitRelativePath: 'Windows/Game.ini' })
+    Object.defineProperty(input, 'files', { value: [file] }); input.dispatchEvent(new Event('change'))
+    expect((await result).browserDelivery).toBe('download')
+    expect(picker).not.toHaveBeenCalled()
+  })
   it('opens a folder picker without secure directory handles and reads only its direct client INIs', async () => {
     vi.useFakeTimers()
     request.mockImplementation(async (_path, init) => {
