@@ -102,6 +102,14 @@ case "${1:-up}" in
     compose build map-observer-image scaler-image regis-tools-image
     compose pull file-browser-image
     compose build
+    # Upgrade the earlier separate-port proxy before replacing its app. Keep
+    # the selected secure address, its authority and the existing owner data.
+    if [ -z "$task_port" ] && [ -f "$task_https_override" ] && ! python3 -c 'import json,sys;raise SystemExit(0 if json.load(open(sys.argv[1])).get("x-dst-https-format")==2 else 1)' "$task_https_override"; then
+      task_tls_address=$(python3 -c 'import json,sys,urllib.parse;print(urllib.parse.urlsplit(json.load(open(sys.argv[1]))["x-dst-https-origin"]).hostname)' "$task_https_override")
+      task_tls_port=$(python3 -c 'import json,sys,urllib.parse;print(urllib.parse.urlsplit(json.load(open(sys.argv[1]))["x-dst-https-origin"]).port)' "$task_https_override")
+      configure_https
+      compose stop https
+    fi
     if [ -n "$task_port" ]; then
       if [ -f "$task_https_override" ]; then
         task_tls_address=$(python3 -c 'import json,sys,urllib.parse;print(urllib.parse.urlsplit(json.load(open(sys.argv[1]))["x-dst-https-origin"]).hostname)' "$task_https_override")

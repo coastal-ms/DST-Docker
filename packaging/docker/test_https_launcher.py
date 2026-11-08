@@ -28,7 +28,7 @@ class HttpsLauncherTests(unittest.TestCase):
             tools=release/'packaging/docker';tools.mkdir(parents=True)
             shutil.copy(Path(__file__).with_name('portal_urls.py'),tools/'portal_urls.py')
             shutil.copy(Path(__file__).with_name('mirror_config.py'),tools/'mirror_config.py')
-            (tools/'https.py').write_text("import json,sys\na=sys.argv; value=lambda flag:a[a.index(flag)+1]\np=value('--output'); old=json.load(open(p)); old['x-dst-https-origin']='https://'+value('--address')+':'+value('--port'); old['x-dst-http-internal-port']=int(value('--upstream-port')); json.dump(old,open(p,'w'))\n")
+            (tools/'https.py').write_text("import json,sys\na=sys.argv; value=lambda flag:a[a.index(flag)+1]\np=value('--output'); old=json.load(open(p)); old['x-dst-https-origin']='https://'+value('--address')+':'+value('--port'); old['x-dst-http-internal-port']=int(value('--upstream-port')); old['x-dst-https-format']=2; json.dump(old,open(p,'w'))\n")
             self.releases.append(release)
         self.override=self.prefix/'https.compose.json'
         self.override.write_text(json.dumps({'x-dst-https-origin':'https://192.0.2.1:8443','services':{}}))
@@ -94,3 +94,16 @@ class HttpsLauncherTests(unittest.TestCase):
         changed=self.run_launcher('mirror-folder',str(self.root/'different-folder'),release=1)
         self.assertNotEqual(changed.returncode,0)
         self.assertEqual(override.read_bytes(),original)
+
+    def test_up_upgrades_legacy_https_without_changing_selected_secure_address(self):
+        prepared=self.run_launcher('mirror-folder',str(self.root/'copies'))
+        self.assertEqual(prepared.returncode,0,prepared.stderr)
+        result=self.run_launcher('up');self.assertEqual(result.returncode,0,result.stderr)
+        value=json.loads(self.override.read_text())
+        self.assertEqual(value['x-dst-https-format'],2)
+        self.assertEqual(value['x-dst-https-origin'],'https://192.0.2.1:8443')
+        self.assertNotEqual(value['x-dst-http-internal-port'],8443)
+        calls=self.log.read_text();self.assertLess(calls.index('stop https'),calls.index('up --no-build -d'))
+        previous=self.log.read_text().count('stop https')
+        result=self.run_launcher('up',release=1);self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(self.log.read_text().count('stop https'),previous)
