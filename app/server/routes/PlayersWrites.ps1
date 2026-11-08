@@ -749,8 +749,18 @@ Register-DuneRoute -Method POST -Path '/api/gameplay/players/update-tags' -Handl
     try {
         $acct = Get-DuneBodyInt -Body $body -Name 'account_id'
         if ($null -eq $acct -or $acct -le 0) { Write-DuneError -Response $res -Status 400 -Message 'account_id is required.'; return }
-        $add  = @(Get-DuneBodyValue -Body $body -Name 'add')
-        $rem  = @(Get-DuneBodyValue -Body $body -Name 'remove')
+        if($env:DST_HOSTING_BACKEND -eq 'docker'){
+            if($body -is [System.Collections.IDictionary]){$add=$body['add']; $rem=$body['remove']}
+            else{$add=$body.add; $rem=$body.remove}
+            foreach($values in @($add,$rem)){
+                if($null -ne $values -and ($values -is [string] -or $values -isnot [System.Collections.IEnumerable])){
+                    Write-DuneError -Response $res -Status 400 -Message 'add and remove must be arrays of tags.'; return
+                }
+            }
+        }else{
+            $add  = @(Get-DuneBodyValue -Body $body -Name 'add')
+            $rem  = @(Get-DuneBodyValue -Body $body -Name 'remove')
+        }
         Invoke-DunePlayerWriteRoute -Response $res -Action {
             param($ip) Invoke-DunePlayerUpdateTags -Ip $ip -AccountId ([long]$acct) -Add $add -Remove $rem
         }

@@ -1366,6 +1366,7 @@ function Get-DunePlayerTagsLive {
 
 function Invoke-DunePlayerSetTags {
     param([string]$Ip, [long]$AccountId, [string[]]$Tags)
+    if($env:DST_HOSTING_BACKEND -eq 'docker'){return Invoke-DuneDockerPlayerTags -Ip $Ip -AccountId $AccountId -Add $Tags -Replace}
     $clean = @()
     foreach ($t in @($Tags)) {
         $s = ([string]$t).Trim()
@@ -1390,6 +1391,7 @@ function Invoke-DunePlayerSetTags {
 # rep cascades, journey hooks) fires correctly.
 function Invoke-DunePlayerUpdateTags {
     param([string]$Ip, [long]$AccountId, [string[]]$Add, [string[]]$Remove)
+    if($env:DST_HOSTING_BACKEND -eq 'docker'){return Invoke-DuneDockerPlayerTags -Ip $Ip -AccountId $AccountId -Add $Add -Remove $Remove}
     if ($AccountId -le 0) { return @{ ok = $false; error = 'account_id is required.' } }
     $addClean = @(); foreach ($t in @($Add))    { $s = ([string]$t).Trim(); if ($s -and $s.Length -le 128) { $addClean += $s } }
     $remClean = @(); foreach ($t in @($Remove)) { $s = ([string]$t).Trim(); if ($s -and $s.Length -le 128) { $remClean += $s } }

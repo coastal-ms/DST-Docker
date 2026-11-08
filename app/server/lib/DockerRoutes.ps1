@@ -39,6 +39,7 @@ function Test-DuneDockerLandsraadRoute {
 
 function Test-DuneDockerRouteQualified {
     param([string]$Method,[string]$Path)
+    if($Method -ceq 'POST' -and $Path -cin @('/api/gameplay/players/tags','/api/gameplay/players/update-tags')){return $true}
     if($Method -ceq 'GET' -and $Path -ceq '/api/gameplay/players/teleport-destinations'){return $true}
     if($Method -ceq 'POST' -and $Path -cin @('/api/gameplay/players/teleport-to-player','/api/gameplay/players/teleport-to-location','/api/gameplay/players/set-respawn')){return $true}
     if($Path -ceq '/api/gameplay/chat-commands'){return $Method -cin @('GET','PUT')}

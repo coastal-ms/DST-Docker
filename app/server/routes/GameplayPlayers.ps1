@@ -629,7 +629,13 @@ Register-DuneRoute -Method POST -Path '/api/gameplay/players/tags' -Handler {
     try {
         $aid = Get-DuneBodyInt -Body $body -Name 'account_id'
         if ($null -eq $aid -or $aid -le 0) { Write-DuneError -Response $res -Status 400 -Message 'account_id is required.'; return }
-        $raw = Get-DuneBodyValue -Body $body -Name 'tags'
+        if($env:DST_HOSTING_BACKEND -eq 'docker'){
+            # Preserve a one-element JSON array; the scalar helper enumerates it.
+            $raw=$body.tags
+            if($null -eq $raw -or $raw -is [string] -or $raw -isnot [System.Collections.IEnumerable]){
+                Write-DuneError -Response $res -Status 400 -Message 'tags must be an array (use [] to clear all tags).'; return
+            }
+        }else{$raw = Get-DuneBodyValue -Body $body -Name 'tags'}
         $tags = @()
         if ($raw -is [System.Collections.IEnumerable] -and -not ($raw -is [string])) {
             foreach ($t in $raw) { $tags += ([string]$t) }

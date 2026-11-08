@@ -3,6 +3,13 @@ BeforeAll {
     Import-DstLib 'DockerRoutes.ps1'
 }
 Describe 'Docker adapter routing boundary' {
+    It 'qualifies exact native character tag write methods' {
+        foreach($path in @('/api/gameplay/players/tags','/api/gameplay/players/update-tags')){
+            Test-DuneDockerRouteQualified -Method POST -Path $path|Should -BeTrue
+            Test-DuneDockerRouteQualified -Method DELETE -Path $path|Should -BeFalse
+            Test-DuneDockerRouteQualified -Method POST -Path ($path+'/extra')|Should -BeFalse
+        }
+    }
     It 'allows only the exact startup preference write through the native Owner host exception' {
         Test-DuneDockerOwnerHostRoute -Method PUT -Path '/api/gameconfig/retail-startup-sync'|Should -BeTrue
         foreach($method in @('GET','POST','DELETE')){Test-DuneDockerOwnerHostRoute -Method $method -Path '/api/gameconfig/retail-startup-sync'|Should -BeFalse}
