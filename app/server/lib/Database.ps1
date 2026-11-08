@@ -26,7 +26,7 @@ function Get-DuneDbContext {
         if(-not $reply.ok){return @{ok=$false;status=503;message='Docker database availability could not be verified. Retry when management is available.'}}
         $database=$reply.data.database
         if($database -and ($database.state -ne 'running' -or $database.health -in @('starting','unhealthy'))){
-            return @{ok=$false;status=503;message='The Docker game database is stopped or not ready. Start the battlegroup when you are ready to use database controls.'}
+            return @{ok=$false;status=503;message='The Docker game database is stopped or not ready. Open Database and choose Start database when you are ready to use database controls.'}
         }
         return @{ ok=$true; ip='docker'; backend='docker' }
     }
