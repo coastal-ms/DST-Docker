@@ -94,4 +94,4 @@ The 458-route released baseline is retained for the parity audit. The current di
 
 Solo stays in the standalone Windows DST application; Docker hosts servers on native Linux and WSL. Distribution uses one shell install command, followed by setup in the browser. The packaged script contains its source: run `bash ./dst-docker-install-current.sh` after obtaining the private build, optionally adding `--port PORT` or `--prefix DIRECTORY`. No public download endpoint is published. VM-data import and Discord portal login remain deferred.
 
-This work has not been published. Do not present the preview as production-ready or claim Defender results or comparative memory savings without measurement.
+This work is available only in the private repository; no public Docker release or download endpoint has been published. Do not present the preview as production-ready or claim Defender results or comparative memory savings without measurement.

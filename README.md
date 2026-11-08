@@ -2,7 +2,7 @@
 
 Run Dune Server Tool from a browser, with the server and management services inside Linux or Windows WSL.
 
-This is the private development repository for DST's Docker hosting option. It remains part of DST. Feature parity and installation testing are still in progress.
+This is the private development repository for DST's Docker hosting option. It remains part of DST. Native installation and adapted server workflows have isolated engineering qualification; current-build game-client acceptance remains before public release.
 
 The Docker edition manages self-hosted servers on native Linux or Windows WSL. Solo save tools stay in the standalone Windows DST application and are outside this edition's scope. Docker server hosting does not require a Windows companion.
 
@@ -10,7 +10,7 @@ The Docker edition manages self-hosted servers on native Linux or Windows WSL. S
 
 The intended setup is: install WSL on Windows, open Ubuntu, run one DST install command, then finish setup in the browser. Native Linux users will run the same install command directly.
 
-The self-contained installer has passed isolated Ubuntu dependency installation and browser startup. Wider clean-machine, upgrade and game acceptance remain in progress. There is no stable installer download command yet. The private development setup below can use the installer directly from a committed checkout.
+The self-contained installer has passed isolated Ubuntu installation and repeated upgrades, including existing Owner login, HTTPS, saved resource settings and native server startup. Fresh game-client acceptance remains separate. There is no public installer download endpoint. With the private packaged script available locally, run `bash ./dst-docker-install-current.sh`; it prepares supported prerequisites and finishes setup in the browser. The development setup below runs from a committed checkout.
 
 ## Windows: prepare WSL
 
@@ -103,7 +103,7 @@ Stop the battlegroup before applying different allocations. Saving never stops i
 
 Optional in-game commands are configured on **Players → Community tools**. They are off by default, with separate command and channel selections. Messages are consumed once; DST does not save a chat history. Cooldown timestamps prevent repeated use, and switching the listener off removes its queue.
 
-This is an unfinished Docker preview. Some DST actions still need Linux/browser adapters, and clean-machine installation and upgrade acceptance are not complete. The existing DST interface and feature behavior are the parity baseline.
+The existing DST interface and feature behavior are the parity baseline. Applicable tools reuse shared gameplay logic through native Linux database and messaging connections. Docker replaces VM administration with container lifecycle and resource controls; local player INI changes use complete manual instructions. Fresh game-client join and ordinary travel on the current build remain acceptance work. Isolated Tank preparation and rollback do not establish its in-game behavior.
 
 See [Docker development details](packaging/docker/README.md) for the current implementation and remaining work. VM-data migration and Discord portal login are deferred.
 
