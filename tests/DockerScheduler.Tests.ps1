@@ -278,4 +278,32 @@ Describe 'Native daily maintenance execution' {
         Invoke-DuneDiscordStateMonitorTick
         Should -Invoke Send-DuneDiscordEmbed -Times 1
     }
+
+    It 'saves the existing update notification option without enabling automatic updates' {
+        $result=Set-DuneRestartSchedule -Enabled $false -Time '04:00' -TimeZone 'UTC' -DiscordNotifyUpdate $true -DiscordWebhookUrl 'https://discord.com/api/webhooks/123456789012345678/fixture_token_not_real'
+        $result.ok|Should -BeTrue
+        $saved=Get-DuneRestartSchedule
+        $saved.discordNotifyUpdate|Should -BeTrue
+        $saved.applyFuncomUpdates|Should -BeFalse
+        $saved.enabled|Should -BeFalse
+    }
+
+    It 'uses the shared update transition once and respects the saved opt-out' {
+        $state=Get-DuneRestartSchedule;$state.discordNotifyUpdate=$true
+        $state.discordWebhookUrl='https://discord.com/api/webhooks/123456789012345678/fixture_token_not_real'
+        $state.installedBuild='120';$state.latestBuild='121';$state.updateAvailable=$false
+        Save-DuneRestartSchedule $state
+        $script:DuneDiscordLastUpdateAvailable=$null
+        Mock Get-DuneDockerStatus {@{host=@{running=$true};bg=@{state='stopped';title='Fixture';gameServers=@()}}}
+        Invoke-DuneDiscordStateMonitorTick
+        $state.updateAvailable=$true;Save-DuneRestartSchedule $state
+        Invoke-DuneDiscordStateMonitorTick
+        Invoke-DuneDiscordStateMonitorTick
+        Should -Invoke Send-DuneDiscordEmbed -Times 1 -ParameterFilter {$Embed.title -match 'Update' -and $Embed.fields[0].value -eq '120' -and $Embed.fields[1].value -eq '121'}
+        $state.updateAvailable=$false;Save-DuneRestartSchedule $state
+        Invoke-DuneDiscordStateMonitorTick
+        $state.discordNotifyUpdate=$false;$state.updateAvailable=$true;Save-DuneRestartSchedule $state
+        Invoke-DuneDiscordStateMonitorTick
+        Should -Invoke Send-DuneDiscordEmbed -Times 1
+    }
 }

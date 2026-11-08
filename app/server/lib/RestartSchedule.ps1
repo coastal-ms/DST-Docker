@@ -202,7 +202,6 @@ function Set-DuneRestartSchedule {
         }
     }
     if($env:DST_HOSTING_BACKEND -eq 'docker'){
-        if($DiscordNotifyUpdate){return @{ok=$false;status=501;message='Update notifications are not available in this Docker preview yet. Your settings were not changed.'}}
         if($TimeZone){try{$null=[TimeZoneInfo]::FindSystemTimeZoneById($TimeZone)}catch{return @{ok=$false;status=400;message='Choose a valid time zone.'}}}
         if($Enabled){$health=Get-DuneDockerSchedulerHealth;if(-not $health.alive){return @{ok=$false;status=503;message=$health.message}}}
     }

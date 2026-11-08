@@ -424,13 +424,12 @@ export function ScheduledRestarts() {
                     <input
                       type="checkbox"
                       checked={discordNotifyUpdate}
-                      disabled={sched?.hostingBackend === 'docker' && !discordNotifyUpdate}
                       onChange={e => setDiscordNotifyUpdate(e.target.checked)}
                       className="h-4 w-4 accent-accent mt-0.5"
                     />
                     <div>
                       <span className="text-sm font-medium block leading-none">Update Available</span>
-                      <span className="text-[11px] text-text-dim mt-1 block">{sched?.hostingBackend === 'docker' ? 'Available with server update checks in a future Docker preview.' : 'When the scheduled-restart update check finds a new Funcom build.'}</span>
+                      <span className="text-[11px] text-text-dim mt-1 block">When the server update check finds a new Funcom build.</span>
                     </div>
                   </label>
                   <div className="flex items-start gap-2 mt-1 pt-2 border-t border-border/50 text-[11px] text-text-dim">
