@@ -117,12 +117,11 @@ Register-DuneRoute -Method POST -Path '/api/commands/run/{name}' -Handler {
         return
     }
 
-    # Remote callers may only run an explicit allow-list of safe,
-    # non-destructive commands. Test-DuneLocalOnlyRequest recognizes direct LAN
-    # clients as well as tunnels whose proxy connects from loopback. Keep this
-    # list in sync with the Commands page's REMOTE_ALLOWED set.
+    # Docker always uses account permissions, including direct loopback requests.
+    # Windows retains its host-local allowance. Keep the remote command list
+    # in sync with the Commands page's REMOTE_ALLOWED set.
     $remoteAllowedCommands = @('startup', 'start', 'restart', 'start-vm', 'reboot', 'apply-inis')
-    $isRemote = -not (Test-DuneLocalOnlyRequest -Request $req)
+    $isRemote = $env:DST_HOSTING_BACKEND -eq 'docker' -or -not (Test-DuneLocalOnlyRequest -Request $req)
     $portalRole = [string]$routeParams.portalAccountRole
     $authorizedUpdate = ($portalRole -in @('owner','admin') -and $name -in @('update','update-with-tanks'))
     $dockerOwnerCommand=($env:DST_HOSTING_BACKEND -eq 'docker' -and $portalRole -eq 'owner' -and

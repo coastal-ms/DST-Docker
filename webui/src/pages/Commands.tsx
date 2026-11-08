@@ -613,7 +613,7 @@ export function Commands() {
   // Remote (tunnel) viewers get a read-only, curated page: only the allow-listed
   // commands render (see `grouped`), and layout editing — drag/reorder, rename,
   // reset — is disabled so a remote user can't rearrange the host's layout.
-  const readOnly = !isLocalViewer() && !(docker && portalRole === 'owner')
+  const readOnly = docker ? portalRole !== 'owner' : !isLocalViewer()
   const pageLinks = getVisibleCommandPageLinks(isLocalViewer() && !docker)
   const showWorkbench = updatesOnly || Boolean(requestedCategory) || (commandDeck && (readOnly || !editingLayout))
   const tasks = SECTION_INDICES.flatMap<CommandTask>(idx => [

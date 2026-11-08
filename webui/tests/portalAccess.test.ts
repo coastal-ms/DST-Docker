@@ -85,6 +85,10 @@ describe('Browser Portal role access', () => {
     for (const command of ['stop', 'logs-export', 'operator-logs-export']) {
       expect(canAccessCommand(command, false, 'owner', true)).toBe(true)
       expect(canAccessCommand(command, false, 'admin', true)).toBe(false)
+      expect(canAccessCommand(command, true, 'admin', true)).toBe(false)
+      expect(canAccessCommand(command, true, null, true)).toBe(false)
+      expect(canAccessCommand(command, true, 'owner', true)).toBe(true)
+      expect(canAccessCommand(command, true, 'admin', false)).toBe(true)
       expect(canAccessCommand(command, false, null, true)).toBe(false)
       expect(canAccessCommand(command, false, 'player', true)).toBe(false)
       expect(canAccessCommand(command, false, 'owner', false)).toBe(false)
