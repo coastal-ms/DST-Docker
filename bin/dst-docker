@@ -156,8 +156,19 @@ case "${1:-up}" in
     printf '\nThe folder is prepared. Run up to apply its mount, then enable Local backup mirror in Database. Existing copies are never pruned by DST.\n'
     ;;
   url) portal_links ;;
+  owners)
+    [ "$#" -eq 1 ] || { echo 'Usage: sh bin/dst-docker owners' >&2; exit 1; }
+    compose exec -T dst pwsh -NoLogo -NoProfile -File /opt/dst/packaging/docker/owner-recovery.ps1 -Action List
+    ;;
+  reset-owner)
+    [ "$#" -eq 2 ] || { echo 'Usage: sh bin/dst-docker reset-owner OWNER_USERNAME' >&2; exit 1; }
+    printf 'Reset the password for Owner "%s"? This clears their sessions and shared sign-in lockouts. Type RESET OWNER: ' "$2"
+    IFS= read -r task_owner_confirmation || { echo 'Owner reset cancelled.' >&2; exit 1; }
+    [ "$task_owner_confirmation" = 'RESET OWNER' ] || { echo 'Owner reset cancelled.' >&2; exit 1; }
+    compose exec -T dst pwsh -NoLogo -NoProfile -File /opt/dst/packaging/docker/owner-recovery.ps1 -Action Reset -Username "$2" -Confirmation "$task_owner_confirmation"
+    ;;
   status) compose ps ;;
   logs) compose logs --tail=80 ;;
   down) compose down ;;
-  *) echo 'Usage: sh bin/dst-docker up [--port PORT] | port PORT | https HOST_IPV4 [HTTPS_PORT] | https-root OUTPUT.crt | mirror-folder [NEW_FOLDER] | url | status | logs | down' >&2; exit 1 ;;
+  *) echo 'Usage: sh bin/dst-docker up [--port PORT] | port PORT | https HOST_IPV4 [HTTPS_PORT] | https-root OUTPUT.crt | mirror-folder [NEW_FOLDER] | owners | reset-owner OWNER_USERNAME | url | status | logs | down' >&2; exit 1 ;;
 esac

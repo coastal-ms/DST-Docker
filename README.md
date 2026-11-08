@@ -68,6 +68,15 @@ sh bin/dst-docker url
 
 Owners can manage browser accounts in **Settings → Browser Portal accounts**. Current Docker server roles are Owner and Admin. New accounts must replace their initial password at first sign-in. Owners can reset passwords, revoke sessions, change roles, disable accounts and delete accounts. The last enabled Owner is protected, and account sign-in stays enabled.
 
+If no Owner can sign in, open the Linux or WSL terminal on the Docker host. With the console running, run these commands from the installation folder (`~/.local/share/dst-docker/current` for a default standalone installation, or the checkout folder for development):
+
+```sh
+sh bin/dst-docker owners
+sh bin/dst-docker reset-owner "OWNER_USERNAME"
+```
+
+Use the exact existing Owner username and type `RESET OWNER` at the prompt. Recovery re-enables that Owner, replaces their password, revokes their sessions and clears sign-in lockouts. The terminal shows a one-time password; sign in and replace it before continuing. Other account passwords and sessions stay unchanged. A custom standalone installation uses the `current` folder under its chosen install path. Recovery does not start the database or maps.
+
 ## Manage this installation
 
 Run these commands from the `DST-Docker` folder:

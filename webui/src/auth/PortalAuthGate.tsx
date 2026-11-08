@@ -115,7 +115,12 @@ function Login({ onSuccess }: { onSuccess: (status: PortalAuthStatus) => void })
           <Icon name={busy ? 'Loader2' : 'LogIn'} className={busy ? 'animate-spin' : ''} />
           {busy ? 'Signing in...' : 'Sign in'}
         </button>
-        <p className="text-xs text-text-dim">Forgotten passwords are reset by the server host in Settings.</p>
+        {import.meta.env.VITE_DST_EDITION === 'docker' ? <details className="text-xs text-text-dim">
+          <summary className="cursor-pointer">Forgotten password?</summary>
+          <p className="mt-2">Another Owner can reset your password in Settings. If no Owner can sign in, open the Linux or WSL terminal on the Docker host and run these commands from your DST installation folder:</p>
+          <pre className="mt-2 whitespace-pre-wrap">{'sh bin/dst-docker owners\nsh bin/dst-docker reset-owner "OWNER_USERNAME"'}</pre>
+          <p className="mt-2">The standalone install folder is ~/.local/share/dst-docker/current by default. For a custom location, use its current folder. Choose an existing Owner and type RESET OWNER when prompted. Sign in with the one-time password shown, then replace it.</p>
+        </details> : <p className="text-xs text-text-dim">Forgotten passwords are reset by the server host in Settings.</p>}
       </form>
     </AuthFrame>
   )

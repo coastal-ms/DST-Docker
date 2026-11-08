@@ -34,6 +34,7 @@ COPY --from=platform-tools /out/ ./app/tools/platform/
 COPY dune-server.ps1 dune-server.config.example LICENSE NOTICE ./
 COPY --from=web /src/webui/dist/ ./webui/dist/
 COPY packaging/docker/healthcheck.ps1 /opt/dst/healthcheck.ps1
+COPY packaging/docker/owner-recovery.ps1 /opt/dst/packaging/docker/owner-recovery.ps1
 COPY packaging/docker/set-console-port.ps1 /opt/dst/packaging/docker/set-console-port.ps1
 COPY packaging/docker/database.py /opt/dst/packaging/docker/database.py
 COPY packaging/docker/manager-client.py /opt/dst/packaging/docker/manager-client.py

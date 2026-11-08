@@ -1,4 +1,38 @@
 # One-time owner bootstrap, authorized by the installer's private launch key.
+function Get-DuneDockerOwnersForHost {
+    if($env:DST_HOSTING_BACKEND -ne 'docker'){throw 'Owner recovery is available on the Docker host.'}
+    $setup=Get-DuneDockerOwnerSetupState
+    return @{owners=@($setup.store.accounts|Where-Object {$_.role -ceq 'owner'}|ForEach-Object {@{username=[string]$_.username;enabled=[bool]$_.enabled}})}
+}
+
+function Reset-DuneDockerOwnerForHost {
+    param([string]$Username,[string]$Confirmation)
+    if($env:DST_HOSTING_BACKEND -ne 'docker'){throw 'Owner recovery is available on the Docker host.'}
+    if($Confirmation -cne 'RESET OWNER'){throw 'Type RESET OWNER exactly to confirm the selected Owner password reset.'}
+    if(-not (Test-DunePortalUsername $Username)){throw 'Supply the exact existing Owner username.'}
+    return Invoke-DunePortalAuthLock {
+        $store=(Get-DuneDockerOwnerSetupState).store
+        $ownerCandidates=@($store.accounts|Where-Object {$_.normalizedUsername -ceq (Normalize-DunePortalUsername $Username)})
+        if($ownerCandidates.Count -ne 1 -or $ownerCandidates[0].role -cne 'owner' -or [string]$ownerCandidates[0].id -cnotmatch '^[a-f0-9]{32}$'){
+            throw 'Exactly one existing Owner must match that username. List Owners first; no account was changed.'
+        }
+        $account=$ownerCandidates[0]
+        $password=New-DunePortalOneTimePassword
+        $metadata=New-DunePortalPasswordHash -Password $password
+        # Revoke first: a session-storage failure cannot commit an unknown new
+        # password. The shared lock excludes concurrent account/login changes.
+        Revoke-DunePortalSessions -AccountId ([string]$account.id)
+        $now=(Get-Date).ToUniversalTime().ToString('o')
+        $account.password=$metadata;$account.mustChangePassword=$true;$account.enabled=$true
+        $account.failedCount=0;$account.lockoutUntil='';$account.locallyVerifiedAt=''
+        $account.passwordChangedAt=$now;$account.updatedAt=$now
+        $store.accountLoginEnabled=$true;$store.clientFailures=@()
+        Save-DunePortalAccountStore $store
+        Write-DunePortalAudit -Event 'host-owner-recovery' -Result 'success'
+        return @{username=[string]$account.username;oneTimePassword=$password}
+    }
+}
+
 function Get-DuneDockerOwnerSetupState {
     if($env:DST_HOSTING_BACKEND -ne 'docker'){return @{required=$false}}
     $path=Get-DunePortalAccountsPath

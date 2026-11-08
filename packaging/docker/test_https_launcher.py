@@ -39,6 +39,21 @@ class HttpsLauncherTests(unittest.TestCase):
     def run_launcher(self,*args,release=0):
         return subprocess.run(['sh',str(self.releases[release]/'bin/dst-docker'),*args],env=self.env,capture_output=True,text=True)
 
+    def test_owner_reset_requires_confirmation_and_preserves_the_exact_username_argument(self):
+        docker=Path(self.env['PATH'].split(':')[0])/'docker'
+        docker.write_text('#!/usr/bin/env python3\nimport json,os,sys\nwith open(os.environ["DST_FIXTURE_DOCKER_LOG"],"a") as stream:stream.write(json.dumps(sys.argv[1:])+"\\n")\n');docker.chmod(0o755)
+        command=['sh',str(self.releases[0]/'bin/dst-docker'),'reset-owner','Second Owner']
+        cancelled=subprocess.run(command,env=self.env,input='no\n',capture_output=True,text=True)
+        self.assertNotEqual(cancelled.returncode,0)
+        self.assertFalse(any('exec' in json.loads(line) for line in self.log.read_text().splitlines()))
+        confirmed=subprocess.run(command,env=self.env,input='RESET OWNER\n',capture_output=True,text=True)
+        self.assertEqual(confirmed.returncode,0,confirmed.stderr)
+        calls=[json.loads(line) for line in self.log.read_text().splitlines()]
+        invocation=next(args for args in calls if 'exec' in args)
+        self.assertEqual(invocation[invocation.index('-Username')+1],'Second Owner')
+        self.assertEqual(invocation[invocation.index('-Confirmation')+1],'RESET OWNER')
+        self.assertFalse(any(value in {'up','start','build','down'} for args in calls for value in args))
+
     def test_installer_upgrade_reuses_same_tls_override_outside_both_releases(self):
         for index in (0,1):
             result=self.run_launcher('status',release=index);self.assertEqual(result.returncode,0,result.stderr)
