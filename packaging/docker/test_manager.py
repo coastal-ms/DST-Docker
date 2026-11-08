@@ -19,6 +19,15 @@ class FakeEngine:
 
 
 class ManagerTests(unittest.TestCase):
+    def test_diagnostics_scope_is_accepted_by_the_persisted_export_dispatcher(self):
+        state={'id':'a'*32,'phase':'new'}
+        with patch.object(manager,'project_state',return_value=state),patch.object(manager,'save'),patch.object(manager,'public_state',return_value=state),patch.object(manager.threading,'Thread') as thread:
+            manager.dispatch({'action':'logs.export','scope':'diagnostics'},FakeEngine())
+            self.assertEqual(state['operation']['action'],'logs.export');thread.return_value.start.assert_called_once()
+        with patch.object(manager,'project_state',return_value={'id':'a'*32,'phase':'new'}),patch.object(manager,'save') as save,patch.object(manager.threading,'Thread') as thread:
+            with self.assertRaises(ValueError):manager.dispatch({'action':'logs.export','scope':'arbitrary'},FakeEngine())
+            save.assert_not_called();thread.assert_not_called()
+
     def test_cold_database_starts_existing_owned_container_then_waits_for_health(self):
         engine=Mock(spec=manager.Engine)
         engine.assert_owned.side_effect=[

@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock,patch
 import zipfile
 import log_export
 from engine import Engine, EngineError
@@ -21,6 +21,17 @@ class Logs:
 
 class LogExportTests(unittest.TestCase):
     def state(self): return {'id':'a'*32,'database':{'id':'database'},'services':{'game-1':{'id':'game'}}}
+
+    def test_diagnostics_reuses_both_scoped_collections_and_redacts_every_source(self):
+        engine=Logs();engine.inspect=Mock(return_value={'Config':{'Labels':{'com.docker.compose.project':'fixture','com.docker.compose.service':'manager'}}})
+        engine.request=Mock(return_value=[{'Id':'portal','Labels':{'com.docker.compose.service':'dst'}}])
+        with tempfile.TemporaryDirectory() as folder,patch.dict(os.environ,{'HOSTNAME':'manager'}):
+            result=log_export.export_logs(self.state(),engine,'diagnostics','d'*32,Path(folder))
+            self.assertTrue(result['complete']);self.assertEqual(result['sources'],3)
+            with zipfile.ZipFile(Path(folder)/('d'*32+'.zip')) as archive:
+                self.assertEqual(set(archive.namelist()),{'postgres.log','game-1.log','portal-dst-1.log','export-report.json'})
+                for name in ['postgres.log','game-1.log','portal-dst-1.log']:
+                    self.assertNotIn(b'fixture-secret',archive.read(name));self.assertNotIn(b'launcher-token',archive.read(name))
 
     def test_streams_owned_sources_redacts_across_frames_and_retains_only_three_archives(self):
         with tempfile.TemporaryDirectory() as folder:

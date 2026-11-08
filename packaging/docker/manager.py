@@ -1575,7 +1575,7 @@ def dispatch(request, engine=None):
                 raise ValueError('Supply JSON booleans for Tank support and the stored-Tank acknowledgement.')
             if action=='updates.apply' and (not isinstance(request.get('expectedBuild'),str) or not re.fullmatch(r'[0-9]{1,18}',request['expectedBuild']) or type(request.get('allowOnline',False)) is not bool or type(request.get('withTanks',False)) is not bool):raise ValueError('Supply a valid build and JSON boolean online-player and Tank authorization.')
             if 'publishGateway' in request and (action!='services.start' or type(request['publishGateway']) is not bool):raise ValueError('Only a typed start can select gateway publication.')
-            if action=='logs.export' and request.get('scope') not in {'battlegroup','operator'}:raise ValueError('Choose battlegroup or operator logs.')
+            if action=='logs.export' and request.get('scope') not in {'battlegroup','operator','diagnostics'}:raise ValueError('Choose battlegroup, operator or diagnostics logs.')
             if action in {'updates.apply','updates.recover','database.migrate','database.initialize','services.restart','world-restart.apply','world-restart.rollback','world-restart.research'} and any(
                 entry.get('phase') in {'preparing','running'} or entry.get('verification',{}).get('phase') in {'preparing','running'}
                 for entry in state.get('backups',{}).values()):

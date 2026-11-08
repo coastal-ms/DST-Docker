@@ -22,6 +22,9 @@ def redact(line):
 
 
 def targets(state, engine, scope):
+    if scope == 'diagnostics':
+        selected = targets(state, engine, 'battlegroup') + targets(state, engine, 'operator')
+        return list({entry[1]: entry for entry in selected}.values())
     if scope not in {'battlegroup', 'operator'}:
         raise ValueError('Choose battlegroup or operator logs.')
     project = state['id']
