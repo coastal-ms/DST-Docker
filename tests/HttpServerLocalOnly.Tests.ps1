@@ -79,6 +79,7 @@ Describe 'HTTP local-only request enforcement' {
             '/api/system/install-location',
             '/api/diagnostics/bundle',
             '/api/gameplay/players/fresh-start/snapshots-path',
+            '/api/gameplay/vehicles/names',
             '/api/commands/layout',
             '/api/commands/layout/reset',
             '/api/dune-admin-cache',
@@ -130,9 +131,9 @@ Describe 'HTTP local-only request enforcement' {
         ([regex]::Matches($source, "Register-DuneRoute[^\r\n]+-Path '/api/console' -LocalOnly -Handler")).Count | Should -Be 2
     }
 
-    It 'uses the full local-only detector for the remote command allow-list' {
+    It 'uses account-scoped Docker commands and the full local detector elsewhere' {
         $routes = Get-Content (Join-Path (Get-DstRepoRoot) 'app\server\routes\Commands.ps1') -Raw
-        $routes | Should -Match '\$isRemote = -not \(Test-DuneLocalOnlyRequest -Request \$req\)'
+        $routes | Should -Match '\$isRemote = \$env:DST_HOSTING_BACKEND -eq ''docker'' -or -not \(Test-DuneLocalOnlyRequest -Request \$req\)'
         $routes | Should -Not -Match '\$isTunneled'
         $ast = [Management.Automation.Language.Parser]::ParseInput($routes, [ref]$null, [ref]$null)
         $updateRule = $ast.Find({ param($node)

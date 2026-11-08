@@ -29,12 +29,14 @@ Describe 'Docker adapter routing boundary' {
         Test-DuneDockerRouteQualified -Method DELETE -Path '/api/gameconfig/ini-backups'|Should -BeFalse
     }
 
-    It 'qualifies fleet and bounded integrity reads while preserving vehicle mutation gates' {
+    It 'qualifies fleet reads and exact name changes while preserving other vehicle mutation gates' {
         foreach($path in @('/api/gameplay/vehicles','/api/gameplay/vehicles/700204/integrity')){
             Test-DuneDockerRouteQualified -Method GET -Path $path|Should -BeTrue
             Test-DuneDockerRouteQualified -Method POST -Path $path|Should -BeFalse
         }
-        foreach($path in @('/api/gameplay/vehicles/names','/api/gameplay/vehicles/delete','/api/gameplay/vehicles/repair','/api/gameplay/vehicles/../integrity','/api/gameplay/vehicles/0/integrity')){
+        Test-DuneDockerRouteQualified -Method POST -Path '/api/gameplay/vehicles/names'|Should -BeTrue
+        foreach($method in @('GET','PUT','DELETE')){Test-DuneDockerRouteQualified -Method $method -Path '/api/gameplay/vehicles/names'|Should -BeFalse}
+        foreach($path in @('/api/gameplay/vehicles/names/extra','/api/gameplay/vehicles/delete','/api/gameplay/vehicles/repair','/api/gameplay/vehicles/../integrity','/api/gameplay/vehicles/0/integrity')){
             Test-DuneDockerRouteQualified -Method POST -Path $path|Should -BeFalse
             Test-DuneDockerRouteQualified -Method GET -Path $path|Should -BeFalse
         }
