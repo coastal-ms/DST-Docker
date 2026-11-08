@@ -17,7 +17,8 @@ function Test-DuneDockerVehicleDeletionRoute {
 function Test-DuneDockerOwnerHostRoute {
     param([string]$Method,[string]$Path)
     return (Test-DuneDockerAccountManagementRoute -Method $Method -Path $Path) -or
-        (Test-DuneDockerVehicleDeletionRoute -Method $Method -Path $Path)
+        (Test-DuneDockerVehicleDeletionRoute -Method $Method -Path $Path) -or
+        ($Method -ceq 'PUT' -and $Path -ceq '/api/gameconfig/retail-startup-sync')
 }
 
 function Test-DuneDockerMarketBotRoute {

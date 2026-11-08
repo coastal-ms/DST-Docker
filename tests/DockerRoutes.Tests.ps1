@@ -3,6 +3,12 @@ BeforeAll {
     Import-DstLib 'DockerRoutes.ps1'
 }
 Describe 'Docker adapter routing boundary' {
+    It 'allows only the exact startup preference write through the native Owner host exception' {
+        Test-DuneDockerOwnerHostRoute -Method PUT -Path '/api/gameconfig/retail-startup-sync'|Should -BeTrue
+        foreach($method in @('GET','POST','DELETE')){Test-DuneDockerOwnerHostRoute -Method $method -Path '/api/gameconfig/retail-startup-sync'|Should -BeFalse}
+        foreach($path in @('/api/gameconfig/retail-startup-sync/extra','/api/gameconfig','/api/gameconfig/retail-server-settings')){Test-DuneDockerOwnerHostRoute -Method PUT -Path $path|Should -BeFalse}
+    }
+
     It 'bounds account administration to exact IDs and keeps login-mode changes closed' {
         foreach($method in @('GET','POST')){Test-DuneDockerAccountManagementRoute -Method $method -Path '/api/remote-access/portal-accounts'|Should -BeTrue}
         foreach($method in @('PUT','DELETE')){Test-DuneDockerAccountManagementRoute -Method $method -Path ('/api/remote-access/portal-accounts/'+('a'*32))|Should -BeTrue}

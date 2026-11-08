@@ -3,10 +3,11 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { StartupSettingsSync } from '../src/pages/gameconfig/StartupSettingsSync'
 
 const request = vi.hoisted(() => vi.fn())
-const viewer = vi.hoisted(() => ({ local: true }))
+const viewer = vi.hoisted(() => ({ local: true, owner: true }))
 vi.mock('../src/api/client', () => ({ api: request }))
+vi.mock('../src/auth/portalAccess', () => ({ usePortalAccess: () => ({ canAccessOwnerSurfaces: viewer.owner }) }))
 vi.mock('../src/util/viewer', () => ({ isLocalViewer: () => viewer.local }))
-afterEach(() => { cleanup(); vi.resetAllMocks(); viewer.local = true })
+afterEach(() => { cleanup(); vi.resetAllMocks(); viewer.local = true; viewer.owner = true; vi.unstubAllEnvs() })
 
 it('shows remote owners the saved mode without allowing a remote preference write', async () => {
   viewer.local = false
@@ -69,4 +70,32 @@ it('keeps the confirmed preference when saving fails', async () => {
   fireEvent.click(screen.getByRole('button', { name: 'Disable management' }))
   expect(await screen.findByRole('alert')).toHaveTextContent('Save failed')
   expect(toggle).toBeChecked()
+})
+
+
+it('allows the Docker Owner to manage startup settings over the server IP', async () => {
+  vi.stubEnv('VITE_DST_EDITION', 'docker')
+  viewer.local = false
+  request.mockResolvedValueOnce({ enabled: true }).mockResolvedValueOnce({ enabled: false }).mockResolvedValueOnce({ enabled: true })
+  render(<StartupSettingsSync />)
+  const toggle = screen.getByRole('checkbox')
+  await waitFor(() => expect(toggle).toBeEnabled())
+  fireEvent.click(toggle)
+  expect(screen.getByRole('alertdialog')).toHaveTextContent('server startup settings')
+  fireEvent.click(screen.getByRole('button', { name: 'Disable management' }))
+  await waitFor(() => expect(toggle).not.toBeChecked())
+  fireEvent.click(toggle)
+  await waitFor(() => expect(toggle).toBeChecked())
+  expect(request).toHaveBeenCalledTimes(3)
+})
+
+it.each([true, false])('keeps Docker Admin management disabled with local viewer %s', async local => {
+  vi.stubEnv('VITE_DST_EDITION', 'docker')
+  viewer.local = local
+  viewer.owner = false
+  request.mockResolvedValueOnce({ enabled: true })
+  render(<StartupSettingsSync />)
+  await screen.findByText('Only the Owner can change configuration management.')
+  expect(screen.getByRole('checkbox')).toBeDisabled()
+  expect(request).toHaveBeenCalledTimes(1)
 })
