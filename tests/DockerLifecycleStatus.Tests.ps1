@@ -15,6 +15,11 @@ Describe 'Docker database lifecycle presentation' {
         $status.bg.info.database|Should -Be 'Stopped'
         $status.bg.state|Should -Be 'stopped'
     }
+    It 'does not report a completed stop while an owned service still runs' {
+        $script:metadata.operation.phase='failed'
+        $script:metadata.services=@(@{component='director';state='running'})
+        (Get-DuneDockerStatus -SnapshotPath $script:snapshot -LifecycleOnly).bg.state | Should -Be 'stopping'
+    }
     It 'retains a real health failure while the database is running' {
         $script:metadata.database.state='running'
         (Get-DuneDockerStatus -SnapshotPath $script:snapshot -LifecycleOnly).bg.info.database|Should -Be 'unhealthy'

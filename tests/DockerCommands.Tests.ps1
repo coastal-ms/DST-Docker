@@ -3,6 +3,13 @@ BeforeAll {
     Import-DstLib 'Commands.ps1'
 }
 Describe 'Docker command catalogue and saved layout' {
+    It 'allows retrying an interrupted stop while containers remain active' {
+        $state=@{hostingBackend='docker';prepared=$true;desiredState='stopped';activeServices=$true;operation=@{phase='failed'}}
+        (Get-DuneCommandAvailability -Command @{Name='stop'} -State $state).available | Should -BeTrue
+        (Get-DuneCommandAvailability -Command @{Name='start'} -State $state).available | Should -BeFalse
+        $state.activeServices=$false
+        (Get-DuneCommandAvailability -Command @{Name='stop'} -State $state).available | Should -BeFalse
+    }
     BeforeEach {
         $script:savedBackend=$env:DST_HOSTING_BACKEND
         $env:DST_HOSTING_BACKEND='docker'

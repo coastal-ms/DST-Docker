@@ -84,8 +84,10 @@ function Get-DuneCommandAvailability {
         if ($State.maintenance -and $Command.Name -notin @('logs-export','operator-logs-export') -and -not ($Command.Name -eq 'update' -and $State.updateRecovery)) { return @{available=$false;reason='Server maintenance recovery is active'} }
         if ($Command.Name -notin @('start','stop','restart','startup','shutdown','reboot','apply-inis','update','update-with-tanks','logs-export','operator-logs-export')) { return @{available=$false;reason='Docker adapter is not available yet'} }
         if (-not $State.prepared) { return @{available=$false;reason='Complete Docker Setup first'} }
+        if ($Command.Name -in @('start','startup') -and $State.desiredState -ne 'running' -and $State.activeServices) { return @{available=$false;reason='Finish stopping the battlegroup before starting it again'} }
         if ($Command.Name -in @('start','startup') -and $State.desiredState -eq 'running') { return @{available=$false;reason='Battlegroup already running'} }
-        if ($Command.Name -in @('stop','shutdown','restart','reboot','apply-inis') -and $State.desiredState -ne 'running') { return @{available=$false;reason='Battlegroup is stopped'} }
+        if ($Command.Name -in @('stop','shutdown') -and $State.desiredState -ne 'running' -and -not $State.activeServices) { return @{available=$false;reason='Battlegroup is stopped'} }
+        if ($Command.Name -in @('restart','reboot','apply-inis') -and $State.desiredState -ne 'running') { return @{available=$false;reason='Battlegroup is stopped'} }
         return @{available=$true;reason=''}
     }
     # State: @{ vmExists; vmRunning; bgState ('running'|'stopped'|'unknown'|...) }
@@ -137,6 +139,7 @@ function Get-DuneCurrentState {
         $native=$reply.data
         return @{hostingBackend='docker';vmExists=$false;vmRunning=$false;bgState=$native.desiredState;
             desiredState=$native.desiredState;operation=$native.operation;prepared=(@($native.services).Count -gt 0);
+            activeServices=(@($native.services | Where-Object {$_.state -in @('running','restarting')}).Count -gt 0);
             regisPending=[bool]$native.regisPending;
             updateRecovery=([bool]$native.update -and $native.update.phase -notin @('completed','rolled-back','failed-preflight'));
             maintenance=(($native.restore.phase -in @('stopping','preparing','restoring','recovering','recovery-required')) -or ([bool]$native.update -and $native.update.phase -notin @('completed','rolled-back','failed-preflight')))}

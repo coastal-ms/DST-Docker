@@ -113,7 +113,8 @@ function Get-DuneDockerStatus {
     $databaseReady=$metadata.database.state -eq 'running' -and $metadata.database.health -eq 'healthy'
     $databaseStatus=if(-not $metadata.database){'Not configured'}elseif($metadata.database.state -in @('created','exited')){'Stopped'}elseif($metadata.database.state -eq 'restarting'){'Starting'}elseif($databaseReady){'Ready'}elseif($metadata.database.state -eq 'running'){if($metadata.database.health){[string]$metadata.database.health}else{'Unknown'}}else{if($metadata.database.state){[string]$metadata.database.state}else{'Unknown'}}
     $allReady=$connected -and $coreRunning -and $queuesHealthy -and $databaseReady -and $expectedGames.Count-gt 0 -and @($expectedGames | Where-Object { $_.ready-ne'True' }).Count-eq 0
-    $state=if(-not $connected){'unknown'}elseif($metadata.operation.phase-eq'running'-and $metadata.operation.action-eq'services.stop'){'stopping'}elseif($metadata.desiredState-eq'stopped'){'stopped'}elseif($allReady){'running'}elseif($coreRunning){'starting'}else{'unknown'}
+    $activeServices=@($metadata.services | Where-Object {$_.state -in @('running','restarting')}).Count -gt 0
+    $state=if(-not $connected){'unknown'}elseif($metadata.operation.phase-eq'running'-and $metadata.operation.action-eq'services.stop'){'stopping'}elseif($metadata.desiredState-eq'stopped'){if($activeServices){'stopping'}else{'stopped'}}elseif($allReady){'running'}elseif($coreRunning){'starting'}else{'unknown'}
     $director=@($metadata.services | Where-Object { $_.component-eq'director' }) | Select-Object -First 1
     $gateway=@($metadata.services | Where-Object { $_.component-eq'gateway' }) | Select-Object -First 1
     $uptime=if($director.state-eq'running' -and $director.startedAt){Format-DuneKubeAge -Start ([DateTimeOffset]::FromUnixTimeSeconds([long]$director.startedAt).UtcDateTime)}else{''}
