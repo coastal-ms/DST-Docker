@@ -124,7 +124,9 @@ function CommandButtonInner({
         <div>{presentation}</div>
         {cmd.requires !== 'none' && (
           <p className="text-xs text-text-muted">
-            {cmd.requires === 'running' ? 'Requires a running VM.' : 'Requires an existing VM.'}
+            {import.meta.env.VITE_DST_EDITION === 'docker'
+              ? cmd.requires === 'running' ? 'Requires a running battlegroup.' : 'Requires a configured Docker world.'
+              : cmd.requires === 'running' ? 'Requires a running VM.' : 'Requires an existing VM.'}
           </p>
         )}
         <button
@@ -447,8 +449,9 @@ export function Commands() {
     const fallbackSections: [string[], string[], string[]] = [[], [], []]
     const serverNames    = (cmdsState.data?.sectionNames ?? fallbackNames) as [string, string, string]
     const serverSections = (cmdsState.data?.sections     ?? fallbackSections) as [string[], string[], string[]]
+    const legacyDefaultNames = serverNames[0] === 'VM' && serverNames[1] === 'Battlegroup' && serverNames[2] === 'Tools'
     return {
-      names:    localNames    ?? serverNames,
+      names:    localNames    ?? (docker && legacyDefaultNames ? fallbackNames : serverNames),
       sections: localSections ?? serverSections,
     }
   }, [cmdsState.data, localNames, localSections, docker])

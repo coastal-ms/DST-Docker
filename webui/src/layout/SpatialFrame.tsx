@@ -121,7 +121,7 @@ export default function SpatialFrame({ children, onDetails, tools = false, dashb
               className="spatial-support-link">
               <Icon name="Coffee" size={11} /><span>Buy Me a Coffee</span>
             </a>
-            {!dashboard && !soloOnly && <div className="spatial-infrastructure"><span>VM <b>{status ? status.vm.running ? 'Running' : status.vm.state || 'Unknown' : 'Unknown'}</b></span><span>Database <b>{status?.bg?.info?.database || 'Unknown'}</b></span></div>}
+            {!dashboard && !soloOnly && <div className="spatial-infrastructure"><span>{status?.hostingBackend === 'docker' || import.meta.env.VITE_DST_EDITION === 'docker' ? 'Docker' : 'VM'} <b>{status ? status.vm.running ? 'Running' : status.vm.state || 'Unknown' : 'Unknown'}</b></span><span>Database <b>{status?.bg?.info?.database || 'Unknown'}</b></span></div>}
           </div>
           <div ref={dockAnchorRef} className="spatial-dock-slot">
             <nav ref={dockRef} className="spatial-dock" aria-label="Workspace dock">

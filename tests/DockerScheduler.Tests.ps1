@@ -15,7 +15,7 @@ Describe 'Native daily maintenance execution' {
         $script:oldBackend=$env:DST_HOSTING_BACKEND;$script:oldLocal=$env:LOCALAPPDATA
         $env:DST_HOSTING_BACKEND='docker';$env:LOCALAPPDATA=Join-Path $TestDrive ([guid]::NewGuid().ToString('N'))
         $script:metadata=@{desiredState='running';profile=@{name='Fixture'};operation=@{id=('a'*32);action='services.start';phase='completed'};
-            database=@{health='healthy'};connectionServices=@(@{health='healthy'},@{health='healthy'});
+            database=@{state='running';health='healthy'};connectionServices=@(@{health='healthy'},@{health='healthy'});
             services=@(@{component='director';state='running'},@{component='gateway';state='running'},@{component='text-router';state='running'},
                 @{component='game-1';state='running';gameReady=$true;desiredState='running'})}
         $state=Get-DuneRestartScheduleDefault;$state.enabled=$true;$state.timeZone='America/Los_Angeles';Save-DuneRestartSchedule $state

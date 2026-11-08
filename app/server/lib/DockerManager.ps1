@@ -88,14 +88,16 @@ function Get-DuneDockerStatus {
     $coreRunning=@($metadata.services | Where-Object { $_.component -notmatch '^game-[0-9]+$' -and $_.state-ne'running' }).Count-eq 0 -and @($metadata.services).Count-gt 0
     $queuesHealthy=@($metadata.connectionServices | Where-Object { $_.health-ne'healthy' }).Count-eq 0 -and @($metadata.connectionServices).Count-eq 2
     $expectedGames=@($games | Where-Object {$_.desiredState-eq'running'})
-    $allReady=$connected -and $coreRunning -and $queuesHealthy -and $metadata.database.health-eq'healthy' -and $expectedGames.Count-gt 0 -and @($expectedGames | Where-Object { $_.ready-ne'True' }).Count-eq 0
+    $databaseReady=$metadata.database.state -eq 'running' -and $metadata.database.health -eq 'healthy'
+    $databaseStatus=if(-not $metadata.database){'Not configured'}elseif($metadata.database.state -in @('created','exited')){'Stopped'}elseif($metadata.database.state -eq 'restarting'){'Starting'}elseif($databaseReady){'Ready'}elseif($metadata.database.state -eq 'running'){if($metadata.database.health){[string]$metadata.database.health}else{'Unknown'}}else{if($metadata.database.state){[string]$metadata.database.state}else{'Unknown'}}
+    $allReady=$connected -and $coreRunning -and $queuesHealthy -and $databaseReady -and $expectedGames.Count-gt 0 -and @($expectedGames | Where-Object { $_.ready-ne'True' }).Count-eq 0
     $state=if(-not $connected){'unknown'}elseif($metadata.operation.phase-eq'running'-and $metadata.operation.action-eq'services.stop'){'stopping'}elseif($metadata.desiredState-eq'stopped'){'stopped'}elseif($allReady){'running'}elseif($coreRunning){'starting'}else{'unknown'}
     $director=@($metadata.services | Where-Object { $_.component-eq'director' }) | Select-Object -First 1
     $gateway=@($metadata.services | Where-Object { $_.component-eq'gateway' }) | Select-Object -First 1
     $uptime=if($director.state-eq'running' -and $director.startedAt){Format-DuneKubeAge -Start ([DateTimeOffset]::FromUnixTimeSeconds([long]$director.startedAt).UtcDateTime)}else{''}
     $group=@{available=$connected;state=$state;name=$metadata.profile.name;title=$metadata.profile.name;gameServers=$games;
         reason=$(if(-not $connected){'Docker observations are unavailable or stale.'}else{$null});
-        info=@{status=$(if($allReady){'Ready'}else{$state});database=$(if($metadata.database.health-eq'healthy'){'Ready'}else{[string]$metadata.database.health});gateway=$(if($gateway.state-eq'running'){'Running'}else{[string]$gateway.state});director=$(if($director.state-eq'running'){'Running'}else{[string]$director.state});uptime=$uptime}}
+        info=@{status=$(if($allReady){'Ready'}else{$state});database=$databaseStatus;gateway=$(if($gateway.state-eq'running'){'Running'}else{[string]$gateway.state});director=$(if($director.state-eq'running'){'Running'}else{[string]$director.state});uptime=$uptime}}
     $ports=$null
     if($metadata.profile -and -not $LifecycleOnly){
         $required=@(@{Port=[int]$metadata.profile.gamePortBase;Protocol='UDP';Label='Game (first)'},
