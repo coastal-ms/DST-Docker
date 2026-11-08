@@ -32,6 +32,7 @@ import {
   getWorldRestartResearchAudit,
   recoverWorldRestartResearch,
   rollbackWorldRestartResearch,
+  resumeDockerWorldRestart,
   type BackupMirrorState,
   type WorldRestartResearchAudit,
   type WorldRestartStatus,
@@ -117,6 +118,8 @@ export function Database() {
   const docker = import.meta.env.VITE_DST_EDITION === 'docker'
   const bgState = status?.bg?.state ?? 'unknown'
   const localViewer = isLocalViewer()
+  const worldRestartViewer = docker || localViewer
+  const [dockerDatabaseReady, setDockerDatabaseReady] = useState(false)
 
   // ---------- Backup / Restore (delegates to /api/commands/run) ------------
   // Availability is derived from the LIVE status poll (vmRunning + bgState),
@@ -126,8 +129,8 @@ export function Database() {
   // disabled with no recovery while the dashboard still showed the BG running.
   // The server re-checks availability on POST /api/commands/run, so deriving
   // client-side here is safe.
-  const backupAvailable  = vmRunning                             // PostgreSQL stays available while the BG is stopped.
-  const restoreAvailable = vmRunning
+  const backupAvailable  = docker ? dockerDatabaseReady : vmRunning
+  const restoreAvailable = docker ? dockerDatabaseReady : vmRunning
   const [showDockerRestore, setShowDockerRestore] = useState(false)
   const [launching, setLaunching] = useState<string | null>(null)
   const [toast, setToast] = useState<{ kind: 'ok' | 'err'; msg: string } | null>(null)
@@ -244,7 +247,7 @@ export function Database() {
   const [researchRecovering, setResearchRecovering] = useState<string | null>(null)
 
   const loadWorldRestart = useCallback(async () => {
-    if (!localViewer) {
+    if (!worldRestartViewer) {
       setWorldRestart(null)
       return
     }
@@ -253,7 +256,7 @@ export function Database() {
     } catch (error) {
       console.warn('Failed to load World Restart status:', error)
     }
-  }, [localViewer])
+  }, [worldRestartViewer])
 
   useEffect(() => { void loadWorldRestart() }, [loadWorldRestart])
   useEffect(() => {
@@ -265,7 +268,7 @@ export function Database() {
   }, [worldRestart?.running, worldRestart?.researchRecoveryRunning, worldRestart?.phase, loadWorldRestart])
 
   const loadResearchAudit = useCallback(async () => {
-    if (!localViewer) {
+    if (!worldRestartViewer) {
       setResearchAudit(null)
       return
     }
@@ -277,17 +280,16 @@ export function Database() {
     } finally {
       setResearchAuditLoading(false)
     }
-  }, [localViewer, showToast])
+  }, [worldRestartViewer, showToast])
 
   useEffect(() => {
-    if (worldRestart?.phase === 'done') void loadResearchAudit()
-  }, [worldRestart?.phase, loadResearchAudit])
+    if (worldRestart?.phase === 'done' && !worldRestart.researchRecoveryRunning) void loadResearchAudit()
+  }, [worldRestart?.phase, worldRestart?.researchRecoveryRunning, loadResearchAudit])
 
   async function runWorldRestart() {
     const typed = window.prompt(
       'WORLD RESTART\n\n' +
-      'This creates and verifies a full rollback backup, stops the battlegroup, replaces only its gameplay database storage, ' +
-      'then starts the SAME battlegroup with its existing name, token, packages, INIs, ports, and DST settings.\n\n' +
+      (docker ? 'This stops the battlegroup, creates and rehearses a full rollback backup, then replaces only its logical gameplay database. It preserves the SAME battlegroup identity, token, packages, INIs, ports, Saved volumes and DST settings. A stopped battlegroup stays stopped; a running battlegroup resumes after verification.\n\n' : 'This creates and verifies a full rollback backup, stops the battlegroup, replaces only its gameplay database storage, then starts the SAME battlegroup with its existing name, token, packages, INIs, ports, and DST settings.\n\n') +
       'BEFORE CONTINUING: every player must return from Deep Desert and log out. Keep everyone offline until DST reports ' +
       'completion. Do not begin near a scheduled server restart or update.\n\n' +
       'All world-side character records, bases, inventories, storage, progression, and market state will start fresh. ' +
@@ -296,7 +298,7 @@ export function Database() {
       'that deletion. Non-Funcom-granted cosmetics are wiped and must be reacquired with Grant Cosmetic. Account-linked ' +
       'research can reappear as purchased without rebuilding its runtime crafting recipe; after players reconnect, use ' +
       'the Rehydrated research integrity audit in the World Restart card. ' +
-      'If any post-reset step fails, DST automatically imports the pre-reset backup.\n\n' +
+      (docker ? 'A failure before game access is reopened recovers the exact rollback backup. After reopening, recovery preserves possible new gameplay rather than automatically restoring older data.\n\n' : 'If any post-reset step fails, DST automatically imports the pre-reset backup.\n\n') +
       'Type RESTART WORLD to continue:',
     )
     if (typed == null) return
@@ -309,7 +311,7 @@ export function Database() {
       await startWorldRestart(typed)
       await loadWorldRestart()
       window.setTimeout(() => { void loadWorldRestart() }, 1000)
-      showToast('ok', 'World Restart started. Keep DST open while progress is shown below.')
+      showToast('ok', docker ? 'World Restart started. It continues in Docker independently of this browser. Keep players offline until it finishes.' : 'World Restart started. Keep DST open while progress is shown below.')
     } catch (e) {
       showToast('err', `World Restart failed to start: ${e instanceof Error ? e.message : String(e)}`)
     } finally {
@@ -374,6 +376,7 @@ export function Database() {
       })
       showToast('ok', result.message)
       await Promise.all([loadResearchAudit(), loadWorldRestart()])
+      if (docker) window.setTimeout(() => { void loadWorldRestart() }, 1000)
     } catch (e) {
       showToast('err', `Research recovery failed: ${e instanceof Error ? e.message : String(e)}`)
     } finally {
@@ -496,7 +499,7 @@ export function Database() {
           </button>
         }
       />
-      {docker && <DockerDatabaseControl onChanged={() => { void loadDbInfo(); void forceRefresh() }} />}
+      {docker && <DockerDatabaseControl onReadyChange={setDockerDatabaseReady} onChanged={() => { void loadDbInfo(); void forceRefresh() }} />}
       {showDockerRestore && <DockerRestoreDialog onClose={() => setShowDockerRestore(false)} onComplete={() => { setShowDockerRestore(false); showToast('ok', 'Backup restored.'); void forceRefresh() }} />}
 
       {toast && (
@@ -545,7 +548,7 @@ export function Database() {
           tone="success"
           description={docker ? "Snapshot the battlegroup's PostgreSQL database to persistent Docker storage. Recommended before any character or game-config change." : "Snapshot the BG's PostgreSQL database to a timestamped file on the VM. Recommended before any character or game-config change."}
           hint={
-            docker ? 'Saved without opening a separate console window.'
+            docker ? dockerDatabaseReady ? 'Saved without opening a separate console window.' : 'Start the database above before taking a backup.'
             : !vmRunning ? 'VM must be running to take a backup.'
             : bgState === 'stopped' ? 'Battlegroup is stopped — the database remains available for a consistent backup.'
             : 'Battlegroup is running — backup will open in a new console window.'
@@ -561,7 +564,7 @@ export function Database() {
           tone="ibad"
           description={docker ? 'Replace the battlegroup database with a verified snapshot. Players, bases, inventories, storage, blueprints and the market return to that point in time.' : "Full destructive restore — REPLACES the entire BG database with a previously taken backup. All players, bases, inventories, storage, blueprints, and the market roll back to that snapshot; everything since is permanently lost. Funcom's `battlegroup import` handles the restore lifecycle. For cross-battlegroup migration, preserve the old VM and original backup until all characters can log in with their inventory and progression. This cannot be undone."}
           hint={
-            docker ? 'Choose a verified snapshot. The servers stop for the restore and then restart if they were running.'
+            docker ? dockerDatabaseReady ? 'Choose a verified snapshot. The servers stop for the restore and then restart if they were running.' : 'Start the database above before restoring a backup.'
             : !vmRunning ? 'VM must be running to restore a backup.'
             : 'Choose the backup file in the console window. Funcom will print a "should be stopped" advisory; type `yes` to proceed — the import stops the BG on its own, swaps the DB, and the game recovers automatically.'
           }
@@ -583,7 +586,7 @@ export function Database() {
         bodyClassName="px-5 pb-5"
       >
         <p className="text-sm text-text-muted mb-3">
-          Start this same battlegroup as a fresh world. Preserves its battlegroup identity, VM, token, packages,
+          Start this same battlegroup as a fresh world. Preserves its battlegroup identity, {docker ? 'Docker storage' : 'VM'}, token, packages,
           ports, INIs, and DST settings. Removes all world-side gameplay data: character records, bases, inventories,
           storage, progression, and market data. Funcom may recreate an account-linked character identity on first login.
           Account-linked creator choices may persist until normal in-game character deletion. Non-Funcom-granted cosmetics
@@ -595,7 +598,7 @@ export function Database() {
           Before starting, have every player return from Deep Desert and log out. Keep everyone offline until completion,
           and do not run this near scheduled server maintenance.{' '}
           DST first creates and verifies a dedicated rollback backup. Database resources are regenerated only
-          after that check passes. Any failure after storage replacement triggers automatic import of that exact backup.
+          after that check passes. {docker ? 'Before game access reopens, a replacement failure recovers the exact backup. After access reopens, recovery preserves possible new gameplay. A stopped battlegroup stays stopped.' : 'Any failure after storage replacement triggers automatic import of that exact backup.'}{' '}
           If a player wants a new name or appearance, use normal in-game character deletion only after accepting the
           fresh world; account-linked deletion may not be reversible through the database backup.
         </div>
@@ -603,19 +606,23 @@ export function Database() {
           <button
             type="button"
             onClick={() => void runWorldRestart()}
-            disabled={!localViewer || !vmRunning || worldRestartStarting || worldRestart?.running === true || worldRestart?.recoveryRequired === true}
+            disabled={!worldRestartViewer || !vmRunning || (docker && !dockerDatabaseReady) || worldRestartStarting || worldRestart?.running === true || worldRestart?.recoveryRequired === true}
             className="btn-primary"
-            title={!localViewer ? 'World Restart is available only from the host machine.' : undefined}
+            title={!worldRestartViewer ? 'World Restart is available only from the host machine.' : docker ? 'Start the database first. Docker verifies its health and player occupancy before any reset.' : undefined}
           >
             <Icon name={worldRestartStarting || worldRestart?.running ? 'Loader2' : 'RotateCcw'} size={14}
               className={worldRestartStarting || worldRestart?.running ? 'animate-spin' : ''} />
             {worldRestart?.running ? 'World Restart running...' : 'Restart World'}
           </button>
+          {docker && worldRestart?.recoveryRequired && !worldRestart.researchRecoveryRequired && !worldRestart.researchRecoveryRunning && !worldRestart.running && <button type="button" className="btn-secondary" disabled={worldRestartStarting} onClick={() => {
+            setWorldRestartStarting(true)
+            void resumeDockerWorldRestart().then(() => loadWorldRestart()).catch(e => showToast('err', String(e))).finally(() => setWorldRestartStarting(false))
+          }}>Resume World Restart recovery</button>}
           {worldRestart?.researchRecoveryRequired && !worldRestart.running && (
             <button
               type="button"
               onClick={() => void rollbackResearchRecovery()}
-              disabled={!localViewer || worldRestartStarting}
+              disabled={!worldRestartViewer || worldRestartStarting}
               className="btn-secondary"
             >
               <Icon name="History" size={14} />
@@ -626,16 +633,16 @@ export function Database() {
             <button
               type="button"
               onClick={() => void runWorldRollback()}
-              disabled={!localViewer || worldRestartStarting}
+              disabled={!worldRestartViewer || worldRestartStarting || worldRestart.researchRecoveryRunning}
               className="btn-secondary"
-              title={!localViewer ? 'World rollback is available only from the host machine.' : undefined}
+              title={!worldRestartViewer ? 'World rollback is available only from the host machine.' : docker ? 'New gameplay records block this shortcut; use the explicit Restore Backup review to replace newer progress.' : undefined}
             >
               <Icon name="History" size={14} />
               Roll back last restart
             </button>
           )}
         </div>
-        {!localViewer && (
+        {!worldRestartViewer && (
           <div className="mt-3 text-xs text-warning">
             World Restart and rollback are disabled remotely. Open DST on the server host to use them.
           </div>
@@ -680,7 +687,7 @@ export function Database() {
                 type="button"
                 className="btn-secondary"
                 onClick={() => void loadResearchAudit()}
-                disabled={researchAuditLoading || researchRecovering !== null}
+                disabled={researchAuditLoading || researchRecovering !== null || worldRestart?.researchRecoveryRunning}
               >
                 <Icon name={researchAuditLoading ? 'Loader2' : 'RefreshCw'} size={13}
                   className={researchAuditLoading ? 'animate-spin' : ''} />
@@ -721,7 +728,7 @@ export function Database() {
                         type="button"
                         className="btn-secondary mt-2"
                         onClick={() => void recoverResearch(identityKey)}
-                        disabled={researchRecovering !== null}
+                        disabled={researchRecovering !== null || worldRestart?.researchRecoveryRunning}
                       >
                         <Icon name={researchRecovering === characterName ? 'Loader2' : 'Wrench'} size={13}
                           className={researchRecovering === characterName ? 'animate-spin' : ''} />

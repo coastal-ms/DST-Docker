@@ -34,6 +34,8 @@ import resource_policy
 import regis_compatibility
 import backup_schedule
 import backup_mirror_control
+import world_restart
+import world_research
 import sys
 import shutil
 
@@ -207,6 +209,7 @@ def public_state(state, engine):
             'plan':public_plan(state['worldPlan']) if state.get('worldPlan') else None,
             'operation':state.get('operation'),'backups':sorted(backups,key=lambda row:row['createdAt'],reverse=True),
             'backupMirror':backup_mirror_control.snapshot(state,engine),
+            'worldRestart':world_restart.snapshot(state),
             'backupCleanup':{key:state['backupCleanup'][key] for key in ('phase','error','startedAt') if key in state['backupCleanup']} if state.get('backupCleanup') else None,
             'pendingMemoryChange':state.get('pendingMemoryChange'),
             'update':{key:state['updateRun'][key] for key in ('id','phase','build','error','recoveryError','committed','startedAt','finishedAt') if key in state['updateRun']} if state.get('updateRun') else None,
@@ -270,7 +273,8 @@ def start_backup(state,engine,backup_id=None,scheduled_resume=None):
 def start_backup_cleanup(state,engine,ids):
     if state.get('backupCleanup'):raise ValueError('Finish the previous backup cleanup before deleting more files.')
     if not isinstance(ids,list) or not 1<=len(ids)<=100 or any(not isinstance(value,str) for value in ids) or len(set(ids))!=len(ids):raise ValueError('Select one to100 distinct backup records.')
-    protected={value.get('backupId') for value in (state.get('restore',{}),state.get('updateRun',{}))} | backup_mirror_control.protected_ids(state)
+    protected={value.get('backupId') for value in (state.get('restore',{}),state.get('updateRun',{}),state.get('worldRestart',{}),state.get('worldResearchRecovery',{}))} | backup_mirror_control.protected_ids(state)
+    protected.add(state.get('worldRestart',{}).get('freshBackupId'))
     files=[]
     for identifier in ids:
         entry=state.get('backups',{}).get(identifier)
@@ -380,6 +384,10 @@ def protected_backup_jobs(state):
         if entry.get('export',{}).get('phase') in {'preparing','running'}:protected.add(entry['export'].get('job'))
     mirror=state.get('backupMirror',{}).get('run',{})
     if mirror.get('phase') in {'preparing','running','failed'}:protected.add(mirror.get('job'))
+    for key in ('worldRestart','worldResearchRecovery'):
+        run=state.get(key,{})
+        if run.get('phase','done') not in world_restart.TERMINAL|{'completed','rolled-back'}:
+            protected.update(run.get(field) for field in ('freshJob','job'))
     return protected
 
 
@@ -437,6 +445,8 @@ def backup_schedule_tick(engine=None,now=None):
         # Defer while maintenance/another backup is active. Never start a
         # stopped database or any game to satisfy a timer.
         if state.get('phase')!='database-ready' or state.get('restore',{}).get('phase') in {'stopping','preparing','restoring','recovering','recovery-required'} or state.get('updateRun',{}).get('phase','completed') not in world_update.TERMINAL:return
+        if state.get('worldRestart',{}).get('phase','done') not in world_restart.TERMINAL:return
+        if state.get('worldResearchRecovery',{}).get('phase','completed') not in {'completed','rolled-back','failed-preflight'}:return
         if any(state.get(key) for key in ('pendingMemoryChange','pendingResourceChange','pendingRegisChange','pendingAddressChange')):return
         if any(row.get('phase') in {'preparing','running'} or row.get('verification',{}).get('phase') in {'preparing','running'} for row in state.get('backups',{}).values()):return
         database=state.get('database',{})
@@ -1440,6 +1450,11 @@ def run_operation(state,engine,request):
         elif action=='backups.schedule.recover':recover_scheduled_backup(state,engine)
         elif action=='backups.mirror.sync':backup_mirror_control.start(state,engine,save,check_all=True)
         elif action=='backups.mirror.recover':backup_mirror_control.start(state,engine,save,retry=True)
+        elif action=='world-restart.apply':world_restart.NativeWorldRestart(state,engine,sys.modules[__name__]).apply(request.get('confirmation'))
+        elif action=='world-restart.recover':world_restart.NativeWorldRestart(state,engine,sys.modules[__name__]).recover()
+        elif action=='world-restart.rollback':world_restart.NativeWorldRestart(state,engine,sys.modules[__name__]).rollback(request.get('confirmation'))
+        elif action=='world-restart.research':world_research.NativeResearchRecovery(state,engine,sys.modules[__name__]).apply_research(request.get('confirmation'),request.get('characterName'),request.get('funcomId'),request.get('itemKeys'))
+        elif action=='world-restart.research-recover':world_research.NativeResearchRecovery(state,engine,sys.modules[__name__]).recover()
         else:raise ValueError('Unsupported Docker operation.')
         state['operation'].update(phase='completed',finishedAt=time.time())
     except (ValueError,EngineError) as error:
@@ -1468,17 +1483,23 @@ def dispatch(request, engine=None):
             if not state.get('worldId') or not state.get('worldPlan'):raise ValueError('The world is not prepared.')
             return scale_snapshot(state,read_template(),(STATE/'dune-app.password').read_text())
         if action=='maps.policy':return map_policy(state,engine)
+        if action=='world-restart.status':return world_restart.snapshot(state)
+        if action=='world-restart.research-audit':return world_research.audit(world_restart.NativeWorldRestart(state,engine,sys.modules[__name__]).sql,state.get('worldRestart',{}).get('researchSnapshot'))
         if state.get('operation',{}).get('phase')=='running':
             raise OperationBusyError('Another server operation is in progress.')
-        if state.get('restore',{}).get('phase') in {'stopping','preparing','restoring','recovering','recovery-required'} and action not in {'updates.recover','logs.export'}:
+        if state.get('restore',{}).get('phase') in {'stopping','preparing','restoring','recovering','recovery-required'} and action not in {'updates.recover','world-restart.recover','world-restart.research-recover','logs.export'}:
             raise ValueError('Resolve the interrupted database restore before starting another operation.')
         if state.get('updateRun') and state['updateRun']['phase'] not in world_update.TERMINAL and action not in {'updates.recover','logs.export'}:
             raise ValueError('Recover the interrupted server update before starting another operation.')
+        if state.get('worldRestart',{}).get('phase','done') not in world_restart.TERMINAL and action not in {'world-restart.recover','logs.export'}:
+            raise ValueError('Recover the interrupted World Restart before starting another operation.')
+        if state.get('worldResearchRecovery',{}).get('phase','completed') not in {'completed','rolled-back','failed-preflight'} and action not in {'world-restart.research-recover','logs.export'}:
+            raise ValueError('Recover the interrupted research operation before starting another operation.')
         if state.get('pendingMemoryChange') and action!='maps.memory':raise ValueError('Finish the pending map memory allocation first.')
         if state.get('pendingResourceChange') and action!='resources.set':raise ValueError('Finish the pending resource allocation first.')
         if state.get('pendingRegisChange') and action not in {'regis.set','regis.recover','services.stop','logs.export'}:
             raise ValueError('Finish or restore the pending Tank change in Server Settings before another server operation.')
-        if state.get('backupCleanup') and action in {'backups.create','backups.verify','backups.restore','backups.delete','backups.import','backups.schedule.recover','updates.apply','updates.recover','database.migrate'}:
+        if state.get('backupCleanup') and action in {'backups.create','backups.verify','backups.restore','backups.delete','backups.import','backups.schedule.recover','updates.apply','updates.recover','database.migrate','world-restart.apply','world-restart.rollback','world-restart.research'}:
             raise ValueError('Finish or recover the pending backup cleanup before using backup or database maintenance controls.')
         if action=='backups.schedule.set':
             backup_schedule.configure(state,request,time.time());state.pop('backupSchedulerError',None);save(state)
@@ -1517,13 +1538,16 @@ def dispatch(request, engine=None):
             if not reply.get('ok'):raise ValueError(reply.get('error','Settings backups could not be created.'))
             return reply['data']
         if action in {'database.create','database.initialize','database.migrate','database.start','database.stop','world.configure','connections.prepare',
-                      'services.prepare','services.start','services.stop','services.restart','services.refresh-core-adapters','scale.prepare','maps.start','maps.stop','maps.restart','maps.observers.prepare','files.prepare','settings.prepare','regis.set','regis.recover','logs.export','updates.stage','updates.apply','updates.recover','rmq.publish','games.refresh-adapters','backups.create','backups.verify','backups.restore','backups.delete','backups.cleanup.recover','backups.export','backups.import','backups.schedule.recover','backups.mirror.sync','backups.mirror.recover'}:
+                      'services.prepare','services.start','services.stop','services.restart','services.refresh-core-adapters','scale.prepare','maps.start','maps.stop','maps.restart','maps.observers.prepare','files.prepare','settings.prepare','regis.set','regis.recover','logs.export','updates.stage','updates.apply','updates.recover','rmq.publish','games.refresh-adapters','backups.create','backups.verify','backups.restore','backups.delete','backups.cleanup.recover','backups.export','backups.import','backups.schedule.recover','backups.mirror.sync','backups.mirror.recover','world-restart.apply','world-restart.recover','world-restart.rollback','world-restart.research','world-restart.research-recover'}:
+            if action in {'world-restart.apply','world-restart.rollback'} and request.get('confirmation')!=('RESTART WORLD' if action=='world-restart.apply' else 'ROLL BACK WORLD'):
+                raise ValueError('Supply the exact World Restart confirmation.')
+            if action=='world-restart.research' and request.get('confirmation')!='RESET RESEARCH':raise ValueError('Supply the exact research recovery confirmation.')
             if action=='regis.set' and (type(request.get('enabled')) is not bool or type(request.get('acknowledgeStoredTanks',False)) is not bool):
                 raise ValueError('Supply JSON booleans for Tank support and the stored-Tank acknowledgement.')
             if action=='updates.apply' and (not isinstance(request.get('expectedBuild'),str) or not re.fullmatch(r'[0-9]{1,18}',request['expectedBuild']) or type(request.get('allowOnline',False)) is not bool or type(request.get('withTanks',False)) is not bool):raise ValueError('Supply a valid build and JSON boolean online-player and Tank authorization.')
             if 'publishGateway' in request and (action!='services.start' or type(request['publishGateway']) is not bool):raise ValueError('Only a typed start can select gateway publication.')
             if action=='logs.export' and request.get('scope') not in {'battlegroup','operator'}:raise ValueError('Choose battlegroup or operator logs.')
-            if action in {'updates.apply','updates.recover','database.migrate','database.initialize','services.restart'} and any(
+            if action in {'updates.apply','updates.recover','database.migrate','database.initialize','services.restart','world-restart.apply','world-restart.rollback','world-restart.research'} and any(
                 entry.get('phase') in {'preparing','running'} or entry.get('verification',{}).get('phase') in {'preparing','running'}
                 for entry in state.get('backups',{}).values()):
                 raise OperationBusyError('Wait for the active backup or restore rehearsal before database maintenance.')
@@ -1599,20 +1623,52 @@ def resume_interrupted_update(state,engine):
     finally:save(state)
 
 
+def resume_interrupted_world_restart(state,engine):
+    try:
+        world_restart.NativeWorldRestart(state,engine,sys.modules[__name__]).recover()
+        state['operation'].update(phase='completed',finishedAt=time.time())
+    except Exception:
+        state['worldRestart']['phase']='recovery-required'
+        state['operation'].update(phase='failed',error='World Restart recovery needs review. Game access remains blocked and backups were preserved.',finishedAt=time.time())
+    finally:save(state)
+
+
+def resume_interrupted_world_research(state,engine):
+    try:
+        world_research.NativeResearchRecovery(state,engine,sys.modules[__name__]).recover()
+        state['operation'].update(phase='completed',finishedAt=time.time())
+    except Exception:
+        state['worldResearchRecovery']['phase']='recovery-required'
+        state['operation'].update(phase='failed',error='Research recovery needs review. Game access remains blocked and backups were preserved.',finishedAt=time.time())
+    finally:save(state)
+
+
 if __name__ == '__main__':
     recovered=project_state()
     restoring=False
     updating=False
+    restarting_world=False
+    recovering_research=False
     if recovered.get('operation',{}).get('phase')=='running':
         restoring=recovered['operation'].get('action')=='backups.restore' and recovered.get('restore')
         updating=recovered['operation'].get('action') in {'updates.apply','updates.recover'} and recovered.get('updateRun') and recovered['updateRun']['phase'] not in world_update.TERMINAL
+        restarting_world=recovered['operation'].get('action') in {'world-restart.apply','world-restart.recover','world-restart.rollback'} and recovered.get('worldRestart') and recovered['worldRestart']['phase'] not in world_restart.TERMINAL
+        recovering_research=recovered['operation'].get('action') in {'world-restart.research','world-restart.research-recover'} and recovered.get('worldResearchRecovery') and recovered['worldResearchRecovery']['phase'] not in {'completed','rolled-back','failed-preflight'}
         if recovered['operation'].get('action')=='scale.apply':recover_interrupted_scale(recovered,Engine())
         if recovered.get('updateRun',{}).get('phase')=='completed' and recovered['operation'].get('action') in {'updates.apply','updates.recover'}:
             recovered['operation'].update(phase='completed',finishedAt=time.time())
-        elif not restoring and not updating:recovered['operation'].update(phase='interrupted',error='The management service restarted during this operation. Review its component states before retrying.')
+        elif (recovered['operation'].get('action') in {'world-restart.apply','world-restart.recover','world-restart.rollback'} and
+              recovered.get('worldRestart',{}).get('activeOperationId',recovered.get('worldRestart',{}).get('id'))==recovered['operation']['id'] and
+              recovered.get('worldRestart',{}).get('phase') in world_restart.TERMINAL):recovered['operation'].update(phase='completed',finishedAt=time.time())
+        elif (recovered['operation'].get('action') in {'world-restart.research','world-restart.research-recover'} and
+              recovered.get('worldResearchRecovery',{}).get('activeOperationId',recovered.get('worldResearchRecovery',{}).get('id'))==recovered['operation']['id'] and
+              recovered.get('worldResearchRecovery',{}).get('phase') in {'completed','rolled-back','failed-preflight'}):recovered['operation'].update(phase='completed',finishedAt=time.time())
+        elif not restoring and not updating and not restarting_world and not recovering_research:recovered['operation'].update(phase='interrupted',error='The management service restarted during this operation. Review its component states before retrying.')
         save(recovered)
     if restoring:threading.Thread(target=resume_interrupted_restore,args=(recovered,Engine()),daemon=True).start()
     if updating:threading.Thread(target=resume_interrupted_update,args=(recovered,Engine()),daemon=True).start()
+    if restarting_world:threading.Thread(target=resume_interrupted_world_restart,args=(recovered,Engine()),daemon=True).start()
+    if recovering_research:threading.Thread(target=resume_interrupted_world_research,args=(recovered,Engine()),daemon=True).start()
     SOCKET.parent.mkdir(parents=True, exist_ok=True)
     if SOCKET.exists(): SOCKET.unlink()
     server = socketserver.UnixStreamServer(str(SOCKET), Handler)

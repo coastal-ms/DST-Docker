@@ -208,16 +208,34 @@ export type WorldRestartResearchRecovery = {
   characterName: string
   funcomId: string
   itemKeys: string[]
-  backupPath: string
-  backupSizeBytes: number
+  backupPath?: string
+  backupSizeBytes?: number
   message: string
 }
 
 export function getWorldRestartStatus() {
+  if (import.meta.env.VITE_DST_EDITION === 'docker') return getDockerWorldRestartStatus()
   return api<WorldRestartStatus>('/api/db/world-restart/status')
 }
 
+async function dockerWorldAction<T>(action: string, values: Record<string, unknown> = {}): Promise<T> {
+  const reply = await api<{ ok: boolean; error?: string; data?: T }>('/api/docker/setup', { method: 'POST', body: JSON.stringify({ action, ...values }) })
+  if (!reply.ok || !reply.data) throw new Error(reply.error || 'Docker World Restart is unavailable.')
+  return reply.data
+}
+
+async function getDockerWorldRestartStatus() {
+  const reply = await api<{ ok: boolean; error?: string; data?: { worldRestart: WorldRestartStatus } }>('/api/docker/setup')
+  if (!reply.ok || !reply.data?.worldRestart) throw new Error(reply.error || 'Docker World Restart status is unavailable.')
+  return reply.data.worldRestart
+}
+
+export async function resumeDockerWorldRestart() {
+  await dockerWorldAction('world-restart.recover')
+}
+
 export function startWorldRestart(confirm: string) {
+  if (import.meta.env.VITE_DST_EDITION === 'docker') return dockerWorldAction('world-restart.apply', { confirmation: confirm }).then(() => ({ ok: true, running: true, operation: 'restart' }))
   return withOnlinePlayerGuard(force =>
     api<{ ok: boolean; running: boolean; operation: string }>(
       `/api/db/world-restart${force ? '?force=true' : ''}`,
@@ -227,6 +245,7 @@ export function startWorldRestart(confirm: string) {
 }
 
 export function rollbackWorldRestart(confirm: string) {
+  if (import.meta.env.VITE_DST_EDITION === 'docker') return dockerWorldAction('world-restart.rollback', { confirmation: confirm }).then(() => ({ ok: true, running: true, operation: 'rollback' }))
   return withOnlinePlayerGuard(force =>
     api<{ ok: boolean; running: boolean; operation: string }>(
       `/api/db/world-restart/rollback${force ? '?force=true' : ''}`,
@@ -236,6 +255,7 @@ export function rollbackWorldRestart(confirm: string) {
 }
 
 export function getWorldRestartResearchAudit() {
+  if (import.meta.env.VITE_DST_EDITION === 'docker') return dockerWorldAction<WorldRestartResearchAudit>('world-restart.research-audit')
   return api<WorldRestartResearchAudit>('/api/db/world-restart/research-audit')
 }
 
@@ -245,6 +265,7 @@ export function recoverWorldRestartResearch(opts: {
   itemKeys: string[]
   confirm: string
 }) {
+  if (import.meta.env.VITE_DST_EDITION === 'docker') return dockerWorldAction('world-restart.research', { confirmation: opts.confirm, characterName: opts.characterName, funcomId: opts.funcomId, itemKeys: opts.itemKeys }).then(() => ({ ok: true, characterName: opts.characterName, funcomId: opts.funcomId, itemKeys: opts.itemKeys, message: 'Research recovery started. Progress continues in Docker; keep players offline until it finishes.' }))
   return withOnlinePlayerGuard(force =>
     api<WorldRestartResearchRecovery>(
       `/api/db/world-restart/research-recover${force ? '?force=true' : ''}`,
@@ -254,6 +275,10 @@ export function recoverWorldRestartResearch(opts: {
 }
 
 export function rollbackWorldRestartResearch(confirm: string) {
+  if (import.meta.env.VITE_DST_EDITION === 'docker') {
+    if (confirm !== 'ROLL BACK RESEARCH RECOVERY') return Promise.reject(new Error('Type ROLL BACK RESEARCH RECOVERY exactly.'))
+    return dockerWorldAction('world-restart.research-recover').then(() => ({ ok: true, backupPath: '', message: 'Research recovery resumed. Keep players offline until it finishes.' }))
+  }
   return withOnlinePlayerGuard(force =>
     api<{ ok: boolean; backupPath: string; message: string }>(
       `/api/db/world-restart/research-rollback${force ? '?force=true' : ''}`,

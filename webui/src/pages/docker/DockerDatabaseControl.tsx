@@ -10,7 +10,7 @@ type State = {
   operation?: { id: string; phase: string; error?: string }
 }
 type Reply = { ok: boolean; data?: State; error?: string }
-export function DockerDatabaseControl({ onChanged }: { onChanged: () => void }) {
+export function DockerDatabaseControl({ onChanged, onReadyChange }: { onChanged: () => void; onReadyChange?: (ready: boolean) => void }) {
   const [state, setState] = useState<State | null>(null)
   const [posting, setPosting] = useState(false)
   const [error, setError] = useState('')
@@ -21,11 +21,12 @@ export function DockerDatabaseControl({ onChanged }: { onChanged: () => void }) 
         const reply = await api<Reply>('/api/docker/setup')
         if (!reply.ok || !reply.data) throw new Error(reply.error || 'Database control is unavailable.')
         if (!closed) setState(reply.data)
-      } catch (e) { if (!closed) setError(e instanceof Error ? e.message : String(e)) }
+      } catch (e) { if (!closed) { setState(null); setError(e instanceof Error ? e.message : String(e)) } }
     }
     void load(); const timer = window.setInterval(() => void load(), 10000)
     return () => { closed = true; window.clearInterval(timer) }
   }, [])
+  useEffect(() => { onReadyChange?.(state?.phase === 'database-ready' && state.database?.state === 'running' && state.database.health === 'healthy') }, [state, onReadyChange])
   const running = state?.database?.state === 'running' || state?.database?.state === 'restarting'
   const busy = posting || state?.operation?.phase === 'running' || state?.backups.some(row => ['preparing', 'running'].includes(row.phase) || ['preparing', 'running'].includes(row.verification?.phase || ''))
   const canStop = state?.desiredState !== 'running' && state?.services.every(row => ['created', 'exited'].includes(row.state))

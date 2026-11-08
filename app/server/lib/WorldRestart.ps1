@@ -71,6 +71,11 @@ function Save-DuneWorldRestartState {
 }
 
 function Get-DuneWorldRestartStatus {
+    if ($env:DST_HOSTING_BACKEND -eq 'docker') {
+        $reply=Invoke-DuneDockerManager -Request @{action='world-restart.status'}
+        if(-not $reply.ok){throw 'Native World Restart status is unavailable. Retry when Docker management is ready.'}
+        return [pscustomobject]$reply.data
+    }
     $state = Read-DuneWorldRestartState
     try {
         if ([bool]$state.running) {

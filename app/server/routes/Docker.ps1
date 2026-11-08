@@ -90,10 +90,17 @@ Register-DuneRoute -Method POST -Path '/api/docker/setup' -Handler {
     param($req, $res, $routeParams, $body)
     if ($env:DST_HOSTING_BACKEND -ne 'docker') { Write-DuneError -Response $res -Status 404 -Message 'Docker hosting is not enabled.'; return }
     $action = [string]$body.action
-    if ($action -notin @('database.create','database.initialize','database.migrate','database.start','database.stop','world.configure','credentials.save','connections.prepare','services.prepare','services.start','services.stop','games.refresh-adapters','backups.create','backups.verify','backups.restore','backups.cleanup.recover','backups.export','backups.schedule.recover','backups.mirror.set','backups.mirror.sync','backups.mirror.recover','backups.mirror.cancel')) {
+    if ($action -notin @('database.create','database.initialize','database.migrate','database.start','database.stop','world.configure','credentials.save','connections.prepare','services.prepare','services.start','services.stop','games.refresh-adapters','backups.create','backups.verify','backups.restore','backups.cleanup.recover','backups.export','backups.schedule.recover','backups.mirror.set','backups.mirror.sync','backups.mirror.recover','backups.mirror.cancel','world-restart.apply','world-restart.recover','world-restart.rollback','world-restart.research-audit','world-restart.research','world-restart.research-recover')) {
         Write-DuneError -Response $res -Status 400 -Message 'Unsupported setup action.'; return
     }
     $request = @{action=$action}
+    if ($action -in @('world-restart.apply','world-restart.rollback','world-restart.research')) { $request.confirmation=[string]$body.confirmation }
+    if ($action -eq 'world-restart.research') {
+        if ($body.characterName -isnot [string] -or $body.characterName.Length -gt 200 -or $body.funcomId -isnot [string] -or $body.funcomId.Length -gt 200 -or @($body.itemKeys).Count -notin 1..500 -or @($body.itemKeys | Where-Object {$_ -isnot [string] -or $_.Length -gt 200}).Count) {
+            Write-DuneError -Response $res -Status 400 -Message 'Choose bounded research mismatches for one character.'; return
+        }
+        $request.characterName=$body.characterName; $request.funcomId=$body.funcomId; $request.itemKeys=@($body.itemKeys)
+    }
     if ($action -in @('services.stop','backups.restore','games.refresh-adapters')) {
         $description = if($action -eq 'backups.restore'){'restoring the battlegroup database'}else{'stopping the battlegroup'}
         if (-not (Test-DuneDisruptiveActionGuard -Req $req -Res $res -Action $description)) { return }

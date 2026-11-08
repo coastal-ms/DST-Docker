@@ -51,6 +51,8 @@ def retained_ids(state,keep):
     rows=sorted(((key,value) for key,value in state.get('backups',{}).items() if value.get('phase')=='completed'),
                 key=lambda row:row[1]['createdAt'],reverse=True)
     protected={value.get('backupId') for value in (state.get('restore',{}),state.get('updateRun',{}))}
+    protected.update(state.get(key,{}).get('backupId') for key in ('worldRestart','worldResearchRecovery'))
+    protected.add(state.get('worldRestart',{}).get('freshBackupId'))
     if rows:protected.add(rows[0][0])
     mirror=state.get('backupMirror',{});run=mirror.get('run',{})
     if run.get('phase') in {'preparing','running','failed'}:protected.update(run.get('backupIds',[]))
