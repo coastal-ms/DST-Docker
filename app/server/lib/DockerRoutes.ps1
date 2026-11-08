@@ -20,10 +20,21 @@ function Test-DuneDockerOwnerHostRoute {
         (Test-DuneDockerVehicleDeletionRoute -Method $Method -Path $Path)
 }
 
+function Test-DuneDockerMarketBotRoute {
+    param([string]$Method,[string]$Path)
+    switch($Method){
+        GET {return $Path -cin @('/api/gameplay/market-bot/status','/api/gameplay/market-bot/config','/api/gameplay/market-bot/balance','/api/gameplay/market-bot/vendor-snapshot')}
+        PUT {return $Path -ceq '/api/gameplay/market-bot/config'}
+        POST {return $Path -cin @('/api/gameplay/market-bot/config/reset','/api/gameplay/market-bot/exec','/api/gameplay/market-bot/tick','/api/gameplay/market-bot/balance','/api/gameplay/market-bot/clear-listings','/api/gameplay/market-bot/clear-legacy-listings','/api/gameplay/market-bot/tick/list','/api/gameplay/market-bot/clear-error','/api/gameplay/market-bot/seed','/api/gameplay/market-bot/seed/abort')}
+        default {return $false}
+    }
+}
+
 function Test-DuneDockerRouteQualified {
     param([string]$Method,[string]$Path)
     if(Test-DuneDockerAccountManagementRoute -Method $Method -Path $Path){return $true}
     if(Test-DuneDockerVehicleDeletionRoute -Method $Method -Path $Path){return $true}
+    if(Test-DuneDockerMarketBotRoute -Method $Method -Path $Path){return $true}
     if($Path.StartsWith('/api/docker/file-browser/',[StringComparison]::Ordinal) -and $Method -in @('GET','HEAD','POST','PUT','PATCH','DELETE')){return $true}
     if($Method -eq 'GET' -and $Path -cmatch '^/api/docker/backup-exports/[a-f0-9]{32}$'){return $true}
     if($Method -eq 'POST' -and $Path -eq '/api/docker/backup-import'){return $true}

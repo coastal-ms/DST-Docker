@@ -64,7 +64,7 @@
 }
 
 Describe 'Platform capability registry' {
-    It 'advertises native inventory, base and Owner vehicle actions without unrelated capabilities' {
+    It 'advertises native administration with role-filtered Owner vehicle actions' {
         $previousBackend = $env:DST_HOSTING_BACKEND
         try {
             $env:DST_HOSTING_BACKEND = 'docker'
@@ -74,8 +74,10 @@ Describe 'Platform capability registry' {
             $ids | Should -Contain 'base.manage.destructive'
             $ids | Should -Contain 'vehicle.rename'
             $ids | Should -Contain 'vehicle.delete'
+            foreach($market in @('economy.market','economy.market.manage','economy.market.destructive')){$ids|Should -Contain $market}
             $adminIds = @(Get-DuneCapabilitiesForPrincipal -Principal @{type='portal-account';role='admin'} -RuntimePlatform linux).id
             $adminIds | Should -Contain 'inventory.read'
+            foreach($market in @('economy.market','economy.market.manage','economy.market.destructive')){$adminIds|Should -Contain $market}
             $adminIds | Should -Not -Contain 'vehicle.rename'
             $adminIds | Should -Not -Contain 'vehicle.delete'
             $ids | Should -Not -Contain 'player.manage.self'

@@ -2,6 +2,7 @@ BeforeAll {
     . (Join-Path $PSScriptRoot '_TestHelpers.ps1')
     Import-DstLib 'Gameplay.ps1'
     Import-DstLib 'DockerMarket.ps1'
+    Import-DstLib 'GameplayBot.ps1'
     function Invoke-DuneSqlQuery { param($Ip,$Sql,$ReadOnly,$MaxRows,$TimeoutSec); throw 'SQL must be mocked.' }
     $script:purchase=@{Ip='docker';Ident=@{exchangeId=11;accessPointId=12;ownerId=13};OrderId=14;SellerId=15;ItemId=16;TemplateId='Fixture';UnitPrice=83;Stack=23;OrderExpiry=1900000000}
 }
@@ -39,5 +40,17 @@ Describe 'Native market purchase result and input boundaries' {
         $invalid.UnitPrice=-1;$invalid.Stack=23
         (Invoke-DuneDockerBotPurchase @invalid).ok | Should -BeFalse
         Should -Invoke Invoke-DuneSqlQuery -Times 0
+    }
+}
+
+Describe 'Market scalar read intent' {
+    BeforeEach {Mock Invoke-DuneSqlQuery { @{ok=$true;columns=@('id');rows=@(,@('17'))} }}
+    It 'keeps scalar observations read-only by default' {
+        (Get-DuneBotScalar -Ip docker -Sql 'SELECT 17').value | Should -Be '17'
+        Should -Invoke Invoke-DuneSqlQuery -Times 1 -ParameterFilter {$ReadOnly -eq $true}
+    }
+    It 'allows a live caller to initialize an inventory explicitly' {
+        (Get-DuneBotScalar -Ip docker -Sql 'SELECT dune.get_exchange_inventory_id(17)' -ReadOnly $false).ok | Should -BeTrue
+        Should -Invoke Invoke-DuneSqlQuery -Times 1 -ParameterFilter {$ReadOnly -eq $false}
     }
 }

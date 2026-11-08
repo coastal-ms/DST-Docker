@@ -208,7 +208,7 @@ if (Test-Path $routesDir) {
     Get-ChildItem -Path $routesDir -Filter '*.ps1' | ForEach-Object { . $_.FullName }
 }
 
-if ($env:DST_HOSTING_BACKEND -ne 'docker' -and (Get-Command Start-DuneGameplayBotScheduler -ErrorAction SilentlyContinue)) {
+if (Get-Command Start-DuneGameplayBotScheduler -ErrorAction SilentlyContinue) {
     try { [void](Start-DuneGameplayBotScheduler -ServerDir $serverDir) } catch {}
 }
 

@@ -853,7 +853,7 @@ function Get-DuneMarketBotDemoConfig {
 function Get-DuneGameplayStatus {
     $ctx = Get-DuneDbContext
     $botEnabled = $false
-    $botConfigured = $env:DST_HOSTING_BACKEND -ne 'docker'
+    $botConfigured = $true
     try { if ($botConfigured -and (Get-Command Read-DuneBotConfig -ErrorAction SilentlyContinue)) { $botEnabled = [bool](Read-DuneBotConfig).enabled } } catch {}
     return [ordered]@{
         db_available   = [bool]$ctx.ok

@@ -71,13 +71,21 @@ Describe 'Docker adapter routing boundary' {
         Test-DuneDockerRouteQualified -Method GET -Path '/api/v1/inventory/items/../occurrences'|Should -BeFalse
         Test-DuneDockerRouteQualified -Method POST -Path '/api/v1/inventory/items'|Should -BeFalse
     }
-    It 'opens only qualified market reads without enabling vendor mutations' {
+    It 'keeps market inspection separate from explicit bot methods' {
         foreach($path in @('/api/gameplay/status','/api/gameplay/market/items','/api/gameplay/market/listings','/api/gameplay/market/sales','/api/gameplay/market/stats','/api/gameplay/market/categories','/api/gameplay/market/catalog')) {
             Test-DuneDockerRouteQualified -Method GET -Path $path|Should -BeTrue
             Test-DuneDockerRouteQualified -Method POST -Path $path|Should -BeFalse
         }
-        Test-DuneDockerRouteQualified -Method POST -Path '/api/gameplay/market-bot/exec'|Should -BeFalse
+        Test-DuneDockerRouteQualified -Method POST -Path '/api/gameplay/market-bot/exec'|Should -BeTrue
         Test-DuneDockerRouteQualified -Method GET -Path '/api/gameplay/market/unreviewed'|Should -BeFalse
+    }
+
+    It 'bounds native market automation to existing exact methods' {
+        foreach($path in @('/api/gameplay/market-bot/status','/api/gameplay/market-bot/config','/api/gameplay/market-bot/balance','/api/gameplay/market-bot/vendor-snapshot')){Test-DuneDockerMarketBotRoute -Method GET -Path $path|Should -BeTrue}
+        Test-DuneDockerMarketBotRoute -Method PUT -Path '/api/gameplay/market-bot/config'|Should -BeTrue
+        foreach($path in @('/api/gameplay/market-bot/config/reset','/api/gameplay/market-bot/exec','/api/gameplay/market-bot/tick','/api/gameplay/market-bot/balance','/api/gameplay/market-bot/clear-listings','/api/gameplay/market-bot/clear-legacy-listings','/api/gameplay/market-bot/tick/list','/api/gameplay/market-bot/clear-error','/api/gameplay/market-bot/seed','/api/gameplay/market-bot/seed/abort')){Test-DuneDockerMarketBotRoute -Method POST -Path $path|Should -BeTrue}
+        foreach($path in @('/api/gameplay/market-bot/exec/extra','/api/gameplay/market-bot/tick/all','/api/gameplay/market-bot/arbitrary','/api/gameplay/market-bot/../exec')){Test-DuneDockerMarketBotRoute -Method POST -Path $path|Should -BeFalse}
+        foreach($method in @('GET','PUT','DELETE')){Test-DuneDockerMarketBotRoute -Method $method -Path '/api/gameplay/market-bot/exec'|Should -BeFalse}
     }
     It 'exposes only the native browser backup routes and bounded download identities' {
         foreach($path in @('/api/db/backup-schedule','/api/db/backup-history','/api/db/backup-dump-pods')){Test-DuneDockerRouteQualified -Method GET -Path $path|Should -BeTrue}

@@ -1,5 +1,48 @@
 # Native market purchases use PostgreSQL directly, without psql variables.
 # Lock and revalidate the selected listing before creating a seller receipt.
+function Get-DuneDockerMarketJobs {
+    $domain = [AppDomain]::CurrentDomain
+    [Threading.Monitor]::Enter($domain)
+    try {
+        $jobs = $domain.GetData('DST.NativeMarketJobs')
+        if ($null -eq $jobs) {
+            $jobs = [Collections.Hashtable]::Synchronized(@{})
+            $domain.SetData('DST.NativeMarketJobs', $jobs)
+        }
+        return $jobs
+    } finally { [Threading.Monitor]::Exit($domain) }
+}
+
+function Test-DuneDockerMarketJobRunning {
+    param([switch]$ExcludeCurrentRunspace)
+    $jobs = Get-DuneDockerMarketJobs
+    [Threading.Monitor]::Enter($jobs.SyncRoot)
+    try {
+        foreach ($kind in @('seed','list')) {
+            $job = $jobs[$kind]
+            if ($ExcludeCurrentRunspace -and $job -and $job.rs -and [runspace]::DefaultRunspace -and
+                $job.rs.InstanceId -eq [runspace]::DefaultRunspace.InstanceId) { continue }
+            if ($job -and $job.ps -and [string]$job.ps.InvocationStateInfo.State -in @('Running','NotStarted','Stopping')) { return $true }
+        }
+        return $false
+    } finally { [Threading.Monitor]::Exit($jobs.SyncRoot) }
+}
+
+function Clear-DuneDockerMarketCompletedJobs {
+    $jobs = Get-DuneDockerMarketJobs
+    [Threading.Monitor]::Enter($jobs.SyncRoot)
+    try {
+        foreach ($kind in @('seed','list')) {
+            $job = $jobs[$kind]
+            if (-not $job -or [string]$job.ps.InvocationStateInfo.State -in @('Running','NotStarted','Stopping')) { continue }
+            try { if ($job.handle) { $null = $job.ps.EndInvoke($job.handle) } } catch {}
+            try { $job.ps.Dispose() } catch {}
+            try { $job.rs.Close(); $job.rs.Dispose() } catch {}
+            $jobs.Remove($kind)
+        }
+    } finally { [Threading.Monitor]::Exit($jobs.SyncRoot) }
+}
+
 function Invoke-DuneDockerBotPurchase {
     param(
         [string]$Ip,

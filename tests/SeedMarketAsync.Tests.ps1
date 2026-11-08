@@ -25,6 +25,32 @@ AfterAll {
     }
 }
 
+Describe 'Market listing progress persistence' -Tag 'MarketBot' {
+    BeforeEach {
+        if (Test-Path -LiteralPath $script:StatePath) { Remove-Item -LiteralPath $script:StatePath -Force }
+    }
+    It 'retains listing progress when another request reads the state' {
+        $state=Read-DuneBotState
+        $state.list_tick_progress=@{phase='starting';running=$true}
+        Save-DuneBotState -State $state
+        $saved=Read-DuneBotState
+        $saved.list_tick_progress.phase | Should -Be 'starting'
+        $saved.list_tick_progress.running | Should -BeTrue
+        $saved.list_tick_progress=@{phase='done';running=$false}
+        Save-DuneBotState -State $saved
+        (Read-DuneBotState).list_tick_progress.phase | Should -Be 'done'
+    }
+    It 'refuses a second listing job while the persisted first job is running' {
+        $state=Read-DuneBotState
+        $state.list_tick_progress=@{phase='writing';running=$true}
+        Save-DuneBotState -State $state
+        $result=Start-DuneBotListTickAsync -ServerDir 'invalid-server-dir'
+        $result.ok | Should -BeFalse
+        $result.running | Should -BeTrue
+        $result.error | Should -Match 'already in progress'
+    }
+}
+
 Describe 'Start-DuneBotSeedAsync — state-file gate' -Tag 'MarketBot' {
 
     BeforeEach {

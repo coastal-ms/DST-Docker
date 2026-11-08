@@ -549,6 +549,7 @@ function Read-DuneBotState {
         error_count       = 0
         last_error        = ''
         seed_progress     = $null   # see Invoke-DuneBotSeedMarket
+        list_tick_progress = $null  # shared progress and duplicate-launch gate
         relist_pending    = $false  # set when market_follow_enabled toggles; next list tick wipes + relists
     }
     $path = Get-DuneBotStatePath
@@ -604,8 +605,8 @@ function ConvertTo-DuneSqlLiteral {
 
 # Run a read-only scalar query; returns @{ ok; value; error }.
 function Get-DuneBotScalar {
-    param([string]$Ip, [string]$Sql)
-    $r = Invoke-DuneSqlQuery -Ip $Ip -Sql $Sql -ReadOnly $true -MaxRows 5 -TimeoutSec 30
+    param([string]$Ip, [string]$Sql, [bool]$ReadOnly=$true)
+    $r = Invoke-DuneSqlQuery -Ip $Ip -Sql $Sql -ReadOnly $ReadOnly -MaxRows 5 -TimeoutSec 30
     if (-not $r.ok) { return @{ ok = $false; error = $r.error } }
     $val = $null
     if ($r.rows -and @($r.rows).Count -ge 1 -and @($r.rows)[0].Length -ge 1) { $val = @($r.rows)[0][0] }
@@ -828,6 +829,9 @@ function Set-DuneBotBalance {
 # ----------------------------------------------------------------------------
 $script:DuneBotClearChunk = 500000
 function Clear-DuneBotListings {
+    if ($env:DST_HOSTING_BACKEND -eq 'docker' -and (Test-DuneDockerMarketJobRunning -ExcludeCurrentRunspace)) {
+        return @{ok=$false;error='Wait for the current market listing job to finish, or abort its seed, before clearing stock.'}
+    }
     $ctx = Get-DuneDbContext
     if (-not $ctx.ok) { return @{ ok = $false; error = $ctx.message } }
 
@@ -870,13 +874,23 @@ WHERE o.owner_id IN ($ownerCsv) AND o.is_npc_order = TRUE AND i.inventory_id IS 
     }
     $ident = Get-DuneBotIdentity -Ip $ctx.ip
     if ($ident.ok -and $ident.provisioned -and $ident.exchangeId -gt 0) {
-        $dukeInvR = Get-DuneBotScalar -Ip $ctx.ip -Sql "SELECT dune.get_exchange_inventory_id($($ident.exchangeId))"
+        $dukeInvR = Get-DuneBotScalar -Ip $ctx.ip -Sql "SELECT dune.get_exchange_inventory_id($($ident.exchangeId))" -ReadOnly:($env:DST_HOSTING_BACKEND -ne 'docker')
         if ($dukeInvR.ok) {
             $dukeInv = ConvertTo-DuneInt $dukeInvR.value
             if ($dukeInv -gt 0) { [void]$invSet.Add($dukeInv) }
         }
     }
     $invIds = @($invSet)
+    # Exchange inventories can contain another vendor's or player's listings.
+    # Native cleanup removes only unreferenced stock in exchange-only storage.
+    $nativeClear = $env:DST_HOSTING_BACKEND -eq 'docker'
+    $itemGuard = if ($nativeClear) { @'
+ AND NOT EXISTS (SELECT 1 FROM dune.dune_exchange_orders active_order WHERE active_order.item_id=dune.items.id)
+ AND EXISTS (SELECT 1 FROM dune.inventories stock_inventory
+             WHERE stock_inventory.id=dune.items.inventory_id AND stock_inventory.exchange_id IS NOT NULL
+               AND stock_inventory.actor_id IS NULL AND stock_inventory.item_id IS NULL
+               AND stock_inventory.vehicle_module_id IS NULL)
+'@ } else { '' }
 
     # Count what's about to disappear (orders + items) for the response message.
     $before = 0L
@@ -901,7 +915,7 @@ GROUP BY o.owner_id
     }
 
     $itemsBefore = 0L
-    if ($invIds.Count -gt 0) {
+    if ($invIds.Count -gt 0 -and -not $nativeClear) {
         $invCsv = ($invIds -join ',')
         $ic = Get-DuneBotScalar -Ip $ctx.ip -Sql "SELECT COUNT(*) FROM dune.items WHERE inventory_id IN ($invCsv)"
         if ($ic.ok) { $itemsBefore = ConvertTo-DuneInt $ic.value }
@@ -917,8 +931,34 @@ DELETE FROM dune.dune_exchange_sell_orders WHERE order_id IN (
 DELETE FROM dune.dune_exchange_orders WHERE owner_id IN ($ownerCsv) AND is_npc_order = TRUE;
 COMMIT;
 "@
+    if ($nativeClear) {
+        $sqlOrders = @"
+BEGIN;
+DELETE FROM dune.dune_exchange_sell_orders WHERE order_id IN (
+  SELECT id FROM dune.dune_exchange_orders WHERE owner_id IN ($ownerCsv) AND is_npc_order=TRUE
+);
+WITH removed AS (
+  DELETE FROM dune.dune_exchange_orders WHERE owner_id IN ($ownerCsv) AND is_npc_order=TRUE RETURNING id
+)
+SELECT count(*)::text AS cleared FROM removed;
+COMMIT;
+"@
+    }
     $w = Invoke-DuneSqlQuery -Ip $ctx.ip -Sql $sqlOrders -ReadOnly $false -MaxRows 5 -TimeoutSec 600 -Bulk
     if (-not $w.ok) { return @{ ok = $false; error = "orders: $($w.error)" } }
+    if ($nativeClear) {
+        $removed = ConvertTo-DuneRowMaps -Result $w
+        if ($removed.Count -ne 1 -or [string]$removed[0].cleared -notmatch '^[0-9]+$') {
+            return @{ok=$false;error='The cleared native market order count could not be read. Refresh before retrying.'}
+        }
+        $before = [long]$removed[0].cleared
+        if ($invIds.Count -gt 0) {
+            $invCsv = ($invIds -join ',')
+            $eligible = Get-DuneBotScalar -Ip $ctx.ip -Sql "SELECT count(*) FROM dune.items WHERE inventory_id IN ($invCsv)$itemGuard"
+            if (-not $eligible.ok) { return @{ok=$false;error=$eligible.error;cleared=$before} }
+            $itemsBefore = ConvertTo-DuneInt $eligible.value
+        }
+    }
 
     # ---- Step 2: nuke ALL items in Duke/Revy inventories (orphans + the rows
     # we just dereferenced). Small inventories run in one shot; big ones loop
@@ -927,19 +967,33 @@ COMMIT;
     if ($invIds.Count -gt 0 -and $itemsBefore -gt 0) {
         $invCsv = ($invIds -join ',')
         if ($itemsBefore -le $script:DuneBotClearChunk) {
-            $sqlItems = "BEGIN; DELETE FROM dune.items WHERE inventory_id IN ($invCsv); COMMIT;"
+            $sqlItems = if ($nativeClear) {
+                "WITH removed AS (DELETE FROM dune.items WHERE inventory_id IN ($invCsv)$itemGuard RETURNING id) SELECT count(*)::text AS deleted FROM removed;"
+            } else { "BEGIN; DELETE FROM dune.items WHERE inventory_id IN ($invCsv); COMMIT;" }
             $w2 = Invoke-DuneSqlQuery -Ip $ctx.ip -Sql $sqlItems -ReadOnly $false -MaxRows 5 -TimeoutSec 600 -Bulk
             if (-not $w2.ok) { return @{ ok = $false; error = "items: $($w2.error)"; cleared = $before } }
-            $itemsDeleted = $itemsBefore
+            if ($nativeClear) {
+                $removed = ConvertTo-DuneRowMaps -Result $w2
+                if ($removed.Count -ne 1 -or [string]$removed[0].deleted -notmatch '^[0-9]+$') { return @{ok=$false;error='The deleted native market item count could not be read.';cleared=$before} }
+                $itemsDeleted = [long]$removed[0].deleted
+            } else { $itemsDeleted = $itemsBefore }
         } else {
             $batch = $script:DuneBotClearChunk
             for ($pass = 0; $pass -lt 100; $pass++) {
-                $sqlBatch = "DELETE FROM dune.items WHERE id IN (SELECT id FROM dune.items WHERE inventory_id IN ($invCsv) LIMIT $batch);"
+                $sqlBatch = if ($nativeClear) {
+                    "WITH removed AS (DELETE FROM dune.items WHERE id IN (SELECT id FROM dune.items WHERE inventory_id IN ($invCsv)$itemGuard LIMIT $batch) RETURNING id) SELECT count(*)::text AS deleted FROM removed;"
+                } else { "DELETE FROM dune.items WHERE id IN (SELECT id FROM dune.items WHERE inventory_id IN ($invCsv) LIMIT $batch);" }
                 $w3 = Invoke-DuneSqlQuery -Ip $ctx.ip -Sql $sqlBatch -ReadOnly $false -MaxRows 5 -TimeoutSec 600 -Bulk
                 if (-not $w3.ok) { return @{ ok = $false; error = "items batch $($pass+1): $($w3.error)"; cleared = $before; items_deleted = $itemsDeleted } }
-                $remR = Get-DuneBotScalar -Ip $ctx.ip -Sql "SELECT COUNT(*) FROM dune.items WHERE inventory_id IN ($invCsv)"
+                if ($nativeClear) {
+                    $removed = ConvertTo-DuneRowMaps -Result $w3
+                    if ($removed.Count -ne 1 -or [string]$removed[0].deleted -notmatch '^[0-9]+$') { return @{ok=$false;error='The deleted native market batch count could not be read.';cleared=$before;items_deleted=$itemsDeleted} }
+                    $itemsDeleted += [long]$removed[0].deleted
+                }
+                $remR = Get-DuneBotScalar -Ip $ctx.ip -Sql "SELECT COUNT(*) FROM dune.items WHERE inventory_id IN ($invCsv)$itemGuard"
+                if ($nativeClear -and -not $remR.ok) { return @{ok=$false;error=$remR.error;cleared=$before;items_deleted=$itemsDeleted} }
                 $remaining = if ($remR.ok) { ConvertTo-DuneInt $remR.value } else { 0 }
-                $itemsDeleted = $itemsBefore - $remaining
+                if (-not $nativeClear) { $itemsDeleted = $itemsBefore - $remaining }
                 if ($remaining -le 0) { break }
             }
         }
@@ -2351,7 +2405,7 @@ function Invoke-DuneBotSeedMarket {
     # ~minute seed into a multi-hour one. Two scalar reads here replace 3000+
     # in-chunk subqueries; we then bake literal position_index values into the
     # SQL emitted by New-DuneBotListingSqlChunk's fast path.
-    $invR = Get-DuneBotScalar -Ip $ctx.ip -Sql "SELECT dune.get_exchange_inventory_id($($ident.exchangeId))"
+    $invR = Get-DuneBotScalar -Ip $ctx.ip -Sql "SELECT dune.get_exchange_inventory_id($($ident.exchangeId))" -ReadOnly:($env:DST_HOSTING_BACKEND -ne 'docker')
     if (-not $invR.ok -or [int64]$invR.value -le 0) {
         $summary.ok = $false
         $summary.message = "resolve inventory id: $(if ($invR.error) { $invR.error } else { 'returned 0/null' })"
@@ -2509,7 +2563,16 @@ function Invoke-DuneBotSeedMarket {
 # Get-DuneDbContext, Save-DuneBotState, etc.) are available exactly as in
 # the main runspace.
 function Start-DuneBotSeedAsync {
-    param([string]$ServerDir)
+    param([string]$ServerDir, [switch]$NativeLaunch)
+    if ($env:DST_HOSTING_BACKEND -eq 'docker' -and -not $NativeLaunch) {
+        $jobs = Get-DuneDockerMarketJobs
+        [Threading.Monitor]::Enter($jobs.SyncRoot)
+        try {
+            if (Test-DuneDockerMarketJobRunning) { return @{ok=$false;running=$true;error='A market listing job is already in progress.'} }
+            Clear-DuneDockerMarketCompletedJobs
+            return Start-DuneBotSeedAsync -ServerDir $ServerDir -NativeLaunch
+        } finally { [Threading.Monitor]::Exit($jobs.SyncRoot) }
+    }
     # Fall back to the server dir captured at lib load time so callers don't
     # need to know about $script:DuneServerDir (which is per-runspace and not
     # populated in the API pool runspaces or the dev-server flow).
@@ -2599,6 +2662,7 @@ function Start-DuneBotSeedAsync {
             }
         }).AddArgument($ServerDir)
         $script:DuneBotSeedRunspace.handle = $ps.BeginInvoke()
+        if ($env:DST_HOSTING_BACKEND -eq 'docker') { (Get-DuneDockerMarketJobs)['seed'] = $script:DuneBotSeedRunspace }
         return @{ ok = $true; running = $true; message = 'Seed market started.' }
     } catch {
         # Bootstrap failed — clear the running flag so the UI doesn't hang
@@ -2624,6 +2688,11 @@ function Start-DuneBotSeedAsync {
 # (we don't pg_cancel_backend) but any chunks not yet sent are dropped and
 # the UI re-enables Seed Market immediately.
 function Stop-DuneBotSeedAsync {
+    $nativeJob = $null
+    if ($env:DST_HOSTING_BACKEND -eq 'docker') {
+        $nativeJob = (Get-DuneDockerMarketJobs)['seed']
+        $script:DuneBotSeedRunspace = $nativeJob
+    }
     $stopped = $false
     if ($script:DuneBotSeedRunspace) {
         try {
@@ -2640,6 +2709,15 @@ function Stop-DuneBotSeedAsync {
             $stopped = $true
         } catch {}
         $script:DuneBotSeedRunspace = $null
+    }
+    if ($env:DST_HOSTING_BACKEND -eq 'docker') {
+        $jobs = Get-DuneDockerMarketJobs
+        [Threading.Monitor]::Enter($jobs.SyncRoot)
+        try {
+            if ([object]::ReferenceEquals($jobs['seed'], $nativeJob)) { $jobs.Remove('seed') }
+            elseif ($jobs['seed']) { return @{ok=$true;stopped=$stopped;message='The earlier seed ended; a newer seed is running.'} }
+        }
+        finally { [Threading.Monitor]::Exit($jobs.SyncRoot) }
     }
     try {
         $st = Read-DuneBotState
@@ -2670,7 +2748,16 @@ function Stop-DuneBotSeedAsync {
 # runspace and return 202 immediately. Dry runs still run inline because the
 # caller needs the plan in the response body.
 function Start-DuneBotListTickAsync {
-        param([string]$ServerDir)
+        param([string]$ServerDir, [switch]$NativeLaunch)
+        if ($env:DST_HOSTING_BACKEND -eq 'docker' -and -not $NativeLaunch) {
+            $jobs = Get-DuneDockerMarketJobs
+            [Threading.Monitor]::Enter($jobs.SyncRoot)
+            try {
+                if (Test-DuneDockerMarketJobRunning) { return @{ok=$false;running=$true;error='A market listing job is already in progress.'} }
+                Clear-DuneDockerMarketCompletedJobs
+                return Start-DuneBotListTickAsync -ServerDir $ServerDir -NativeLaunch
+            } finally { [Threading.Monitor]::Exit($jobs.SyncRoot) }
+        }
         if (-not $ServerDir) { $ServerDir = $script:DuneGameplayBotServerDir }
         $st = Read-DuneBotState
         if ($st.list_tick_progress) {
@@ -2741,7 +2828,8 @@ function Start-DuneBotListTickAsync {
                     } catch {}
                 }
             }).AddArgument($ServerDir)
-            [void]$ps.BeginInvoke()
+            $handle = $ps.BeginInvoke()
+            if ($env:DST_HOSTING_BACKEND -eq 'docker') { (Get-DuneDockerMarketJobs)['list'] = @{ps=$ps;rs=$rs;handle=$handle} }
             return @{ ok = $true; running = $true; message = 'List tick started.' }
         } catch {
             try {
@@ -2954,7 +3042,8 @@ function Start-DuneGameplayBotScheduler {
             while ($true) {
                 try {
                     $cfg = Read-DuneBotConfig
-                    if ($cfg.enabled) {
+                    $nativeBusy = $env:DST_HOSTING_BACKEND -eq 'docker' -and (Test-DuneDockerMarketJobRunning)
+                    if ($cfg.enabled -and -not $nativeBusy) {
                         $state = Read-DuneBotState
                         # Buy tick.
                         $dueBuy = $true

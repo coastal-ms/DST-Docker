@@ -307,7 +307,7 @@ function Get-DuneCapabilitiesForPrincipal {
     $principalName = Get-DuneCapabilityPrincipalName $Principal
     if (-not $principalName) { return @() }
     return @((Get-DuneCapabilityRegistry).capabilities | Where-Object {
-        ($env:DST_HOSTING_BACKEND -ne 'docker' -or [string]$_.id -in @('platform.capabilities','platform.status','operation.health','settings.setup','map.observer','map.live-cache','inventory.read','base.manage','base.manage.destructive','vehicle.rename','vehicle.delete')) -and
+        ($env:DST_HOSTING_BACKEND -ne 'docker' -or [string]$_.id -in @('platform.capabilities','platform.status','operation.health','settings.setup','map.observer','map.live-cache','inventory.read','base.manage','base.manage.destructive','vehicle.rename','vehicle.delete','economy.market','economy.market.manage','economy.market.destructive')) -and
         [string]$_.rolloutState -ne 'unavailable' -and
         (
             [string]$_.id -ne 'map.live-cache' -or
