@@ -768,13 +768,15 @@ SET stats = jsonb_set(
     (
         SELECT jsonb_agg(
             CASE
-                WHEN jsonb_typeof(roll.value) <> 'number' OR roll.value::numeric = 0 THEN roll.value
+                WHEN jsonb_typeof(roll.value) <> 'number' THEN roll.value
+                WHEN roll.value::numeric = 0 THEN roll.value
                 ELSE to_jsonb(1.003398::numeric)
             END
             ORDER BY roll.ordinality
         )
         FROM jsonb_array_elements(
-            i.stats #> '{FAugmentItemStats,1,StatRolls}'
+            CASE WHEN jsonb_typeof(i.stats #> '{FAugmentItemStats,1,StatRolls}') = 'array'
+                THEN i.stats #> '{FAugmentItemStats,1,StatRolls}' ELSE '[]'::jsonb END
         ) WITH ORDINALITY AS roll(value, ordinality)
     ),
     false
@@ -784,7 +786,8 @@ WHERE inv.id = i.inventory_id
   AND inv.actor_id = $PawnId::bigint
   AND i.template_id ILIKE '%Augment%'
   AND jsonb_typeof(i.stats #> '{FAugmentItemStats,1,StatRolls}') = 'array'
-  AND jsonb_array_length(i.stats #> '{FAugmentItemStats,1,StatRolls}') > 0;
+  AND CASE WHEN jsonb_typeof(i.stats #> '{FAugmentItemStats,1,StatRolls}') = 'array'
+      THEN jsonb_array_length(i.stats #> '{FAugmentItemStats,1,StatRolls}') > 0 ELSE false END;
 "@
     $r = Invoke-DuneSqlQuery -Ip $Ip -Sql $sql -ReadOnly $false -MaxRows 1 -TimeoutSec 60
     if (-not $r.ok) { return @{ ok = $false; error = "max augment attributes: $($r.error)" } }

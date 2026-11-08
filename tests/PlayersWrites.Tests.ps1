@@ -509,6 +509,14 @@ Describe 'Invoke-DunePlayerMaxAugmentAttributes' -Tag 'Pure' {
         $script:capturedSql | Should -Match 'to_jsonb\(1\.003398::numeric\)'
         $script:capturedSql | Should -Match 'ORDER BY roll\.ordinality'
     }
+
+    It 'guards array expansion and length before evaluating malformed roll data' {
+        Invoke-DunePlayerMaxAugmentAttributes -Ip '1.2.3.4' -PawnId 42 | Out-Null
+        $script:capturedSql | Should -Match "CASE WHEN jsonb_typeof\(i.stats #> '\{FAugmentItemStats,1,StatRolls\}'\) = 'array'"
+        $script:capturedSql | Should -Match "ELSE '\[\]'::jsonb END"
+        $script:capturedSql | Should -Match 'ELSE false END'
+        $script:capturedSql | Should -Not -Match "<> 'number' OR roll.value::numeric"
+    }
 }
 
 Describe 'Invoke-DunePlayerRepairOrphanedBuildingPieces' -Tag 'Pure' {

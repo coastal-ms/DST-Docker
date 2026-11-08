@@ -3,6 +3,11 @@ BeforeAll {
     Import-DstLib 'DockerRoutes.ps1'
 }
 Describe 'Docker adapter routing boundary' {
+    It 'bounds native augment maximization to the exact existing write method' {
+        Test-DuneDockerRouteQualified -Method POST -Path '/api/gameplay/players/max-augment-attributes'|Should -BeTrue
+        foreach($method in @('GET','PUT','DELETE')){Test-DuneDockerRouteQualified -Method $method -Path '/api/gameplay/players/max-augment-attributes'|Should -BeFalse}
+        Test-DuneDockerRouteQualified -Method POST -Path '/api/gameplay/players/max-augment-attributes/extra'|Should -BeFalse
+    }
     It 'qualifies exact native character tag write methods' {
         foreach($path in @('/api/gameplay/players/tags','/api/gameplay/players/update-tags')){
             Test-DuneDockerRouteQualified -Method POST -Path $path|Should -BeTrue
