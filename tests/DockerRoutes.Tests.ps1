@@ -155,3 +155,20 @@ Describe 'Docker adapter routing boundary' {
         Test-DuneDockerRouteQualified -Method $Method -Path $Path | Should -BeFalse
     }
 }
+
+Describe 'Native Landsraad method boundary' {
+    It 'qualifies exact read and write methods without widening neighboring paths' {
+        foreach($suffix in @('overview','player-contributions','rewards','term-control')){
+            $path='/api/gameplay/landsraad/'+$suffix
+            Test-DuneDockerRouteQualified -Method GET -Path $path|Should -BeTrue
+            Test-DuneDockerRouteQualified -Method POST -Path $path|Should -BeFalse
+        }
+        foreach($suffix in @('set-contribution','set-thresholds','set-reward-tier','set-term-control','restart-bg')){
+            $path='/api/gameplay/landsraad/'+$suffix
+            Test-DuneDockerRouteQualified -Method POST -Path $path|Should -BeTrue
+            Test-DuneDockerRouteQualified -Method GET -Path $path|Should -BeFalse
+            Test-DuneDockerRouteQualified -Method POST -Path ($path+'/extra')|Should -BeFalse
+        }
+        Test-DuneDockerRouteQualified -Method POST -Path '/api/gameplay/landsraad/reset'|Should -BeFalse
+    }
+}

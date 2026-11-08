@@ -4,12 +4,26 @@
     Import-DstLib 'GameConfig.ps1'
     Import-DstLib 'Landsraad.ps1'
     function Invoke-V6Ssh { param($Ip, $Cmd, $StdinData, $TimeoutSec) throw 'Unexpected unmocked SSH call.' }
+    function Read-DuneDockerSettingsFile { param($File) throw 'Unexpected native settings read.' }
     $script:Section = '/Script/DuneSandbox.LandsraadSettings'
     $script:CurrentDefaults = "[$script:Section]`n" + 'DedicatedServerData=(m_TaskGoalAmount=70000,m_LandsraadContractsAbandonCooldownSeconds=3600,m_NumberOfWeeksTermRetention=4,m_TermStartedMessage=(Name="Default"),m_BoardLayouts=((Houses=2)),m_ExtraNewMember=True)' + "`nListenServerData=(m_TaskGoalAmount=500)`n"
     $script:Edit = @{file='game';section=$script:Section;key='m_LandsraadContractsAbandonCooldownSeconds';value='5'}
 }
 
 Describe 'Landsraad current and legacy server structs' {
+    It 'reads Docker server settings through the native adapter without SSH' {
+        $previous = $env:DST_HOSTING_BACKEND
+        try {
+            $env:DST_HOSTING_BACKEND='docker'
+            Mock Read-DuneDockerSettingsFile { @{raw=$script:CurrentDefaults} }
+            Mock Invoke-V6Ssh { throw 'Docker must not use SSH.' }
+            $result=Get-DuneLandsraadIniSettings -Ip docker
+            $result.ok|Should -BeTrue
+            ($result.settings|Where-Object key -eq 'm_TaskGoalAmount').value|Should -Be '70000'
+            Should -Invoke Read-DuneDockerSettingsFile -Times 1 -Exactly -ParameterFilter {$File -eq 'game'}
+            Should -Invoke Invoke-V6Ssh -Times 0 -Exactly
+        } finally { $env:DST_HOSTING_BACKEND=$previous }
+    }
     It 'heals a current stub while preserving customized nested members' {
         $raw = "[$script:Section]`n" + 'DedicatedServerData=(m_TaskGoalAmount=12000,m_TermStartedMessage=(Name="Custom, with commas"))'
         $updates = @(Convert-DuneStructUpdates -Raw $raw -Updates @($script:Edit) -DefaultsRaw $script:CurrentDefaults)

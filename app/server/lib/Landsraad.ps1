@@ -63,8 +63,12 @@ function Get-DuneLandsraadIniSettings {
     param([string]$Ip)
     $settings = New-Object 'System.Collections.Generic.List[object]'
     try {
-        $paths = Resolve-DuneGameConfigPaths -Ip $Ip
-        $raw = (Invoke-V6Ssh -Ip $Ip -Cmd "sudo cat '$($paths.game)' 2>/dev/null") -join "`n"
+        if($env:DST_HOSTING_BACKEND -eq 'docker'){
+            $raw = (Read-DuneDockerSettingsFile -File game).raw
+        }else{
+            $paths = Resolve-DuneGameConfigPaths -Ip $Ip
+            $raw = (Invoke-V6Ssh -Ip $Ip -Cmd "sudo cat '$($paths.game)' 2>/dev/null") -join "`n"
+        }
     } catch {
         return @{ ok = $false; error = "read UserGame.ini: $($_.Exception.Message)"; settings = @() }
     }

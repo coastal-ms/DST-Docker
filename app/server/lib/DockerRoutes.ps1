@@ -31,11 +31,18 @@ function Test-DuneDockerMarketBotRoute {
     }
 }
 
+function Test-DuneDockerLandsraadRoute {
+    param([string]$Method,[string]$Path)
+    if($Method -ceq 'GET'){return $Path -cin @('/api/gameplay/landsraad/overview','/api/gameplay/landsraad/player-contributions','/api/gameplay/landsraad/rewards','/api/gameplay/landsraad/term-control')}
+    return $Method -ceq 'POST' -and $Path -cin @('/api/gameplay/landsraad/set-contribution','/api/gameplay/landsraad/set-thresholds','/api/gameplay/landsraad/set-reward-tier','/api/gameplay/landsraad/set-term-control','/api/gameplay/landsraad/restart-bg')
+}
+
 function Test-DuneDockerRouteQualified {
     param([string]$Method,[string]$Path)
     if(Test-DuneDockerAccountManagementRoute -Method $Method -Path $Path){return $true}
     if(Test-DuneDockerVehicleDeletionRoute -Method $Method -Path $Path){return $true}
     if(Test-DuneDockerMarketBotRoute -Method $Method -Path $Path){return $true}
+    if(Test-DuneDockerLandsraadRoute -Method $Method -Path $Path){return $true}
     if($Path.StartsWith('/api/docker/file-browser/',[StringComparison]::Ordinal) -and $Method -in @('GET','HEAD','POST','PUT','PATCH','DELETE')){return $true}
     if($Method -eq 'GET' -and $Path -cmatch '^/api/docker/backup-exports/[a-f0-9]{32}$'){return $true}
     if($Method -eq 'POST' -and $Path -eq '/api/docker/backup-import'){return $true}

@@ -9,6 +9,7 @@
 BeforeAll {
     . (Join-Path $PSScriptRoot '_TestHelpers.ps1')
     Import-DstLib 'Landsraad.ps1'
+    function Invoke-DuneBattlegroupRestart { param($Ip) throw 'Unexpected battlegroup restart.' }
 
     function global:ConvertTo-DuneRowMaps { param($Result) $m = if ($Result -and $Result.maps) { $Result.maps } else { @() }; return ,@($m) }
     function global:ConvertTo-DuneInt     { param($Value) if ($null -eq $Value) { return 0 } return [int64]$Value }
@@ -37,6 +38,16 @@ BeforeAll {
     function global:Get-DuneLandsraadCurrentTermId {
         param($Ip)
         return @{ ok = $true; term_id = $global:DstTermId }
+    }
+}
+
+Describe 'Landsraad native restart delegation' {
+    It 'uses the shared qualified battlegroup restart and preserves its operation identity' {
+        Mock Invoke-DuneBattlegroupRestart { @{ok=$true;operationId='native-operation';message='Restart launched.'} }
+        $result=Invoke-DuneLandsraadBgRestart -Ip docker
+        $result.ok|Should -BeTrue
+        $result.operationId|Should -Be 'native-operation'
+        Should -Invoke Invoke-DuneBattlegroupRestart -Times 1 -Exactly -ParameterFilter {$Ip -eq 'docker'}
     }
 }
 
