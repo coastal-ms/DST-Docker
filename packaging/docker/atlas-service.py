@@ -46,6 +46,7 @@ def prepare(root):
     query='''param([Parameter(Mandatory)][string]$SqlFile,[Parameter(Mandatory)][string]$OutputFile,[int]$MaxRows=2000)
 $ErrorActionPreference='Stop'
 $script:AppDir='/opt/dst/app'
+. /opt/dst/app/server/lib/DockerManager.ps1
 . /opt/dst/app/server/lib/DockerDatabase.ps1
 . /opt/dst/app/server/lib/Database.ps1
 $context=Get-DuneDbContext
