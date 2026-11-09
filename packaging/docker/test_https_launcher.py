@@ -28,7 +28,7 @@ class HttpsLauncherTests(unittest.TestCase):
             tools=release/'packaging/docker';tools.mkdir(parents=True)
             shutil.copy(Path(__file__).with_name('portal_urls.py'),tools/'portal_urls.py')
             shutil.copy(Path(__file__).with_name('mirror_config.py'),tools/'mirror_config.py')
-            (tools/'https.py').write_text("import json,sys\na=sys.argv; value=lambda flag:a[a.index(flag)+1]\np=value('--output'); old=json.load(open(p)); old['x-dst-https-origin']='https://'+value('--address')+':'+value('--port'); old['x-dst-http-internal-port']=int(value('--upstream-port')); old['x-dst-https-format']=2; json.dump(old,open(p,'w'))\n")
+            (tools/'https.py').write_text("import json,sys\na=sys.argv; value=lambda flag:a[a.index(flag)+1]\np=value('--output'); old=json.load(open(p))\nif a[1]=='restart-policy':\n old.setdefault('services',{}).setdefault('https',{})['restart']='unless-stopped'; json.dump(old,open(p,'w')); sys.exit()\nold['x-dst-https-origin']='https://'+value('--address')+':'+value('--port'); old['x-dst-http-internal-port']=int(value('--upstream-port')); old['x-dst-https-format']=2; json.dump(old,open(p,'w'))\n")
             self.releases.append(release)
         self.override=self.prefix/'https.compose.json'
         self.override.write_text(json.dumps({'x-dst-https-origin':'https://192.0.2.1:8443','services':{}}))

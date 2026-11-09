@@ -10,7 +10,7 @@ type SwapStatus = {
   requiresDefaultRestore?: boolean
   operation?: { id: string; phase: string; error?: string }
 }
-type Started = { ok: boolean; error?: string; data?: { operation: { id: string } } }
+type Started = { operation?: { id: string } }
 type Mode = 'low' | 'automatic' | 'custom'
 const field = 'rounded border border-border bg-surface px-2 py-1 text-text'
 
@@ -46,8 +46,8 @@ function OwnerMemorySwapControl() {
   const selectedPool = mode === 'custom' ? pool : Math.max(0, Math.min(32, selectedAllowance * (status?.worldServerCount || 2) - (status?.existingSwapGiB || 0)))
   const selectedSwappiness = mode === 'custom' ? swappiness : 10
   async function wait(started: Started) {
-    if (!started.ok || !started.data) throw new Error(started.error || 'Memory Swap could not start.')
-    const id = started.data.operation.id, end = Date.now() + 20 * 60 * 1000
+    if (!started.operation?.id) throw new Error('Memory Swap did not return a recorded operation. Refresh its status before retrying.')
+    const id = started.operation.id, end = Date.now() + 20 * 60 * 1000
     while (Date.now() < end) {
       const current = await api<SwapStatus>('/api/docker/memory-swap')
       setStatus(current)
@@ -67,7 +67,7 @@ function OwnerMemorySwapControl() {
     }
     if (enabled && selectedPool > status.safeAvailableDiskGiB) { setError('The selected pool would consume the host disk safety reserve.'); return }
     const review = enabled
-      ? `Enable Memory Swap?\n\nExisting host swap: ${status.existingSwapGiB} GiB\nAdditional managed swap: ${selectedPool} GiB\nEmergency allowance per running map: ${selectedAllowance} GiB\nHost swappiness: ${selectedSwappiness}\nDisk reserve: at least 25 GiB or 10%\n\nMap RAM limits stay unchanged. Disk-backed memory can increase loading time and lag.`
+      ? `Apply Memory Swap?\n\nEach map may use up to ${selectedAllowance} GiB of swap when RAM is under pressure.\nExisting shared host swap: ${status.existingSwapGiB} GiB\nAdditional swap file to create: ${selectedPool} GiB\nSwappiness: ${selectedSwappiness}\n\nThe allowance is a limit, not reserved memory. All maps share the host’s available swap. RAM limits stay unchanged. Disk-backed memory can increase loading time and lag.`
       : 'Disable Memory Swap?\n\nRestore Docker’s default swap allowance and remove only this installation’s managed swap file. Administrator-managed host swap remains available. Host swappiness is restored only if DST still owns the current value.'
     if (!window.confirm(review)) return
     setBusy(true); setError(''); setMessage('Applying Memory Swap…')
@@ -90,17 +90,18 @@ function OwnerMemorySwapControl() {
   return <section className="mt-3 border-t border-border/40 pt-3" aria-label="Memory Swap controls">
     <button type="button" className="btn-secondary min-h-10" aria-expanded={open} onClick={() => setOpen(!open)}>Memory Swap: {status ? status.enabled ? 'On' : 'Off' : 'Loading…'}</button>
     {open && <div className="mt-3 space-y-3 text-sm">
-      <p className="text-text-dim">Disk-backed emergency memory is separate from memory balancing. Your map RAM limits stay unchanged.</p>
+      <p className="text-text-dim">Swap lets maps use disk space when RAM is under pressure. It is slower than RAM and can increase loading time or lag. Your map RAM limits stay unchanged.</p>
       {!status?.available ? <p role="status">{status?.error || 'Host swap information is unavailable.'} <button type="button" className="btn-secondary" onClick={() => { void load() }}>Refresh swap status</button></p> : <>
-        <p>Existing host swap: {status.existingSwapGiB} GiB. Managed pool: {status.poolGiB} GiB ({status.hostPoolActive ? 'active' : 'inactive'}). Host swappiness: {status.swappiness}.</p>
+        <p>Shared host swap already available: {status.existingSwapGiB} GiB. DST’s additional swap file: {status.poolGiB} GiB{status.poolGiB > 0 ? (status.hostPoolActive ? ' (active)' : ' (inactive)') : ' (none)' }.</p>
         {status.requiresDefaultRestore && <p role="status" className="text-text-dim">Existing maps retain their previous swap limits. Apply Memory Swap or explicitly restore Docker’s default allowance below. RAM limits stay unchanged.</p>}
         <label className="flex items-center gap-2">Mode<select aria-label="Memory Swap mode" className={field} disabled={blocked || status.pending} value={mode} onChange={e => setMode(e.target.value as Mode)}><option value="low">Low · 1 GiB per map</option><option value="automatic">Automatic · 2 GiB per map</option><option value="custom">Custom</option></select></label>
         {mode === 'custom' && <div className="flex flex-wrap gap-3">
-          <label>Swap per map (GiB)<input aria-label="Swap per map" className={`${field} ml-2 w-20`} type="number" min={1} max={16} step={1} disabled={blocked || status.pending} value={allowance} onChange={e => setAllowance(Number(e.target.value))} /></label>
-          <label>Managed pool (GiB)<input aria-label="Managed swap pool" className={`${field} ml-2 w-20`} type="number" min={0} max={32} step={1} disabled={blocked || status.pending} value={pool} onChange={e => setPool(Number(e.target.value))} /></label>
-          <label>Swappiness<input aria-label="Swap swappiness" className={`${field} ml-2 w-20`} type="number" min={0} max={100} step={1} disabled={blocked || status.pending} value={swappiness} onChange={e => setSwappiness(Number(e.target.value))} /></label>
+          <label>Maximum swap per map (GiB)<input aria-label="Swap per map" className={`${field} ml-2 w-20`} type="number" min={1} max={16} step={1} disabled={blocked || status.pending} value={allowance} onChange={e => setAllowance(Number(e.target.value))} /></label>
+          <label>Additional host swap file (GiB)<input aria-label="Managed swap pool" className={`${field} ml-2 w-20`} type="number" min={0} max={32} step={1} disabled={blocked || status.pending} value={pool} onChange={e => setPool(Number(e.target.value))} /></label>
+          <label>Swappiness (advanced)<input aria-label="Swap swappiness" className={`${field} ml-2 w-20`} type="number" min={0} max={100} step={1} disabled={blocked || status.pending} value={swappiness} onChange={e => setSwappiness(Number(e.target.value))} /></label>
         </div>}
-        <p className="text-text-dim">Selected: {selectedAllowance} GiB per running map, {selectedPool} GiB additional managed swap, swappiness {selectedSwappiness}. Automatic sizing accounts for existing host swap and at least two running maps. At least 25 GiB or 10% of the host disk stays free.</p>
+        <p className="text-text-dim">Each map may use up to {selectedAllowance} GiB of swap; this is a limit, not a reservation. All maps share the host’s swap space. {selectedPool === 0 ? 'No additional swap file will be created.' : `DST will create an additional ${selectedPool} GiB swap file.`}</p>
+        <p className="text-text-dim">Low and Automatic choose the per-map limit and account for swap already available. In Custom, set the additional file to 0 to use existing swap only. Swappiness controls how readily Linux moves memory to disk; the default is 10. Creating a file keeps at least 25 GiB or 10% of the disk free.</p>
         {status.pending ? <div role="status" className="space-y-2"><p>{status.pendingChange?.error || 'A Memory Swap change is pending.'}</p><button type="button" className="btn-primary mr-2" disabled={blocked} onClick={() => { void recover(false) }}>Retry Memory Swap</button><button type="button" className="btn-secondary" disabled={blocked} onClick={() => { void recover(true) }}>Restore previous swap policy</button></div>
           : <div className="flex flex-wrap gap-2"><button type="button" className="btn-primary" disabled={blocked} onClick={() => { void change(true) }}>{status.enabled ? 'Apply Memory Swap' : 'Enable Memory Swap'}</button>{(status.enabled || status.requiresDefaultRestore) && <button type="button" className="btn-secondary" disabled={blocked} onClick={() => { void change(false) }}>{status.enabled ? 'Disable Memory Swap' : 'Restore Docker default swap'}</button>}</div>}
       </>}

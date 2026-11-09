@@ -212,7 +212,7 @@ def public_state(state, engine):
             'profile':state.get('profile'), 'partitionsPrepared':bool(state.get('partitionsPrepared')),
             'connectionServices':connections,'services':services,'desiredState':state.get('desiredState','stopped'),
             'plan':public_plan(state['worldPlan']) if state.get('worldPlan') else None,
-            'operation':state.get('operation'),'backups':sorted(backups,key=lambda row:row['createdAt'],reverse=True),
+            'operation':state.get('operation'),'startupRecoveryError':state.get('startupRecoveryError'),'backups':sorted(backups,key=lambda row:row['createdAt'],reverse=True),
             'backupMirror':backup_mirror_control.snapshot(state,engine),
             'worldRestart':world_restart.snapshot(state),
             'backupCleanup':{key:state['backupCleanup'][key] for key in ('phase','error','startedAt') if key in state['backupCleanup']} if state.get('backupCleanup') else None,
@@ -1505,11 +1505,13 @@ def run_operation(state,engine,request):
     finally:save(state)
 
 
-def dispatch(request, engine=None):
+def dispatch(request, engine=None, *, resume_running_only=False):
     engine = engine or Engine()
     action = request.get('action')
     with LOCK:
         state = project_state()
+        if resume_running_only and (state.get('desiredState')!='running' or state.get('operation',{}).get('phase') not in {None,'completed'}):
+            return public_state(state,engine)
         if action == 'status': return public_state(state, engine)
         # Turning chat Off must remove its listener even while a game command
         # or maintenance operation is in progress. This touches only DST's queue.
@@ -1704,6 +1706,36 @@ def resume_interrupted_world_research(state,engine):
     finally:save(state)
 
 
+def resume_requested_services(engine):
+    """Recover saved running intent once per manager boot through normal guards."""
+    try:
+        with LOCK:
+            state=project_state()
+            if state.get('desiredState')!='running' or not state.get('worldPlan') or not state.get('services'):
+                return False
+            if state.get('operation',{}).get('phase') not in {None,'completed'}:
+                return False
+            initial={p for row in state['worldPlan']['maps'] for p in row['partitions'][:row['initialReplicas']]}
+            required=[(name,row) for name,row in state.get('connections',{}).items()]
+            for name,row in state['services'].items():
+                if name.startswith('game-'):
+                    default='running' if int(name[5:]) in initial else 'stopped'
+                    if state.get('mapTargets',{}).get(name,default)!='running':continue
+                required.append((name,row))
+            if all(engine.assert_owned(row['id'],state['id'],name)['State']['Status']=='running' for name,row in required):
+                return False
+        # Dispatch re-reads persisted state and enforces pending-change, resource,
+        # migration and recovery guards instead of starting containers directly.
+        dispatch({'action':'services.start'},engine,resume_running_only=True)
+        return True
+    except Exception as exc:
+        with LOCK:
+            state=project_state()
+            state['startupRecoveryError']=str(exc)
+            save(state)
+        return False
+
+
 if __name__ == '__main__':
     recovered=project_state()
     restoring=False
@@ -1737,4 +1769,5 @@ if __name__ == '__main__':
     SOCKET.chmod(0o660)
     BACKUP_WORKER=threading.Thread(target=run_backup_scheduler,name='DuneBackupScheduler',daemon=True)
     BACKUP_WORKER.start()
+    threading.Thread(target=resume_requested_services,args=(Engine(),),name='DuneStartupRecovery',daemon=True).start()
     server.serve_forever()

@@ -13,7 +13,7 @@ afterEach(() => { cleanup(); vi.restoreAllMocks() })
 describe('Docker Memory Swap', () => {
   it('uses existing host swap and reviews the automatic policy before sending a typed operation', async () => {
     vi.mocked(api).mockResolvedValueOnce(status)
-      .mockResolvedValueOnce({ ok: true, data: { operation: { id: 'swap-op' } } })
+      .mockResolvedValueOnce({ operation: { id: 'swap-op' } })
       .mockResolvedValueOnce({ ...status, enabled: true, operation: { id: 'swap-op', phase: 'completed' } })
     render(<MemorySwapControl />)
     fireEvent.click(await screen.findByRole('button', { name: 'Memory Swap: Off' }))
@@ -21,7 +21,7 @@ describe('Docker Memory Swap', () => {
     await waitFor(() => expect(screen.getByText(/Memory Swap saved and verified/)).toBeInTheDocument())
     const options = vi.mocked(api).mock.calls.find(([path, value]) => path === '/api/docker/memory-swap' && value?.method === 'PUT')?.[1]
     expect(JSON.parse(String(options?.body))).toEqual({ enabled: true, perServerGiB: 2, poolGiB: 0, swappiness: 10, confirmation: 'ENABLE MEMORY SWAP' })
-    expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining('Map RAM limits stay unchanged'))
+    expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining('RAM limits stay unchanged'))
   })
 
   it('does not start a host operation when the review is cancelled', async () => {
@@ -34,7 +34,7 @@ describe('Docker Memory Swap', () => {
 
   it('restores the previous recorded policy after an interrupted change', async () => {
     vi.mocked(api).mockResolvedValueOnce({ ...status, pending: true, pendingChange: { error: 'Host pool needs recovery.' }, operation: { id: 'old', phase: 'failed' } })
-      .mockResolvedValueOnce({ ok: true, data: { operation: { id: 'recover-op' } } })
+      .mockResolvedValueOnce({ operation: { id: 'recover-op' } })
       .mockResolvedValueOnce({ ...status, operation: { id: 'recover-op', phase: 'completed' } })
     render(<MemorySwapControl />)
     fireEvent.click(await screen.findByRole('button', { name: 'Memory Swap: Off' }))
@@ -51,7 +51,7 @@ describe('Docker Memory Swap', () => {
 
   it('preserves an actionable preflight error after refreshing unchanged status', async () => {
     vi.mocked(api).mockResolvedValueOnce(status)
-      .mockResolvedValueOnce({ ok: true, data: { operation: { id: 'failed-op' } } })
+      .mockResolvedValueOnce({ operation: { id: 'failed-op' } })
       .mockResolvedValueOnce({ ...status, operation: { id: 'failed-op', phase: 'failed', error: 'Host swap accounting is unavailable.' } })
       .mockResolvedValueOnce({ ...status, operation: { id: 'failed-op', phase: 'failed' } })
     render(<MemorySwapControl />)

@@ -30,7 +30,7 @@ services:
     # routes still enforce the console token on non-loopback connections.
     network_mode: host
     init: true
-    restart: "no"
+    restart: unless-stopped
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
@@ -53,7 +53,7 @@ services:
       dockerfile: packaging/docker/manager.Dockerfile
     network_mode: none
     init: true
-    restart: "no"
+    restart: unless-stopped
     read_only: true
     cap_drop: [ALL]
     group_add: ["10001"]
@@ -72,7 +72,7 @@ services:
       dockerfile: packaging/docker/observer.Dockerfile
     network_mode: none
     init: true
-    restart: "no"
+    restart: unless-stopped
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]

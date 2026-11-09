@@ -1,6 +1,7 @@
 import argparse
 import importlib.util
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -48,8 +49,21 @@ class HttpsTests(unittest.TestCase):
         self.assertEqual(app['volumes'],['dst-https-config:/run/dst-tls:ro'])
         self.assertNotIn('build',proxy)
         self.assertEqual(proxy['user'],'10001:10001')
+        self.assertEqual(proxy['restart'],'unless-stopped')
         self.assertNotIn('/var/run/docker.sock',json.dumps(config))
         self.assertNotIn('secret',json.dumps(config))
+
+    def test_restart_upgrade_preserves_existing_tls_and_custom_metadata(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output=Path(temporary)/'https.json'
+            before=tls.compose_override('dst','https://192.0.2.1:8443',18088)
+            before['services']['https']['restart']='no';before['custom']='preserve'
+            output.write_text(json.dumps(before))
+            args=argparse.Namespace(output=str(output))
+            with patch('mirror_config.launch_owner',return_value=(os.getuid(),os.getgid(),Path(temporary))):
+                tls.upgrade_restart_policy(args)
+            after=json.loads(output.read_text());self.assertEqual(after['services']['https'].pop('restart'),'unless-stopped')
+            before['services']['https'].pop('restart');self.assertEqual(after,before)
 
     def test_prepare_refuses_to_replace_existing_authority_or_override(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -54,6 +54,8 @@ The installer prepares missing prerequisites on supported Ubuntu/Debian hosts, e
 
 ## Open the portal
 
+The console and management services restart when Docker starts, including when you reopen a systemd-enabled WSL distribution. A battlegroup saved as running resumes through the normal startup checks; a deliberately stopped battlegroup or map stays stopped. An interrupted maintenance operation still requires recovery before startup. Intentionally stopping the management containers keeps them stopped until you start DST again.
+
 When startup completes, the terminal prints a private first-setup link. Open that complete link in your normal browser and choose your Owner username and password. After setup, open the console's IP address and port and sign in with that account. Windows users can use their Windows browser; it does not need to run inside the WSL terminal.
 
 The launcher prints links for the Linux host's IP addresses as well as localhost. In WSL NAT mode, its Linux address works from Windows. To use the Windows machine's LAN address, run `packaging/docker/Enable-DstDockerLan.ps1 -ListenAddress <Windows-LAN-IP>` from administrator Windows PowerShell after the console starts. Use `-WhatIf` to preview the specific forwarding and private-LAN firewall rule. Rerun it if WSL receives a new address.

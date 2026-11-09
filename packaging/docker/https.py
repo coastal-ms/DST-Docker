@@ -105,7 +105,7 @@ def compose_override(project, origin, internal_port):
             },
             'https': {
                 'image': CADDY, 'network_mode': 'host', 'user': '10001:10001',
-                'restart': 'no', 'init': True, 'read_only': True,
+                'restart': 'unless-stopped', 'init': True, 'read_only': True,
                 'cap_drop': ['ALL'], 'security_opt': ['no-new-privileges:true'],
                 'command': ['caddy', 'run', '--config', '/run/dst-tls/Caddyfile', '--adapter', 'caddyfile'],
                 'environment': {'XDG_DATA_HOME': '/data', 'XDG_CONFIG_HOME': '/tmp/caddy-config'},
@@ -216,6 +216,17 @@ def export(args):
                       'clientTrustInstalled': False}))
 
 
+def upgrade_restart_policy(args):
+    output=Path(args.output).resolve()
+    value=json.loads(output.read_text())
+    proxy=value.get('services',{}).get('https')
+    if not isinstance(proxy,dict):
+        raise ValueError('The HTTPS override has no proxy service; review it before upgrading.')
+    if proxy.get('restart')=='unless-stopped':return
+    proxy['restart']='unless-stopped'
+    write_override(output,value,replace=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
@@ -230,9 +241,11 @@ def main():
     e = commands.add_parser('export-root', help='Export only the public CA certificate after HTTPS starts.')
     e.add_argument('--project', required=True)
     e.add_argument('--output', required=True)
+    r = commands.add_parser('restart-policy', help='Upgrade existing management restart policy without touching TLS identity.')
+    r.add_argument('--output', required=True)
     args = parser.parse_args()
     try:
-        {'prepare': prepare, 'update': update, 'export-root': export}[args.command](args)
+        {'prepare': prepare, 'update': update, 'export-root': export, 'restart-policy': upgrade_restart_policy}[args.command](args)
     except (ValueError, RuntimeError) as exc:
         parser.exit(1, str(exc) + '\n')
 

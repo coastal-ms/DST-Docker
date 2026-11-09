@@ -19,6 +19,34 @@ class FakeEngine:
 
 
 class ManagerTests(unittest.TestCase):
+    def test_boot_recovery_uses_guarded_start_only_for_saved_running_world(self):
+        state={'id':'a'*32,'desiredState':'running','worldPlan':{'maps':[{'partitions':[1,2],'initialReplicas':1}]},
+               'services':{'director':{'id':'director'},'game-1':{'id':'one'},'game-2':{'id':'two'}},
+               'mapTargets':{'game-2':'stopped'},'operation':{'phase':'completed'}}
+        engine=Mock(spec=manager.Engine);engine.assert_owned.return_value={'State':{'Status':'exited'}}
+        with patch.object(manager,'project_state',return_value=state),patch.object(manager,'dispatch') as dispatch:
+            self.assertTrue(manager.resume_requested_services(engine))
+            dispatch.assert_called_once_with({'action':'services.start'},engine,resume_running_only=True)
+        engine.assert_owned.assert_called_once_with('director','a'*32,'director')
+        for desired,phase in [('stopped','completed'),('running','running'),('running','interrupted'),('running','failed')]:
+            state['desiredState']=desired;state['operation']['phase']=phase
+            with patch.object(manager,'project_state',return_value=state),patch.object(manager,'dispatch') as dispatch:
+                self.assertFalse(manager.resume_requested_services(engine));dispatch.assert_not_called()
+
+    def test_boot_recovery_does_not_restart_healthy_world_or_manually_stopped_map(self):
+        state={'id':'a'*32,'desiredState':'running','worldPlan':{'maps':[{'partitions':[1,2],'initialReplicas':1}]},
+               'services':{'director':{'id':'director'},'game-1':{'id':'one'},'game-2':{'id':'two'}},'mapTargets':{'game-2':'stopped'}}
+        engine=Mock(spec=manager.Engine);engine.assert_owned.return_value={'State':{'Status':'running'}}
+        with patch.object(manager,'project_state',return_value=state),patch.object(manager,'dispatch') as dispatch:
+            self.assertFalse(manager.resume_requested_services(engine));dispatch.assert_not_called()
+        self.assertEqual([call.args[0] for call in engine.assert_owned.call_args_list],['director','one'])
+
+    def test_boot_dispatch_rechecks_stop_under_the_operation_lock(self):
+        state={'id':'a'*32,'desiredState':'stopped','operation':{'phase':'completed'}}
+        with patch.object(manager,'project_state',return_value=state),patch.object(manager,'public_state',return_value=state),patch.object(manager,'save') as save,patch.object(manager.threading,'Thread') as thread:
+            self.assertIs(manager.dispatch({'action':'services.start'},FakeEngine(),resume_running_only=True),state)
+            save.assert_not_called();thread.assert_not_called()
+
     def test_diagnostics_scope_is_accepted_by_the_persisted_export_dispatcher(self):
         state={'id':'a'*32,'phase':'new'}
         with patch.object(manager,'project_state',return_value=state),patch.object(manager,'save'),patch.object(manager,'public_state',return_value=state),patch.object(manager.threading,'Thread') as thread:

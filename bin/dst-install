@@ -134,6 +134,9 @@ task_engine_os=$("${task_docker[@]}" docker info --format '{{.OperatingSystem}}'
 [[ "$task_engine_os" != *'Docker Desktop'* ]] || fail 'Use Docker Engine inside Linux/WSL for this hosting preview; Docker Desktop hosting is not qualified.'
 task_engine_api=$("${task_docker[@]}" docker version --format '{{.Server.APIVersion}}')
 [[ "$task_engine_api" =~ ^1\.([0-9]+)$ && "${BASH_REMATCH[1]}" -ge 45 ]] || fail 'Docker Engine 26 or newer is required for shared UserSettings volume subdirectories.'
+if [[ "$(ps -p 1 -o comm= | tr -d ' ')" == systemd ]] && ! systemctl is-enabled --quiet docker; then
+  "${task_sudo[@]}" systemctl enable docker
+fi
 
 printf '[3/5] Installing DST source\n'
 task_stage='preparing the source package'
