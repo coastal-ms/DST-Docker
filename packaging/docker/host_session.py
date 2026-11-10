@@ -1,7 +1,7 @@
 """Foreground WSL hosting session and narrowly scoped desktop integration.
 
 No daemon or scheduled task: the installed DST shortcut owns this visible
-session. Containers can request only status, recreate-shortcut or shutdown.
+session. Containers can request status, WSL memory settings, shortcut or shutdown.
 """
 import argparse
 import base64
@@ -23,6 +23,7 @@ import uuid
 
 WSL='/mnt/c/Windows/System32/wsl.exe'
 POWERSHELL='/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe'
+BROWSERS={'default':'System default','chrome':'Google Chrome','edge':'Microsoft Edge','firefox':'Mozilla Firefox'}
 
 def run(args,**kwargs):
     if 'input' not in kwargs and 'stdin' not in kwargs:kwargs['stdin']=subprocess.DEVNULL
@@ -93,9 +94,54 @@ class HostSession:
         environment={**os.environ,'COMPOSE_PROJECT_NAME':self.config['project'],'COMPOSE_FILE':os.pathsep.join(self.config['composeFiles'])}
         print('Management terminal. Type exit to return to the hosting menu.',flush=True)
         subprocess.run(['bash','--noprofile','--norc','-i'],cwd=self.config['source'],env=environment,check=False)
+    def browser_preference(self):
+        path=self.directory/'browser.json'
+        if not path.exists():return 'default'
+        value=json.loads(path.read_text(encoding='utf-8')).get('browser','default')
+        if value not in BROWSERS:raise ValueError('Choose a browser using option 6 in the hosting window.')
+        return value
+    def choose_browser(self,reader=None):
+        reader=reader or input
+        current=self.browser_preference()
+        for number,(key,label) in enumerate(BROWSERS.items(),1):
+            print(f'{number}  {label}'+(' (selected)' if key==current else ''),flush=True)
+        choice=reader('Browser number (Enter to keep current): ').strip()
+        if not choice:return
+        if not choice.isdigit() or not 1<=int(choice)<=len(BROWSERS):raise ValueError('Choose a browser number from the list.')
+        selected=list(BROWSERS)[int(choice)-1]
+        if selected!='default':self.browser_executable(selected)
+        write_json(self.directory/'browser.json',{'browser':selected})
+        print(f'Browser saved: {BROWSERS[selected]}. Use option 1 to open it.',flush=True)
+    def browser_executable(self,browser):
+        executable,relative={'chrome':('chrome.exe',r'Google\Chrome\Application\chrome.exe'),'edge':('msedge.exe',r'Microsoft\Edge\Application\msedge.exe'),'firefox':('firefox.exe',r'Mozilla Firefox\firefox.exe')}[browser]
+        script="""$ErrorActionPreference='Stop'
+[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)
+$paths=@()
+foreach($hive in @('HKCU:','HKLM:')){
+ foreach($prefix in @('SOFTWARE','SOFTWARE\\WOW6432Node')){
+  $key=Join-Path $hive ($prefix+'\\Microsoft\\Windows\\CurrentVersion\\App Paths\\'+EXE)
+  if(Test-Path -LiteralPath $key){$paths+=(Get-Item -LiteralPath $key).GetValue('')}
+ }
+}
+foreach($folder in @($env:ProgramFiles,${env:ProgramFiles(x86)},$env:LOCALAPPDATA)){
+ if($folder){$paths+=Join-Path $folder RELATIVE}
+}
+foreach($path in $paths){
+ if($path -and (Test-Path -LiteralPath $path -PathType Leaf)){Write-Output $path;break}
+}
+""".replace('EXE',ps_literal(executable)).replace('RELATIVE',ps_literal(relative))
+        path=windows_script(script)
+        if not path:raise ValueError(f'{BROWSERS[browser]} is not installed. Install it or choose another browser with option 6.')
+        return path
+    def open_browser(self):
+        browser=self.browser_preference();url=self.browser_url()
+        if browser=='default':windows_script('Start-Process '+ps_literal(url))
+        else:
+            path=self.browser_executable(browser)
+            windows_script('Start-Process -FilePath '+ps_literal(path)+' -ArgumentList '+ps_literal(subprocess.list2cmdline([url])))
     def console_menu(self,reader=None):
         reader=reader or input
-        print('\nDST Docker\n  1  Open browser\n  2  Recover Owner password\n  3  Open management terminal\n  4  Recreate desktop shortcut\n  5  Shut down host',flush=True)
+        print('\nDST Docker\n  1  Open browser\n  2  Recover Owner password\n  3  Open management terminal\n  4  Recreate desktop shortcut\n  5  Shut down host\n  6  Choose browser',flush=True)
         while True:
             try:
                 choice=reader('Choose an option: ').strip()
@@ -105,6 +151,7 @@ class HostSession:
                 elif choice=='2':self.owner_recovery(reader)
                 elif choice=='3':self.management_terminal()
                 elif choice=='4':print(self.shortcut(),flush=True)
+                elif choice=='6':self.choose_browser(reader)
                 elif choice=='5':
                     self.request({'action':'shutdown','confirmation':'SHUT DOWN HOST'})
                     self.shutdown_finished.wait()
@@ -207,6 +254,13 @@ Write-Output $path
             return {'accepted':True}
         if action=='status':
             with self.lock:return {'available':True,'platform':'wsl','phase':self.phase,'message':self.message,'busy':self.busy,'localMenuAvailable':bool(getattr(self,'menu_thread',None) and self.menu_thread.is_alive())}
+        if action in {'memory.get','memory.set'}:
+            import wsl_memory
+            if action=='memory.set' and 'memoryGiB' not in request:raise ValueError('Choose a RAM limit or the WSL default.')
+            current=int(next(line.split()[1] for line in Path('/proc/meminfo').read_text().splitlines() if line.startswith('MemTotal:')))*1024
+            boot_id=Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+            with self.lock:
+                return wsl_memory.settings(windows_script,self.directory,current,boot_id,request.get('memoryGiB') if action=='memory.set' else wsl_memory.READ)
         if action=='shortcut':
             with self.lock:
                 if self.busy:raise ValueError('Wait for host shutdown before recreating a shortcut.')
@@ -306,7 +360,7 @@ Write-Output $path
                 if not getattr(self,'resume_worker',None) or not self.resume_worker.is_alive():
                     self.resume_worker=threading.Thread(target=self.finish_resume,daemon=True)
                     self.resume_worker.start()
-        if open_browser:windows_script('Start-Process '+ps_literal(self.browser_url()))
+        if open_browser:self.open_browser()
     def browser_url(self):
         origin=getattr(self,'console_origin',None)
         if not origin:raise ValueError('The console address is not ready.')

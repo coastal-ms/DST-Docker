@@ -26,6 +26,13 @@ class ResourcePolicyTests(unittest.TestCase):
 
     def test_valid_allocations_leave_host_and_service_headroom(self):
         self.assertEqual(policy.validate_change(world(),change(),self.host),change())
+    def test_saved_budget_follows_a_lower_wsl_ceiling_without_changing_map_limits(self):
+        state=world();state['resourcePolicy']={'memoryGiB':38}
+        with patch.object(policy,'host_capacity',return_value={**self.host,'memoryBytes':24*GIB}):
+            result=policy.snapshot(state,self.engine)
+        self.assertEqual(result['memoryGiB'],22)
+        self.assertEqual(result['maps'][0]['memoryGiB'],4)
+        self.assertEqual(state['resourcePolicy']['memoryGiB'],38)
 
     def test_host_capacity_respects_container_memory_and_cpu_ceilings(self):
         def read(path):

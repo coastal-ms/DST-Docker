@@ -13,6 +13,47 @@ const snapshot = () => ({
 })
 afterEach(() => { cleanup(); sessionStorage.clear(); vi.clearAllMocks() })
 describe('Map management', () => {
+  it('sorts names both ways and keeps the editor with its map', async () => {
+    vi.mocked(api).mockResolvedValue(snapshot())
+    render(<DockerMapManagement />)
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Edit resources' }))[0])
+    fireEvent.change(screen.getByLabelText('Hagga Basin RAM limit in GiB'), { target: { value: '12' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by Map', exact: true }))
+    const names = () => Array.from(document.querySelectorAll('tbody tr > td:first-child > strong')).map(node => node.textContent)
+    expect(names()).toEqual(['Deep Desert', 'Hagga Basin'])
+    expect(screen.getByRole('columnheader', { name: /Map/ })).toHaveAttribute('aria-sort', 'ascending')
+    expect(screen.getByLabelText('Hagga Basin RAM limit in GiB')).toHaveValue(12)
+    expect(screen.getByRole('region', { name: 'Hagga Basin resources' }).closest('tr')?.previousElementSibling).toHaveTextContent('Hagga Basin')
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by Map', exact: true }))
+    expect(names()).toEqual(['Hagga Basin', 'Deep Desert'])
+    fireEvent.change(screen.getByPlaceholderText('Map name'), { target: { value: 'desert' } })
+    expect(names()).toEqual(['Deep Desert'])
+  })
+  it('sorts RAM, swap and players numerically, keeping unknown samples last', async () => {
+    const base = snapshot()
+    const data = { ...base, metadata: { ...base.metadata, plan: { ...base.metadata.plan, maps: [...base.metadata.plan.maps, { map: 'Overmap', partitions: [2], memoryBytes: 2 * 1024 ** 3, initialReplicas: 1 }] }, services: [
+      { component: 'game-1', state: 'running', gameReady: true, players: 12 },
+      { component: 'game-8', state: 'running', gameReady: true, players: 2 },
+      { component: 'game-2', state: 'running', gameReady: false },
+    ] }, samples: { containers: [
+      { component: 'game-1', memory: { usedBytes: 12 * 1024 ** 3, limitBytes: 16 * 1024 ** 3, swapUsedBytes: 12 * 1024 ** 3 } },
+      { component: 'game-8', memory: { usedBytes: 2 * 1024 ** 3, limitBytes: 16 * 1024 ** 3, swapUsedBytes: 2 * 1024 ** 3 } },
+    ] } }
+    vi.mocked(api).mockResolvedValue(data)
+    render(<DockerMapManagement />)
+    await screen.findByText('Overmap', { exact: true, selector: 'strong' })
+    const names = () => Array.from(document.querySelectorAll('tbody tr > td:first-child > strong')).map(node => node.textContent)
+    for (const key of ['RAM', 'Swap', 'Players']) {
+      fireEvent.click(screen.getByRole('button', { name: `Sort by ${key}`, exact: true }))
+      expect(names()).toEqual(['Deep Desert', 'Hagga Basin', 'Overmap'])
+      fireEvent.click(screen.getByRole('button', { name: `Sort by ${key}`, exact: true }))
+      expect(names()).toEqual(['Hagga Basin', 'Deep Desert', 'Overmap'])
+    }
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by Status', exact: true }))
+    expect(names()[0]).toBe('Overmap')
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by Mode', exact: true }))
+    expect(names()[0]).toBe('Hagga Basin')
+  })
   it('shows the target restarting before its old ready process has stopped', async () => {
     vi.mocked(api).mockResolvedValue({...snapshot(),metadata:{...snapshot().metadata,operation:{action:'maps.restart',partition:1,phase:'running'}}})
     render(<DockerMapManagement />)

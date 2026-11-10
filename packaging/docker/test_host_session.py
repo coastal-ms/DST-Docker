@@ -17,6 +17,51 @@ class HostSessionTests(unittest.TestCase):
         self.session=host.HostSession(self.root)
         self.state={'projectId':'world','desiredState':'running','operation':{'phase':'completed'},'services':[],'backups':[]}
     def tearDown(self):self.temp.cleanup()
+    def test_browser_choice_survives_new_session_and_config_refresh(self):
+        self.session.browser_executable=Mock(return_value=r'C:\Program Files\Microsoft\Edge\Application\msedge.exe')
+        with redirect_stdout(io.StringIO()):self.session.choose_browser(lambda _: '3')
+        other=host.HostSession(self.root)
+        self.assertEqual(other.browser_preference(),'edge')
+        self.assertNotIn('browser',other.config)
+        other.console_origin='http://172.25.1.2:8088'
+        with patch.object(other,'browser_executable',return_value=r'C:\Program Files\Microsoft\Edge\Application\msedge.exe'),patch.object(host,'windows_script') as script:
+            other.open_browser()
+        command=script.call_args.args[0]
+        self.assertIn("-FilePath 'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe'",command)
+        self.assertIn("-ArgumentList 'http://172.25.1.2:8088/?_dst_launch=",command)
+    def test_missing_browser_does_not_replace_saved_choice_or_open_default(self):
+        host.write_json(self.session.directory/'browser.json',{'browser':'edge'})
+        self.session.console_origin='http://172.25.1.2:8088'
+        with patch.object(host,'windows_script',return_value='') as script:
+            with self.assertRaisesRegex(ValueError,'not installed'):self.session.open_browser()
+        self.assertEqual(script.call_count,1)
+        with redirect_stdout(io.StringIO()),patch.object(self.session,'browser_executable',side_effect=ValueError('not installed')):
+            with self.assertRaises(ValueError):self.session.choose_browser(lambda _: '2')
+        self.assertEqual(self.session.browser_preference(),'edge')
+    def test_default_cancel_and_invalid_browser_selection(self):
+        self.assertEqual(self.session.browser_preference(),'default')
+        with redirect_stdout(io.StringIO()):
+            self.session.choose_browser(lambda _: '')
+            with self.assertRaises(ValueError):self.session.choose_browser(lambda _: '99')
+        self.assertFalse((self.session.directory/'browser.json').exists())
+        host.write_json(self.session.directory/'browser.json',{'browser':'edge'})
+        with redirect_stdout(io.StringIO()):self.session.choose_browser(lambda _: '1')
+        self.assertEqual(self.session.browser_preference(),'default')
+    def test_browser_path_is_quoted_without_interpreting_apostrophes(self):
+        host.write_json(self.session.directory/'browser.json',{'browser':'chrome'})
+        self.session.console_origin='http://172.25.1.2:8088'
+        with patch.object(self.session,'browser_executable',return_value=r"C:\Users\user\Browser's Folder\chrome.exe"),patch.object(host,'windows_script') as script:
+            self.session.open_browser()
+        self.assertIn("-FilePath 'C:\\Users\\user\\Browser''s Folder\\chrome.exe'",script.call_args.args[0])
+    def test_menu_browser_choice_does_not_add_an_open_prompt_or_duplicate_menu(self):
+        answers=iter(['6','3'])
+        def read(_):
+            try:return next(answers)
+            except StopIteration:raise EOFError()
+        with patch.object(self.session,'browser_executable',return_value=r'C:\Edge\msedge.exe'),redirect_stdout(io.StringIO()) as output:
+            self.session.console_menu(read)
+        self.assertEqual(self.session.browser_preference(),'edge')
+        self.assertEqual(output.getvalue().count('1  Open browser'),1)
     def test_shutdown_confirmation_and_duplicate_do_not_mutate(self):
         self.session.preflight=Mock()
         with self.assertRaisesRegex(ValueError,'Confirm'):self.session.request({'action':'shutdown'})

@@ -29,7 +29,8 @@ def host_capacity():
 def snapshot(state, engine):
     host = host_capacity()
     policy = state.get('resourcePolicy', {})
-    memory = policy.get('memoryGiB', max(1, math.floor(host['memoryBytes'] / GIB) - 2))
+    available_budget = max(1, math.floor(host['memoryBytes'] / GIB) - 2)
+    memory = min(policy.get('memoryGiB', available_budget), available_budget)
     maps = []
     reserved_memory = 0
     reserved_cpu = 0

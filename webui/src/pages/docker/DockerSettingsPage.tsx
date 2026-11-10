@@ -6,6 +6,7 @@ import DockerResourcesCard from './DockerResourcesCard'
 import { PortalAccountsManager } from '../settings/PortalAccountsManager'
 import { usePortalAccess } from '../../auth/portalAccess'
 import { DockerTailscaleAccess } from './DockerTailscaleAccess'
+import { WslMemoryCard } from './WslMemoryCard'
 
 export default function DockerSettingsPage() {
   const { canAccessOwnerSurfaces } = usePortalAccess()
@@ -13,6 +14,7 @@ export default function DockerSettingsPage() {
     <PageHeader title="Settings" icon="Settings" description="Manage your Docker host resources and DST preferences." />
     <div className="space-y-5">
       <DockerResourcesCard />
+      {canAccessOwnerSurfaces && <WslMemoryCard />}
       <MemoryBalancingControl />
       {canAccessOwnerSurfaces && <DockerTailscaleAccess />}
       <AppearanceCard />

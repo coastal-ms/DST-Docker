@@ -18,6 +18,7 @@ type Management = {
 const GIB = 1024 ** 3
 const gb = (bytes: number) => `${(bytes / GIB).toFixed(1)} GiB`
 const modeNames: Record<string, string> = { core: 'Core map', dynamic: 'Dynamic', 'always-on': 'Always on', 'overmap-active': 'Overmap active', disabled: 'Disabled' }
+type SortKey = 'map' | 'status' | 'players' | 'mode' | 'ram' | 'swap'
 const modeHelp: Record<string, string> = {
   core: 'Required by the world. Core maps keep their normal startup policy.',
   dynamic: 'Starts when players need it. Memory balancing allows empty maps to unload.',
@@ -48,6 +49,7 @@ export function DockerMapManagement({ legacyTools }: { legacyTools?: ReactNode }
   const [receivedAt, setReceivedAt] = useState(0)
   const [clock, setClock] = useState(Date.now())
   const [more, setMore] = useState(false)
+  const [sort, setSort] = useState<{ key: SortKey; descending: boolean } | null>(null)
   const mounted = useRef(true)
   const loading = useRef(false)
   useEffect(() => {
@@ -95,6 +97,38 @@ export function DockerMapManagement({ legacyTools }: { legacyTools?: ReactNode }
   const operationRunning = data?.metadata.operation?.phase === 'running'
   const pendingMemory = data?.metadata.pendingMemoryChange
   const operationBusy = operationRunning || !!pendingMemory
+  const rowStatus = (row: MapRow) => {
+    const rows = row.partitions.map(partition => services.find(service => service.component === `game-${partition}`))
+    const running = rows.filter(service => service?.state === 'running').length
+    const ready = rows.filter(service => service?.state === 'running' && service.gameReady === true).length
+    const loadingMap = rows.some(service => service?.state === 'restarting' || service?.desiredState === 'running' && service?.gameReady !== true)
+    const expected = rows.filter(service => service?.desiredState === 'running' || service?.state === 'running' || service?.state === 'restarting').length
+    const failed = !operationBusy && rows.some(service => service?.state === 'exited' && service.desiredState === 'running')
+    const restarting = data?.metadata.operation?.action === 'maps.restart' && data.metadata.operation.phase === 'running' && row.partitions.includes(data.metadata.operation.partition ?? -1)
+    return !worldRunning && (running > 0 || loadingMap) ? 'Stopping' : restarting ? 'Restarting' : failed ? 'Needs attention' : ready >= expected && ready > 0 ? 'Ready' : running > 0 || loadingMap ? 'Loading' : 'Not running'
+  }
+  const sortValue = (row: MapRow, key: SortKey): string | number | null => {
+    if (key === 'map') return mapLabel(row.map)
+    if (key === 'mode') return modeNames[data?.modes[row.map] ?? 'dynamic'] ?? ''
+    if (key === 'status') return rowStatus(row)
+    const running = row.partitions.filter(partition => services.some(service => service.component === `game-${partition}` && service.state === 'running'))
+    if (!running.length) return 0
+    const values = running.map(partition => key === 'players' ? services.find(service => service.component === `game-${partition}`)?.players : key === 'ram' ? sample(`game-${partition}`)?.usedBytes : sample(`game-${partition}`)?.swapUsedBytes)
+    return values.every(value => value != null && Number.isFinite(value)) ? values.reduce<number>((sum, value) => sum + (value ?? 0), 0) : null
+  }
+  const visibleMaps = maps.filter(row => `${row.map} ${mapLabel(row.map)} ${row.partitions.join(' ')}`.toLowerCase().includes(query.toLowerCase()))
+  if (sort) {
+    const values = new Map(visibleMaps.map(row => [row.map, sortValue(row, sort.key)]))
+    visibleMaps.sort((a, b) => {
+      const left = values.get(a.map) ?? null, right = values.get(b.map) ?? null
+      // Unknown samples stay last in either direction; they are never treated as zero.
+      if (left === null || right === null) return left === right ? 0 : left === null ? 1 : -1
+      const order = typeof left === 'number' && typeof right === 'number' ? left - right : String(left).localeCompare(String(right), undefined, { numeric: true })
+      return (sort.descending ? -order : order) || mapLabel(a.map).localeCompare(mapLabel(b.map), undefined, { numeric: true })
+    })
+  }
+  const sortButton = (key: SortKey, label: string) => <button type="button" className="inline-flex items-center gap-1 rounded focus-visible:outline-2 focus-visible:outline-accent" aria-label={`Sort by ${label}`} onClick={() => setSort(previous => ({ key, descending: previous?.key === key ? !previous.descending : false }))}>{label}<span aria-hidden="true">{sort?.key === key ? sort.descending ? '↓' : '↑' : '↕'}</span></button>
+  const sortDirection = (...keys: SortKey[]) => sort && keys.includes(sort.key) ? sort.descending ? 'descending' as const : 'ascending' as const : undefined
   const selectedMap = maps.find(row => row.partitions.some(partition => String(partition) === editing))
   const ramDraft = selectedMap ? memory[selectedMap.map] ?? String(selectedMap.memoryBytes / GIB) : ''
   const ramDirty = !!selectedMap && (ramDraft === '' || Number(ramDraft) !== selectedMap.memoryBytes / GIB)
@@ -142,15 +176,13 @@ export function DockerMapManagement({ legacyTools }: { legacyTools?: ReactNode }
     {!data && !loadError && <p role="status">Loading maps and memory…</p>}
     {data && !maps.length && <p>Complete Server Setup to prepare the map catalogue.</p>}
     {data && maps.length > 0 && !maps.some(row => `${row.map} ${mapLabel(row.map)} ${row.partitions.join(' ')}`.toLowerCase().includes(query.toLowerCase())) && <p>No maps match this search.</p>}
-    <div id="docker-map-list" className="scroll-mt-20 overflow-x-auto rounded-lg border border-border"><table className="w-full text-left text-sm"><thead className="bg-surface text-text-muted"><tr><th className="p-3">Map</th><th className="p-3">Status / players</th><th className="hidden p-3 md:table-cell">Mode</th><th className="hidden p-3 md:table-cell">RAM / swap</th><th className="hidden p-3 md:table-cell">Actions</th></tr></thead><tbody>{maps.filter(row => `${row.map} ${mapLabel(row.map)} ${row.partitions.join(' ')}`.toLowerCase().includes(query.toLowerCase())).map(row => {
+    <div id="docker-map-list" className="scroll-mt-20 overflow-x-auto rounded-lg border border-border"><table className="w-full text-left text-sm"><thead className="bg-surface text-text-muted"><tr><th className="p-3" aria-sort={sortDirection('map')}>{sortButton('map', 'Map')}</th><th className="p-3" aria-sort={sortDirection('status', 'players')}>{sortButton('status', 'Status')} / {sortButton('players', 'Players')}</th><th className="hidden p-3 md:table-cell" aria-sort={sortDirection('mode')}>{sortButton('mode', 'Mode')}</th><th className="hidden p-3 md:table-cell" aria-sort={sortDirection('ram', 'swap')}>{sortButton('ram', 'RAM')} / {sortButton('swap', 'Swap')}</th><th className="hidden p-3 md:table-cell">Actions</th></tr></thead><tbody>{visibleMaps.map(row => {
       const rows = row.partitions.map(partition => services.find(service => service.component === `game-${partition}`))
       const running = rows.filter(service => service?.state === 'running').length
       const ready = rows.filter(service => service?.state === 'running' && service.gameReady === true).length
-      const loadingMap = rows.some(service => service?.state === 'restarting' || service?.desiredState === 'running' && service?.gameReady !== true)
       const expected = rows.filter(service => service?.desiredState === 'running' || service?.state === 'running' || service?.state === 'restarting').length
       const failed = !operationBusy && rows.some(service => service?.state === 'exited' && service.desiredState === 'running')
-      const restarting = data?.metadata.operation?.action === 'maps.restart' && data.metadata.operation.phase === 'running' && row.partitions.includes(data.metadata.operation.partition ?? -1)
-      const status = !worldRunning && (running > 0 || loadingMap) ? 'Stopping' : restarting ? 'Restarting' : failed ? 'Needs attention' : ready >= expected && ready > 0 ? 'Ready' : running > 0 || loadingMap ? 'Loading' : 'Not running'
+      const status = rowStatus(row)
       const mode = data?.modes[row.map] ?? 'dynamic'
       const usage = row.partitions.map(partition => sample(`game-${partition}`))
       const used = usage.filter(value => value !== undefined)
