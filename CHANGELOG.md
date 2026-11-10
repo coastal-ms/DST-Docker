@@ -1,6 +1,6 @@
 # DST Docker changelog
 
-## Unreleased
+## [1.0.2]
 
 - Keep Overmap first in the Game Servers list.
 - Set a lower WSL RAM ceiling from Settings, with changes applied at the next WSL restart.
