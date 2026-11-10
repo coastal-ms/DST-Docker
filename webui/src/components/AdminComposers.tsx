@@ -1,3 +1,4 @@
+import { confirmAction } from '../util/actionConfirmation'
 // Compact composer cards for the three admin "talk to players" actions that
 // the reference implementation exposes via its /api/v1/notify endpoint: a generic on-screen
 // message ("broadcast"), a shutdown countdown ("server alert"), and a
@@ -113,7 +114,7 @@ export function ShutdownBroadcastComposer() {
 
   const onBroadcast = useCallback(async () => {
     const verb = shutdownType === 'Restart' ? 'restart' : 'shut down'
-    if (!confirm(`Broadcast a ${verb} in ${delay} minute${delay === 1 ? '' : 's'}? All connected players will see a countdown.`)) return
+    if (!confirmAction(`Broadcast a ${verb} in ${delay} minute${delay === 1 ? '' : 's'}? All connected players will see a countdown.`)) return
     setBusy('broadcast'); setMsg(null)
     try {
       const r = await sendShutdownBroadcast(shutdownType, Math.max(0, delay), false)

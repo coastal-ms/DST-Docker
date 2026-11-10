@@ -1,3 +1,4 @@
+import { confirmAction } from '../util/actionConfirmation'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   DndContext,
@@ -21,6 +22,7 @@ import {
 } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import { DockerHostControls } from './commands/DockerHostControls'
+import { DockerUpdateProgress } from './commands/DockerUpdateProgress'
 import { PageHeader } from '../components/PageHeader'
 import { Icon } from '../components/Icon'
 import { CommandCategoryPages } from './commands/CommandCategoryPages'
@@ -592,7 +594,7 @@ export function Commands() {
   }
 
   async function resetLayout() {
-    if (!window.confirm('Reset the Commands page to its default layout (section names, order, and assignments)?')) return
+    if (!confirmAction('Reset the Commands page to its default layout (section names, order, and assignments)?')) return
     if (saveTimer.current) window.clearTimeout(saveTimer.current)
     setSavingLayout(true)
     try {
@@ -709,17 +711,7 @@ export function Commands() {
         </div>
       )}
 
-      {updating && serverOperation?.phase === 'running' && (
-        <div role="status" aria-label="Server update status" className="card p-3 mb-4 text-sm flex items-center gap-2">
-          <Icon name="RefreshCw" size={14} className="animate-spin" />
-          {serverOperation.message || 'Server update is running.'} You can return to this page to follow progress.
-        </div>
-      )}
-      {updating && ['failed', 'interrupted'].includes(serverOperation?.phase ?? '') && serverOperation?.error && (
-        <div role="alert" className="card p-3 mb-4 border-danger/40 bg-danger/10 text-danger text-sm">
-          {serverOperation.error}
-        </div>
-      )}
+      {docker && (updatesOnly || updating) && <DockerUpdateProgress operation={updating ? serverOperation : undefined} />}
 
       {showWorkbench ? (
         <>

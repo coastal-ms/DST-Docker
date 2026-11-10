@@ -1,3 +1,4 @@
+import { confirmAction } from '../../util/actionConfirmation'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Icon } from '../../components/Icon'
 import { ItemPicker } from '../../components/ItemPicker'
@@ -179,7 +180,7 @@ function ContainerDetail({ container, demo, onClose, onChanged, onRenamed }: {
   }
 
   const handleDelete = async (it: InventoryItem) => {
-    if (!window.confirm(`Remove ${it.name} (×${it.stack_size}) from this container? This cannot be undone.`)) return
+    if (!confirmAction(`Remove ${it.name} (×${it.stack_size}) from this container? This cannot be undone.`)) return
     setBusy(true); setError(null); setFlash(null)
     try {
       const r = await deleteStorageItem(it.id)

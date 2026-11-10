@@ -1,3 +1,4 @@
+import { promptConfirmation, confirmAction } from '../util/actionConfirmation'
 import { useState, useEffect, useMemo, useCallback, useId, useRef, type FormEvent, type KeyboardEvent, type ReactElement } from 'react'
 import { PageHeader } from '../components/PageHeader'
 import { Icon } from '../components/Icon'
@@ -677,7 +678,7 @@ export function GameConfig({ mode = 'standard', embedded = false, section = 'adv
 
   const handleFieldChange = useCallback((key: string, newVal: string, remove = false) => {
     if (
-      key === SANDWORM_ENABLED_KEY &&
+      import.meta.env.VITE_DST_EDITION !== 'docker' && key === SANDWORM_ENABLED_KEY &&
       newVal === '1' &&
       (values[key] ?? '') !== '1'
     ) {
@@ -1216,7 +1217,7 @@ export function GameConfig({ mode = 'standard', embedded = false, section = 'adv
 
   async function onInitializeGameConfig() {
     if (initializing) return
-    const typed = window.prompt(
+    const typed = promptConfirmation("INITIALIZE GAME CONFIG",
       'Adopt the currently-installed Funcom UserGame.ini/UserEngine.ini defaults as this battlegroup\'s managed Game Config?\n\n'
       + 'This does NOT change the contents of either file — it only marks them as ready to manage here so saves and dependent features (Landsraad, Maps, Diagnostics) work.\n\n'
       + 'Type INITIALIZE GAME CONFIG to continue:',
@@ -1242,7 +1243,7 @@ export function GameConfig({ mode = 'standard', embedded = false, section = 'adv
 
   async function onReloadPods() {
     if (dirtyKeys.length > 0 || reloadingPods) return
-    const ok = window.confirm(
+    const ok = confirmAction(
       'Deploy the saved server settings and restart the battlegroup?\n\n'
       + 'All maps restart together and connected players disconnect. Player PC configuration is separate and will not be changed.',
     )
@@ -1991,7 +1992,7 @@ export function GameConfig({ mode = 'standard', embedded = false, section = 'adv
                 className="btn-primary"
               >
                 <Icon name={saving ? 'Loader2' : 'Save'} size={15} className={saving ? 'animate-spin' : ''} />
-                {saving ? 'Saving…' : applyController ? 'Review & Apply' : 'Save'}
+                {saving ? 'Saving…' : applyController && !dockerEdition ? 'Review & Apply' : 'Save'}
               </button>
             </div>
           </div>
@@ -1999,7 +2000,7 @@ export function GameConfig({ mode = 'standard', embedded = false, section = 'adv
       )}
       </div>
       {embedded && <div hidden={section !== 'tools'}>
-        <p className="card mb-4 p-4 text-sm text-text-muted">These tools have their own actions because their targets differ from ordinary field drafts. Save partition choices while maps are running, then use Review & Apply to deploy the saved server configuration. {dockerEdition ? 'The land-claim timer includes manual player instructions; base protection changes database cleanup immediately.' : 'The land-claim timer also targets the DST host PC; base protection changes database cleanup immediately.'}</p>
+        <p className="card mb-4 p-4 text-sm text-text-muted">These tools have their own actions because their targets differ from ordinary field drafts. Save partition choices while maps are running, {dockerEdition ? 'changes load at the next map start.' : 'then use Review & Apply to deploy the saved server configuration.'} {dockerEdition ? 'The land-claim timer includes manual player instructions; base protection changes database cleanup immediately.' : 'The land-claim timer also targets the DST host PC; base protection changes database cleanup immediately.'}</p>
         <DeepDesertPvpCard vmRunning={vmRunning} />
         <LandclaimTimerCard vmRunning={vmRunning} />
         <section className="card mb-4 p-4"><h2 className="text-sm font-semibold">Base-backup protection · server database · immediate</h2><BaseBackupGuardPanel vmRunning={vmRunning} /></section>

@@ -8,6 +8,36 @@ import assets
 
 
 class AssetStagingTests(unittest.TestCase):
+    def test_missing_configuration_is_retried_without_touching_the_active_package(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);stage=root/'staged'/'retry';(stage/'steam').mkdir(parents=True)
+            (stage/'steam/steamcmd.sh').write_text('fixture')
+            active=root/'server';active.mkdir();(active/'keep.ini').write_text('keep')
+            calls=[]
+            def download(command, **kwargs):
+                calls.append(command)
+                if len(calls)==1:
+                    kwargs['stdout'].write("ERROR! Failed to install app '4754530' (Missing configuration)\n")
+                    return Mock(returncode=8)
+                manifest=stage/'server/steamapps/appmanifest_4754530.acf';manifest.parent.mkdir(parents=True)
+                manifest.write_text('"appid" "4754530"\n"buildid" "120"\n')
+                return Mock(returncode=0)
+            with patch.object(assets,'package_inventory',return_value=[]),patch.object(assets.subprocess,'run',side_effect=download),patch.object(assets.time,'sleep'):
+                assets.install(stage,expected_build='120')
+            self.assertEqual(len(calls),2);self.assertEqual((active/'keep.ini').read_text(),'keep')
+            self.assertIn('Missing configuration',(stage/'steam-install.log').read_text())
+
+    def test_missing_configuration_retries_are_bounded_and_other_errors_are_not_retried(self):
+        for error,code,expected_calls in [("ERROR! Failed to install app '4754530' (Missing configuration)",8,3),('Disk full',8,1),('Network failure',1,1)]:
+            with self.subTest(error=error),tempfile.TemporaryDirectory() as folder:
+                stage=Path(folder);(stage/'steam').mkdir();(stage/'steam/steamcmd.sh').write_text('fixture')
+                def download(command, **kwargs):
+                    kwargs['stdout'].write(error+'\n');return Mock(returncode=code)
+                with patch.object(assets.subprocess,'run',side_effect=download) as run,patch.object(assets.time,'sleep'):
+                    with self.assertRaises(RuntimeError):assets.install(stage,expected_build='120')
+                self.assertEqual(run.call_count,expected_calls)
+                self.assertEqual(json.loads((stage/'install-state.json').read_text())['state'],'failed')
+
     def test_download_stage_keeps_the_entire_active_tree_untouched(self):
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder);active=root/'server';active.mkdir()

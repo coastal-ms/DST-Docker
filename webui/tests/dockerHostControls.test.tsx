@@ -18,14 +18,13 @@ describe('WSL host controls', () => {
     expect(await screen.findByRole('button', { name: 'Starting…' })).toBeDisabled()
     expect(screen.getByRole('status')).toHaveTextContent('Reopening the DST console')
   })
-  it('requires explicit confirmation and shows shutdown before the page disconnects', async () => {
+  it('starts shutdown directly and shows progress before the page disconnects', async () => {
     vi.mocked(api).mockResolvedValue({ available: true, message: 'Ready' } as never)
     render(<DockerHostControls />)
     const button = await screen.findByRole('button', { name: 'Shut down host' })
     await waitFor(() => expect(button).toBeEnabled())
     fireEvent.click(button)
-    expect(vi.mocked(api).mock.calls.some(([, o]) => o?.method === 'POST')).toBe(false)
-    fireEvent.click(screen.getByRole('button', { name: 'Confirm shutdown' }))
+    expect(screen.queryByRole('alertdialog')).toBeNull()
     await screen.findByText(/Shutting down: stopping/)
     expect(api).toHaveBeenCalledWith('/api/docker/host', expect.objectContaining({ method: 'POST', body: JSON.stringify({ action: 'shutdown', confirmation: 'SHUT DOWN HOST' }) }))
     expect(screen.getByRole('button', { name: 'Shutting down…' })).toBeDisabled()
@@ -38,9 +37,8 @@ describe('WSL host controls', () => {
     render(<DockerHostControls />)
     await waitFor(() => expect(screen.getByRole('button', { name: 'Shut down host' })).toBeEnabled())
     fireEvent.click(screen.getByRole('button', { name: 'Shut down host' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Confirm shutdown' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('Another WSL distribution')
-    expect(screen.getByRole('button', { name: 'Confirm shutdown' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Shut down host' })).toBeEnabled()
   })
   it('recreates the icon without shutting down the host', async () => {
     vi.mocked(api).mockResolvedValue({ available: true, message: 'Ready', path: 'Desktop/DST Docker.lnk' } as never)

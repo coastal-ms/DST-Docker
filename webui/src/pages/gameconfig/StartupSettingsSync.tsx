@@ -38,7 +38,7 @@ export function StartupSettingsSync({ onBusyChange }: { onBusyChange?: (busy: bo
   }
   return <div className="rounded-lg border border-border bg-surface p-4">
     <label className="flex items-center gap-2 text-sm">
-      <input type="checkbox" checked={enabled} disabled={loading || saving || !canChange} onChange={e => e.target.checked ? void save(true) : setConfirmDisable(true)} />
+      <input type="checkbox" checked={enabled} disabled={loading || saving || !canChange} onChange={e => e.target.checked ? void save(true) : dockerEdition ? void save(false) : setConfirmDisable(true)} />
       Let DST manage server configuration
     </label>
     <p className="mt-2 text-xs text-text-muted">When off, DST keeps your INI values and saves file edits without managing server startup.</p>

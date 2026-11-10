@@ -1,3 +1,4 @@
+import { confirmAction } from '../../util/actionConfirmation'
 import { useEffect, useState } from 'react'
 import { Icon } from '../../components/Icon'
 import {
@@ -33,7 +34,7 @@ export function TimeOfDayLockPanel({ vmRunning }: { vmRunning: boolean }) {
 
   async function stage() {
     if (!candidate) return
-    const confirmed = window.confirm(
+    const confirmed = confirmAction(
       `Set phase ${candidate}?\n\n`
       + 'DST will first verify a server Game.ini backup, then write the selected m_StartTime and disable the cycle. '
       + 'Nothing takes effect until Apply server settings. DST will not modify client files.',
@@ -57,7 +58,7 @@ export function TimeOfDayLockPanel({ vmRunning }: { vmRunning: boolean }) {
   }
 
   async function restore() {
-    const confirmed = window.confirm(
+    const confirmed = confirmAction(
       'Restore normal cycle?\n\nDST will verify a fresh server Game.ini backup, remove both DST-managed twilight overrides, '
       + 'and restore shipped default semantics. Apply server settings is still required.',
     )

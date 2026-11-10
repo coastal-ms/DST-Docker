@@ -1,3 +1,4 @@
+import { confirmAction } from '../../util/actionConfirmation'
 import { useEffect, useState } from 'react'
 import { api } from '../../api/client'
 
@@ -31,7 +32,7 @@ export function DockerDatabaseControl({ onChanged, onReadyChange }: { onChanged:
   const busy = posting || state?.operation?.phase === 'running' || state?.backups.some(row => ['preparing', 'running'].includes(row.phase) || ['preparing', 'running'].includes(row.verification?.phase || ''))
   const canStop = state?.desiredState !== 'running' && state?.services.every(row => ['created', 'exited'].includes(row.state))
   async function perform(action: 'database.start' | 'database.stop') {
-    if (action === 'database.stop' && !window.confirm('Stop the database service? SQL and backup verification remain unavailable until you start it again. The stopped battlegroup stays stopped.')) return
+    if (action === 'database.stop' && !confirmAction('Stop the database service? SQL and backup verification remain unavailable until you start it again. The stopped battlegroup stays stopped.')) return
     setPosting(true); setError('')
     try {
       const started = await api<Reply>('/api/docker/setup', { method: 'POST', body: JSON.stringify({ action }) })

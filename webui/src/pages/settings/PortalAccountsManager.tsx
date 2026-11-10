@@ -1,3 +1,4 @@
+import { confirmAction } from '../../util/actionConfirmation'
 import { useEffect, useState } from 'react'
 import { Icon } from '../../components/Icon'
 import { api } from '../../api/client'
@@ -229,7 +230,7 @@ export function PortalAccountsManager({ docker = false }: { docker?: boolean } =
             <button className="btn-secondary justify-center px-2 py-1.5 text-xs" disabled={busy} onClick={() => void run(async () => { await revokePortalAccountSessions(account.id); setMessage('Sessions revoked.') })}>Revoke sessions</button>
             <button className="btn-secondary justify-center px-2 py-1.5 text-xs" disabled={busy} onClick={() => void run(async () => { await updatePortalAccount(account.id, { enabled: !account.enabled }) })}>{account.enabled ? 'Disable' : 'Enable'}</button>
             <button className="btn-danger justify-center px-2 py-1.5 text-xs" disabled={busy} onClick={() => {
-              if (window.confirm(`Delete portal account "${account.username}"?`)) void run(async () => { await deletePortalAccount(account.id) })
+              if (confirmAction(`Delete portal account "${account.username}"?`)) void run(async () => { await deletePortalAccount(account.id) })
             }}>Delete</button>
           </div>
         </div>

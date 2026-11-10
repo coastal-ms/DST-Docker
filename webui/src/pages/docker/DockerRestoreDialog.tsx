@@ -8,7 +8,6 @@ type Reply = { ok: boolean; data?: State; error?: string }
 export default function DockerRestoreDialog({ onClose, onComplete }: { onClose: () => void; onComplete: () => void }) {
   const [backups, setBackups] = useState<Backup[]>([])
   const [selected, setSelected] = useState('')
-  const [confirmation, setConfirmation] = useState('')
   const [busy, setBusy] = useState(false)
   const [progress, setProgress] = useState('')
   const [error, setError] = useState('')
@@ -25,7 +24,7 @@ export default function DockerRestoreDialog({ onClose, onComplete }: { onClose: 
   async function restore() {
     setBusy(true); setError(''); setProgress('Starting restore…')
     try {
-      const reply = await withOnlinePlayerGuard(force => api<Reply>(`/api/docker/setup${force ? '?force=true' : ''}`, { method: 'POST', body: JSON.stringify({ action: 'backups.restore', backupId: selected, confirmation }) }))
+      const reply = await withOnlinePlayerGuard(force => api<Reply>(`/api/docker/setup${force ? '?force=true' : ''}`, { method: 'POST', body: JSON.stringify({ action: 'backups.restore', backupId: selected, confirmation: 'RESTORE' }) }))
       if (!reply.ok || !reply.data?.operation) throw new Error(reply.error || 'Could not start restore.')
       const operationId = reply.data.operation.id
       const deadline = Date.now() + 2 * 60 * 60 * 1000
@@ -48,10 +47,9 @@ export default function DockerRestoreDialog({ onClose, onComplete }: { onClose: 
       <p className="mt-3 text-sm text-text-muted">This rolls all players, bases, inventory and world data back to the selected snapshot. Changes made since that snapshot will be replaced.</p>
       <label className="mt-4 block text-sm">Verified backup<select className="input mt-2 w-full" aria-label="Verified backup" disabled={busy} value={selected} onChange={event => setSelected(event.target.value)}>{backups.map(backup => <option key={backup.id} value={backup.id}>{new Date(backup.createdAt * 1000).toLocaleString()} · {backup.name}</option>)}</select></label>
       {!backups.length && <p className="mt-2 text-sm text-warning">Verify a saved backup before restoring it.</p>}
-      <label className="mt-4 block text-sm">Type RESTORE to continue<input className="input mt-2 w-full" aria-label="Restore confirmation" disabled={busy} value={confirmation} onChange={event => setConfirmation(event.target.value)} autoComplete="off" /></label>
       {busy && <p role="status" className="mt-4 text-sm text-accent">{progress}</p>}
       {error && <p role="alert" className="mt-4 text-sm text-danger">{error}</p>}
-      <div className="mt-5 flex justify-end gap-3"><button className="btn-secondary" disabled={busy} onClick={onClose}>Cancel</button><button className="btn-primary" disabled={busy || !selected || confirmation !== 'RESTORE'} onClick={() => void restore()}>Restore selected backup</button></div>
+      <div className="mt-5 flex justify-end gap-3"><button className="btn-secondary" disabled={busy} onClick={onClose}>Cancel</button><button className="btn-primary" disabled={busy || !selected} onClick={() => void restore()}>Restore selected backup</button></div>
     </div>
   </div>
 }

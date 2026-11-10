@@ -12,6 +12,7 @@ from asset_version import installed_version
 ROOT = Path('/srv/dst')
 STEAM_URL = 'https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz'
 APP_ID = '4754530'
+MISSING_CONFIGURATION = "Steam did not provide the server package configuration after three attempts. Retry Update Server."
 
 
 def write_state(state, root=ROOT, **fields):
@@ -68,9 +69,20 @@ def install(root=ROOT, expected_build=None):
                    '+@NoPromptForPassword', '1', '+@sSteamCmdForcePlatformType', 'linux',
                    '+force_install_dir', str(server), '+login', 'anonymous',
                    '+app_update', APP_ID, 'validate', '+logoff', '+quit']
-        with log.open('w', encoding='utf-8') as output:
-            result = subprocess.run(command, stdout=output, stderr=subprocess.STDOUT, env={**os.environ, 'HOME': '/home/dst'}, check=False)
-        if result.returncode != 0: raise RuntimeError(f'SteamCMD exited with code {result.returncode}. Inspect the local installation log.')
+        for attempt in range(3):
+            with log.open('w' if attempt == 0 else 'a', encoding='utf-8') as output:
+                offset = output.tell()
+                result = subprocess.run(command, stdout=output, stderr=subprocess.STDOUT, env={**os.environ, 'HOME': '/home/dst'}, check=False)
+            if result.returncode == 0:
+                break
+            with log.open(encoding='utf-8', errors='replace') as output:
+                output.seek(offset)
+                missing_configuration = "Failed to install app '4754530' (Missing configuration)" in output.read()
+            if result.returncode != 8 or not missing_configuration:
+                raise RuntimeError(f'SteamCMD exited with code {result.returncode}. Inspect the local installation log.')
+            if attempt == 2:
+                raise RuntimeError(MISSING_CONFIGURATION)
+            time.sleep(2 * (attempt + 1))
         images = package_inventory(server)
         version = installed_version(server / 'steamapps/appmanifest_4754530.acf')
         if expected_build is not None and version['installedBuild'] != expected_build:

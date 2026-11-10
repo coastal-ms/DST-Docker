@@ -112,16 +112,19 @@ function selectTask(name: RegExp) {
 
 describe('Contextual Commands workbench', () => {
   it('reattaches to a persisted server update and shows its current phase without replaying it', () => {
+    vi.stubEnv('VITE_DST_EDITION', 'docker')
     state.data!.state.operation = { id: 'a'.repeat(32), action: 'updates.apply', phase: 'running', message: 'Server update: verifying backup' }
     const view = render(<Commands />)
     expect(screen.getByRole('status', { name: 'Server update status' })).toHaveTextContent('Server update: verifying backup')
     expect(api).not.toHaveBeenCalled()
     state.data!.state.operation = { ...state.data!.state.operation, phase: 'completed' }
     view.rerender(<Commands />)
-    expect(screen.queryByRole('status', { name: 'Server update status' })).not.toBeInTheDocument()
+    expect(screen.getByRole('status', { name: 'Server update status' })).toHaveTextContent('Update complete')
+    expect(screen.getByRole('button', { name: 'Details', exact: true })).toBeInTheDocument()
   })
 
   it('keeps an interrupted update error visible after returning to Commands', () => {
+    vi.stubEnv('VITE_DST_EDITION', 'docker')
     state.data!.state.operation = { id: 'a'.repeat(32), action: 'updates.apply', phase: 'failed', error: 'Update recovery needs review. The backup was retained.' }
     render(<Commands />)
     expect(screen.getByRole('alert')).toHaveTextContent('Update recovery needs review. The backup was retained.')
@@ -417,7 +420,7 @@ describe('Contextual Commands workbench', () => {
     expect(screen.queryByText('VM and battlegroup actions.')).toBeNull()
     expect(screen.getByRole('button', { name: /Reset layout/ })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /^Open PowerShell/ })).toBeNull()
-    expect(api).not.toHaveBeenCalled()
+    expect(vi.mocked(api).mock.calls.every(([, options]) => !options?.method || options.method === 'GET')).toBe(true)
   })
 
   it('preserves loading, error, refresh, and launch-failure feedback', async () => {

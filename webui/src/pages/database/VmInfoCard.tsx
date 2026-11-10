@@ -1,3 +1,4 @@
+import { confirmAction } from '../../util/actionConfirmation'
 // VmInfoCard — VM facts and explicit lifecycle maintenance.
 //
 // Design rule for this card: it REPORTS, it does not judge. Disk usage,
@@ -74,7 +75,7 @@ export function VmInfoCard() {
   const faults = info?.faults ?? []
 
   const cleanOldImages = useCallback(async () => {
-    const confirmed = window.confirm(
+    const confirmed = confirmAction(
       'Clean unused old Funcom build images?\n\n'
       + 'DST keeps the active build, the immediate prior build, and every image referenced by a running or exited container. '
       + 'Operator, database, Kubernetes, and third-party images are never targeted.',
@@ -99,7 +100,7 @@ export function VmInfoCard() {
   const cleanFailedOperations = useCallback(async () => {
     const count = info?.database?.failedCount ?? 0
     if (count < 1) return
-    const confirmed = window.confirm(
+    const confirmed = confirmAction(
       `Delete ${count} failed database operation record${count === 1 ? '' : 's'}?\n\n`
       + 'This removes only Kubernetes records whose current phase is exactly Failed. '
       + 'It does not delete database backups, the database, or active operations.',

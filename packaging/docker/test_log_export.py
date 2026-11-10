@@ -20,6 +20,16 @@ class Logs:
 
 
 class LogExportTests(unittest.TestCase):
+    def test_progress_tail_is_bounded_and_closes_the_stream(self):
+        class Client(Engine):
+            def inspect(self, identifier):return {'Config':{'Labels':{'project':'owned'}}}
+        connection=Mock()
+        stream=io.BytesIO(b'\x01\0\0\0\0\0\0\x06abcdef')
+        stream.status=200;connection.getresponse.return_value=stream
+        with patch('engine.EngineConnection',return_value=connection):
+            self.assertEqual(b''.join(Client().iter_logs('container',{'project':'owned'},tail=200,max_bytes=3)),b'abc')
+        self.assertIn('tail=200',connection.request.call_args.args[1]);connection.close.assert_called_once()
+
     def state(self): return {'id':'a'*32,'database':{'id':'database'},'services':{'game-1':{'id':'game'}}}
 
     def test_diagnostics_reuses_both_scoped_collections_and_redacts_every_source(self):

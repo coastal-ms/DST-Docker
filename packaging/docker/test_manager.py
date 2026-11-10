@@ -202,15 +202,28 @@ class ManagerTests(unittest.TestCase):
         engine.set_component_memory.assert_called_once_with('owned','a'*32,'game-1',16*1024**3)
         engine.lifecycle.assert_not_called()
 
-    def test_live_memory_decrease_is_rejected_and_failed_increase_keeps_recoverable_intent(self):
+    def test_live_memory_decrease_applies_and_failed_increase_keeps_recoverable_intent(self):
         state={'id':'a'*32,'worldPlan':{'maps':[{'map':'Survival_1','partitions':[1],'memoryBytes':12*1024**3,'initialReplicas':1}]},'services':{'game-1':{'id':'owned'}}}
         engine=Mock(spec=manager.Engine);engine.assert_owned.return_value={'State':{'Status':'running'},'HostConfig':{'Memory':12*1024**3}}
         with patch.object(manager,'save'),patch.object(manager.Path,'read_text',return_value='MemTotal: 41943040 kB\nMemAvailable: 20971520 kB\n'):
-            with self.assertRaisesRegex(ValueError,'Stop the map'):manager.set_map_memory(state,engine,'Survival_1',8)
+            result=manager.set_map_memory(state,engine,'Survival_1',8)
+            self.assertFalse(result['restartRequired'])
+            self.assertEqual(state['mapMemoryOverrides']['Survival_1'],8*1024**3)
+            engine.set_component_memory.assert_called_once_with('owned','a'*32,'game-1',8*1024**3)
+            engine.lifecycle.assert_not_called()
             engine.set_component_memory.side_effect=manager.EngineError('Interrupted update')
             with self.assertRaises(manager.EngineError):manager.set_map_memory(state,engine,'Survival_1',16)
         self.assertEqual(state['pendingMemoryChange'],{'map':'Survival_1','bytes':16*1024**3})
-        self.assertNotIn('mapMemoryOverrides',state)
+        self.assertEqual(state['mapMemoryOverrides']['Survival_1'],8*1024**3)
+
+    def test_live_memory_reduction_remains_available_when_host_headroom_is_low(self):
+        state={'id':'a'*32,'worldPlan':{'maps':[{'map':'Survival_1','partitions':[1],'memoryBytes':12*1024**3,'initialReplicas':1}]},'services':{'game-1':{'id':'owned'}}}
+        engine=Mock(spec=manager.Engine);engine.assert_owned.return_value={'State':{'Status':'running'},'HostConfig':{'Memory':12*1024**3}}
+        with patch.object(manager,'save'),patch.object(manager.Path,'read_text',return_value='MemTotal: 41943040 kB\nMemAvailable: 1048576 kB\n'):
+            result=manager.set_map_memory(state,engine,'Survival_1',8)
+        self.assertFalse(result['restartRequired'])
+        engine.set_component_memory.assert_called_once_with('owned','a'*32,'game-1',8*1024**3)
+        engine.lifecycle.assert_not_called()
 
     def test_memory_choice_is_persisted_without_starting_or_stopping_any_container(self):
         state={'id':'a'*32};engine=Mock()

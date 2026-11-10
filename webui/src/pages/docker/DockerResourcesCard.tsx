@@ -38,25 +38,23 @@ export default function DockerResourcesCard() {
     setBusy(true); setError(''); setMessage('')
     try {
       const value = await api<Resources>('/api/docker/resources', { method: 'PUT', body: JSON.stringify(allocation) })
-      receive(value); setMessage('Resource allocations saved and verified. They will apply when the maps start.')
+      receive(value); setMessage('Resource allocations applied.')
     } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
     finally { setBusy(false) }
   }
   function updateMap(name: string, field: 'memoryGiB' | 'cpus', value: number | null) {
     setAllocation(current => current && ({ ...current, maps: current.maps.map(row => row.map === name ? { ...row, [field]: value } : row) }))
   }
-  const blocked = busy || !!resources?.worldRunning
+  const blocked = busy
   return <CollapsibleCard id="docker-resources" title="Docker resources" icon="Cpu" subtitle="Choose the RAM available to each map.">
-    {error && <p role="alert" className="text-danger mb-3">{error}</p>}
+    {!resources && error && <p role="alert" className="text-danger mb-3">{error}</p>}
     {!allocation || !resources ? <p className="text-text-muted">{error ? 'Resource information is unavailable.' : 'Loading resources…'}</p> : <form onSubmit={save} className="space-y-4">
       <p className="text-sm text-text-muted">Docker has {(resources.host.memoryBytes / 1024 ** 3).toFixed(1)} GiB RAM and {resources.host.cpus} logical CPUs available. All maps share the available CPU unless you choose an optional limit. Running maps have {resources.reservedMemoryGiB.toFixed(1)} GiB of RAM allocated.</p>
       {!resources.configured && !resources.pending && <p className="text-sm text-text-muted">Existing map RAM limits are shown below. Review and save your per-map allocations.</p>}
       <p className="text-sm text-text-muted">Map RAM limits apply to each running instance. DST checks that starting maps fits within {allocation.memoryGiB} GiB, including {resources.serviceReserveGiB} GiB for supporting services and leaving another 2 GiB for the host.</p>
       <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={showCpuLimits} onChange={e => setShowCpuLimits(e.target.checked)} />Show optional per-map CPU limits</label>
-      {resources.worldRunning && <p role="status" className="text-warning">Stop the battlegroup before changing allocations. Saving never stops or restarts it for you.</p>}
+      <p className="text-sm text-text-muted">RAM and CPU changes apply live.</p>
       {resources.pending && <p role="status" className="text-warning">An allocation was interrupted. Retry the saved allocation to finish verifying its container limits.</p>}
-      <button className="btn-primary" type="submit" disabled={blocked}>{busy ? 'Saving…' : resources.pending ? 'Retry allocation' : 'Save allocations'}</button>
-      {message && <p role="status" className="text-success">{message}</p>}
       {allocation.maps.length > 0 ? <>
         <label className="block text-sm">Find a map<input className={`${inputClass} w-full`} type="search" placeholder="Search by map name" value={query} onChange={e => setQuery(e.target.value)} /></label>
         <div className="overflow-x-auto"><table className="w-full text-sm"><thead><tr><th className="text-left">Map</th><th>RAM per instance (GiB)</th>{showCpuLimits && <th>CPU limit · blank shares all</th>}</tr></thead><tbody>
@@ -67,6 +65,11 @@ export default function DockerResourcesCard() {
           </tr>)}
         </tbody></table></div>
       </> : <p className="text-sm text-text-muted">Per-map controls appear after world setup.</p>}
+      <div className="sticky bottom-2 z-10 rounded-lg border border-border bg-base p-3" aria-label="Resource allocation save controls">
+        {error && <p role="alert" className="mb-2 text-sm text-danger">{error}</p>}
+      <button className="btn-primary" type="submit" disabled={blocked}>{busy ? 'Saving…' : resources.pending ? 'Retry allocation' : 'Save allocations'}</button>
+      {message && <p role="status" className="text-success">{message}</p>}
+      </div>
     </form>}
   </CollapsibleCard>
 }

@@ -1,3 +1,4 @@
+import { confirmAction } from '../../../util/actionConfirmation'
 import { useCallback, useEffect, useState } from 'react'
 import { api } from '../../../api/client'
 import type { Player } from '../../../api/gameplay'
@@ -50,16 +51,16 @@ export function TeleportLocations({ player, canWrite }: { player: Player; canWri
         {state[scope].map(location => <div key={location.id} className="flex flex-wrap items-center gap-3 border-b border-border py-2">
           <span className="flex-1 break-words">{location.name} <span className="text-text-muted">· {mapLabel(location.map)}</span></span>
           <button className="btn-primary" disabled={disabled || !online || !state.enabled} onClick={() => {
-            if (window.confirm(`Teleport ${player.name} to ${location.name}?`)) void act('POST', { action: 'teleport', scope, id: location.id })
+            if (confirmAction(`Teleport ${player.name} to ${location.name}?`)) void act('POST', { action: 'teleport', scope, id: location.id })
           }}>Teleport</button>
           {scope === 'private' && <button className="btn-secondary" disabled={disabled} onClick={() => {
-            if (window.confirm(`Delete private location ${location.name}?`)) void act('DELETE', { id: location.id })
+            if (confirmAction(`Delete private location ${location.name}?`)) void act('DELETE', { id: location.id })
           }}>Delete</button>}
         </div>)}
       </div>)}
       <form className="flex flex-wrap gap-2" onSubmit={event => {
         event.preventDefault()
-        if (state.private.some(p => p.name.toLowerCase() === name.trim().toLowerCase()) && !window.confirm(`Replace private location ${name.trim()}?`)) return
+        if (state.private.some(p => p.name.toLowerCase() === name.trim().toLowerCase()) && !confirmAction(`Replace private location ${name.trim()}?`)) return
         void act('POST', { action: 'capture', name: name.trim() })
       }}>
         <label className="flex-1 min-w-48">Private location name

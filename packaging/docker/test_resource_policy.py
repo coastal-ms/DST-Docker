@@ -80,11 +80,15 @@ class ResourcePolicyTests(unittest.TestCase):
         self.assertEqual(state['worldPlan']['maps'][0]['memoryBytes'],6*GIB)
         self.assertEqual(result['maps'][0]['cpus'],2);self.assertNotIn('pendingResourceChange',state)
 
-    def test_live_world_is_never_stopped_or_resized_implicitly(self):
+    def test_explicit_allocations_apply_to_running_maps_without_lifecycle_changes(self):
         state=world();state['desiredState']='running'
-        with patch.object(policy,'host_capacity',return_value=self.host),patch.object(manager,'save') as save:
-            with self.assertRaisesRegex(ValueError,'Stop the battlegroup'):manager.set_resources(state,self.engine,change())
-        save.assert_not_called();self.engine.set_component_memory.assert_not_called()
+        self.engine.assert_owned.return_value={'State':{'Status':'running'},'HostConfig':{'Memory':8*GIB}}
+        with patch.object(policy,'host_capacity',return_value=self.host),patch.object(manager,'save'):
+            result=manager.set_resources(state,self.engine,change())
+        self.engine.set_component_memory.assert_called_once_with('owned','a'*32,'game-1',6*GIB)
+        self.engine.set_component_cpu.assert_called_once_with('owned','a'*32,'game-1',2)
+        self.engine.lifecycle.assert_not_called()
+        self.assertEqual(result['maps'][0]['memoryGiB'],6)
 
     def test_failed_engine_update_retains_recoverable_intent_and_blocks_new_choice(self):
         state=world();self.engine.set_component_cpu.side_effect=manager.EngineError('interrupted')

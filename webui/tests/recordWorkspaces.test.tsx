@@ -57,8 +57,16 @@ describe('Record-focused gameplay workspaces', () => {
     vi.mocked(isLocalViewer).mockReturnValue(loopback)
     vi.mocked(usePortalAccess).mockReturnValue({isPlayer:false,canAccessOwnerSurfaces:owner,canAccessServerUpdates:true,canAccessSetup:owner})
     await renderFleet()
-    if(owner)expect(screen.getByRole('button',{name:'Delete selected (0)'})).toBeDisabled()
-    else expect(screen.queryByRole('button',{name:'Delete selected (0)'})).not.toBeInTheDocument()
+    if(owner)expect(screen.getByRole('button',{name:'Delete & restart BG (0)'})).toBeDisabled()
+    else expect(screen.queryByRole('button',{name:/Delete.*\(0\)/})).not.toBeInTheDocument()
+  })
+  it('runs a Docker vehicle deletion directly from the labeled action', async () => {
+    vi.stubEnv('VITE_DST_EDITION','docker')
+    await renderFleet()
+    fireEvent.click(await screen.findByRole('checkbox',{name:'Select Scout for deletion'}))
+    fireEvent.click(screen.getByRole('button',{name:'Delete & restart BG (1)'}))
+    await waitFor(()=>expect(deleteVehicles).toHaveBeenCalledExactlyOnceWith([7]))
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
   })
   it('opens a keyboard-operable base dossier without weakening the stopped-battlegroup release guard', async () => {
     const user = userEvent.setup()

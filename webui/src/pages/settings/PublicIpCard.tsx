@@ -1,3 +1,4 @@
+import { confirmAction } from '../../util/actionConfirmation'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { ApiError, api, withOnlinePlayerGuard } from '../../api/client'
 import { Icon } from '../../components/Icon'
@@ -343,7 +344,7 @@ export function PublicIpCard() {
   async function applyPublicIp() {
     if (!targetIp) return
     const label = mode === 'ddns' ? `${hostname.trim()} -> ${targetIp}` : targetIp
-    if (!window.confirm(
+    if (!confirmAction(
       `Apply public IP change?\n\nTarget: ${label}\n\n`
       + `This ${hostRouteEnabled ? 'adds or refreshes' : 'removes the matching DST'} Windows host route, updates the VM public IP alias, Dune settings.conf, K3s ExternalIP, the battlegroup (change-battlegroup-ip), NAT, and restarts the battlegroup. `
       + 'It can take several minutes and will briefly disconnect connected players. You can safely leave this page — it keeps running on the server.',
@@ -366,7 +367,7 @@ export function PublicIpCard() {
     const targetDescription = p34?.publicIpSource === 'manual'
       ? 'your saved manual public IP (which may be a VPN or VPS relay address)'
       : "this server's real current public IP"
-    if (!window.confirm(
+    if (!confirmAction(
       `Fix the connection (P34) problem?\n\nDST will set your servers' public IP to ${ip} (${targetDescription}) and restart the battlegroup so players are routed to the right address.\n\n`
       + 'It can take several minutes and will briefly disconnect anyone currently connected. You can safely leave this page — it keeps running on the server.',
     )) return

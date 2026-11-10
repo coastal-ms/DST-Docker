@@ -1,3 +1,4 @@
+import { confirmAction } from '../util/actionConfirmation'
 import { useMemo, useState } from 'react'
 import { useApi } from '../hooks/useApi'
 import { api } from '../api/client'
@@ -54,7 +55,7 @@ export function CodexOwnership({ path, profileToken, grant }: {
   const selectedMissing = [...new Set(selected)].filter(id => data?.fragments.some(row => row.id === id && (!row.owned || !row.revealed)))
   async function grantSelected() {
     if (!grant || grant.disabled || granting || !selectedMissing.length) return
-    if (!window.confirm(`Grant ${selectedMissing.length} selected codex fragment(s)? An automatic backup will be retained. This reveals lore ahead of normal progression; quest objectives and gameplay tags will not be completed.`)) return
+    if (!confirmAction(`Grant ${selectedMissing.length} selected codex fragment(s)? An automatic backup will be retained. This reveals lore ahead of normal progression; quest objectives and gameplay tags will not be completed.`)) return
     setGrantError(null)
     setMessage(null)
     setGranting(true)

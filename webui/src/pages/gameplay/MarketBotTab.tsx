@@ -1,3 +1,4 @@
+import { confirmAction } from '../../util/actionConfirmation'
 import { useCallback, useEffect, useState } from 'react'
 import { Icon } from '../../components/Icon'
 import { ItemPicker } from '../../components/ItemPicker'
@@ -90,7 +91,7 @@ export function MarketBotTab() {
   // starts or stops it. Any in-progress Duke listings get re-priced on the
   // next list tick (the backend flags relist_pending).
   const resetToDefaults = async () => {
-    if (!window.confirm("Reset all Market Bot settings to their defaults?\n\nThis restores every buy, list, and pricing value to the out-of-box defaults. Duke's on/off state is kept, and his existing listings will be re-priced on the next list tick. This cannot be undone.")) return
+    if (!confirmAction("Reset all Market Bot settings to their defaults?\n\nThis restores every buy, list, and pricing value to the out-of-box defaults. Duke's on/off state is kept, and his existing listings will be re-priced on the next list tick. This cannot be undone.")) return
     setResetting(true); setSaveMsg(null); setError(null)
     try {
       const restored = await resetBotConfig()
@@ -156,7 +157,7 @@ export function MarketBotTab() {
 
   const doSeedMarket = async () => {
     const perGrade = draft?.listings_per_grade ?? 5
-    const ok = window.confirm(
+    const ok = confirmAction(
       `Bulk-seed the market: insert up to ${perGrade} NPC listings per catalogued template (~1000–1400 templates depending on the Stackables-only toggle). This bypasses the live vendor snapshot and writes straight to the DB.\n\nThe seed runs in the background — you can leave this page open and watch the progress bar, or come back later. The button reactivates once it finishes.\n\nProceed?`,
     )
     if (!ok) return
@@ -212,7 +213,7 @@ export function MarketBotTab() {
   }
 
   const clearListings = async () => {
-    if (!window.confirm("Delete ALL of Duke's market listings AND wipe his entire NPC inventory (including any orphan items left behind by previous runs)? Player listings are not affected. This cannot be undone.")) return
+    if (!confirmAction("Delete ALL of Duke's market listings AND wipe his entire NPC inventory (including any orphan items left behind by previous runs)? Player listings are not affected. This cannot be undone.")) return
     setClearing(true); setError(null); setSaveMsg(null)
     try {
       const r = await clearBotListings()
@@ -236,7 +237,7 @@ export function MarketBotTab() {
     const msg = toUpstream
       ? "Switch Duke to UPSTREAM Funcom pricing?\n\nThis pricing uses vendor_price × rarity (up to 5× for rare/unique) plus the original equipment/schematic/stack tier tables — UNCAPPED. A T6 schematic Flawless can list for hundreds of thousands of Solari.\n\nAll of Duke's current listings will be WIPED so the new prices replace them on the next list tick. This cannot be undone.\n\nProceed?"
       : "Switch Duke back to SANE pricing (100,000 Solari hard cap)?\n\nAll of Duke's current listings will be WIPED so the new prices replace them on the next list tick. This cannot be undone.\n\nProceed?"
-    if (!window.confirm(msg)) return
+    if (!confirmAction(msg)) return
     setTogglingPricing(true); setError(null); setSaveMsg(null)
     try {
       const next = { ...draft, upstream_pricing: toUpstream }
@@ -852,7 +853,7 @@ function MarketFollowCard({ draft, setDraft }: { draft: BotConfig; setDraft: (c:
     const msg = next
       ? "Turn ON market-follow pricing?\n\nDuke will price EVERY listing from the live market — the median of other players' sell orders for each item, plus your markup. This is all-or-nothing: it replaces the formula/upstream pricing entirely.\n\nDuke's current listings will be WIPED and rebuilt at the new prices on the next list tick. This cannot be undone.\n\nProceed?"
       : "Turn OFF market-follow pricing?\n\nDuke will go back to formula/upstream pricing for every listing.\n\nDuke's current listings will be WIPED and rebuilt on the next list tick. This cannot be undone.\n\nProceed?"
-    if (!window.confirm(msg)) return
+    if (!confirmAction(msg)) return
     setDraft({ ...draft, market_follow_enabled: next })
   }
   return (

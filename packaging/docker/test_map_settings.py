@@ -151,5 +151,17 @@ class ManagerMapSettingsTests(unittest.TestCase):
             observed['State']['StartedAt']='2099-01-01T00:00:00Z'
             self.assertFalse(manager.dispatch({'action':'map-settings.read','target':'1','file':'server'},engine)['pendingRestart'])
 
+    def test_global_edit_marks_only_inheriting_maps_pending_until_their_next_start(self):
+        state={'id':'a'*32,'globalSettingsPending':{'server':2000000000},'worldPlan':{'games':[{'partition':1,'map':'Survival_1'}]},'services':{'game-1':{'id':'own'}}}
+        engine=Mock(spec=['assert_owned'])
+        observed={'Config':{'Env':['DST_MAP_SETTINGS_VERSION=1']},'State':{'Status':'running','StartedAt':'2026-11-08T00:00:00Z'}}
+        engine.assert_owned.return_value=observed
+        with patch.object(manager,'project_state',return_value=state),patch.object(manager,'settings_request',return_value={'overridden':False}) as request:
+            self.assertTrue(manager.dispatch({'action':'map-settings.read','target':'1','file':'server'},engine)['pendingRestart'])
+            request.return_value={'overridden':True}
+            self.assertFalse(manager.dispatch({'action':'map-settings.read','target':'1','file':'server'},engine)['pendingRestart'])
+            request.return_value={'overridden':False};observed['State']['StartedAt']='2099-01-01T00:00:00Z'
+            self.assertFalse(manager.dispatch({'action':'map-settings.read','target':'1','file':'server'},engine)['pendingRestart'])
+
 
 if __name__=='__main__':unittest.main()

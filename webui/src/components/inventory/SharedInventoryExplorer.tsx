@@ -1,3 +1,4 @@
+import { confirmAction } from '../../util/actionConfirmation'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ApiError } from '../../api/client'
 import {
@@ -711,7 +712,7 @@ function OccurrencePanel({
       return
     }
     if (quantity === item.quantity || mutationBusy || !canDelete(item)) return
-    if (!window.confirm(`Change ${item.displayName} in ${item.entity.label || entityTypeLabel(item.entity.type)} from ${item.quantity} to ${quantity} items?${item.entity.type === 'storage' ? '\n\nBG restart required for storage changes to appear in-game. A running map can overwrite saved edits.' : ''}`)) return
+    if (!confirmAction(`Change ${item.displayName} in ${item.entity.label || entityTypeLabel(item.entity.type)} from ${item.quantity} to ${quantity} items?${item.entity.type === 'storage' ? '\n\nBG restart required for storage changes to appear in-game. A running map can overwrite saved edits.' : ''}`)) return
     setStackBusy(key); setError('')
     try {
       const result = item.entity.type === 'player'
@@ -751,7 +752,7 @@ function OccurrencePanel({
     const message = targets.some(item => item.entity.type === 'player')
       ? `${storageMessage}\n\nReserve rows cannot be deleted or reduced here. DST will reject them because remaining Reserve contents can become hidden and keep base recycling blocked.`
       : storageMessage
-    if (!window.confirm(message)) return
+    if (!confirmAction(message)) return
 
     setDeleteBusy(true)
     setError('')

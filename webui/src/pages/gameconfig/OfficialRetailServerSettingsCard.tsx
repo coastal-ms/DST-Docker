@@ -305,15 +305,14 @@ export function OfficialRetailServerSettingsCard({
   ), [state, values])
   const hasDraftValidationErrors = Object.keys(draftValidationErrors).length > 0
   const canSave = state?.available === true
-    && state.target.stopped === true
-    && state.target.serverPodCount === 0
+    && (import.meta.env.VITE_DST_EDITION === 'docker' || (state.target.stopped === true && state.target.serverPodCount === 0))
     && dirtyCount > 0
     && !hasDraftValidationErrors
     && !saving
     && !loading
 
   const applyDefaults = () => {
-    if (!state?.available || (!coordinated && (!state.target.stopped || state.target.serverPodCount !== 0)) || saving) return
+    if (!state?.available || (import.meta.env.VITE_DST_EDITION !== 'docker' && !coordinated && (!state.target.stopped || state.target.serverPodCount !== 0)) || saving) return
     setValues(previous => {
       const next = { ...previous }
       for (const setting of state.settings) {
@@ -419,7 +418,7 @@ export function OfficialRetailServerSettingsCard({
             type="button"
             className="btn-secondary"
             onClick={applyDefaults}
-            disabled={!state?.available || (!coordinated && (!state.target.stopped || state.target.serverPodCount !== 0)) || saving || loading}
+            disabled={!state?.available || (import.meta.env.VITE_DST_EDITION !== 'docker' && !coordinated && (!state.target.stopped || state.target.serverPodCount !== 0)) || saving || loading}
             title="Draft Custom difficulty and documented defaults, including missing settings, without saving"
           >
             <Icon name="RotateCcw" size={14} />
@@ -446,12 +445,12 @@ export function OfficialRetailServerSettingsCard({
             disabled={coordinated ? dirtyCount === 0 || loading || saving || hasDraftValidationErrors : !canSave}
             title={hasDraftValidationErrors
               ? 'Correct invalid setting values before saving'
-              : state?.target.stopped
+              : import.meta.env.VITE_DST_EDITION === 'docker' || state?.target.stopped
                 ? 'Save changed settings to the Linux UserSettings file'
               : 'Stop the battlegroup fully before saving'}
           >
             <Icon name={saving ? 'Loader2' : 'Save'} size={14} className={saving ? 'animate-spin' : ''} />
-            {saving ? 'Saving…' : `${coordinated ? 'Review & Apply' : 'Save'}${dirtyCount ? ` (${dirtyCount})` : ''}`}
+            {saving ? 'Saving…' : `${coordinated && import.meta.env.VITE_DST_EDITION !== 'docker' ? 'Review & Apply' : 'Save'}${dirtyCount ? ` (${dirtyCount})` : ''}`}
           </button>
         </>
       )}
@@ -459,7 +458,7 @@ export function OfficialRetailServerSettingsCard({
       <div className="mb-3 rounded-lg border border-warning/30 bg-warning/5 p-3 text-xs text-text-muted">
         <strong className="text-text">Official server controls · all players.</strong>{' '}
         Refresh reads manual edits to <span className="font-mono">UserSettings/UserServerCustomSettings.ini</span>.
-        {coordinated ? ' Edit a draft, then Review & Apply saves it while the battlegroup is fully stopped.' : ' Save writes changes to that same file while the battlegroup is fully stopped.'}
+        {import.meta.env.VITE_DST_EDITION === 'docker' ? ' Save while maps are running; changes load at their next start.' : coordinated ? ' Edit a draft, then Review & Apply saves it while the battlegroup is fully stopped.' : ' Save writes changes to that same file while the battlegroup is fully stopped.'}
         {' '}Starting the battlegroup synchronizes those values to its Linux runtime configuration when DST management is enabled.
       </div>
       {state?.operatorMismatch && (
@@ -469,7 +468,7 @@ export function OfficialRetailServerSettingsCard({
             : 'The Linux UserSettings file and current YAML settings differ. Read current settings first to review the YAML values before saving.'}
         </div>
       )}
-      {state?.available && !state.target.stopped && !coordinated && (
+      {import.meta.env.VITE_DST_EDITION !== 'docker' && state?.available && !state.target.stopped && !coordinated && (
         <div className="mb-3 border-y border-border py-2 text-xs text-text-muted">
           Stop the battlegroup to unlock edits. Saving creates a timestamped copy of the complete current file;
           start the battlegroup afterward to mount the new settings into every game pod.
@@ -588,7 +587,7 @@ export function OfficialRetailServerSettingsCard({
                             aria-label={setting.label}
                             value={values[setting.key] ?? setting.value}
                             onChange={event => setValues(previous => ({ ...previous, [setting.key]: event.target.value }))}
-                            disabled={(!coordinated && (!state.target.stopped || state.target.serverPodCount !== 0)) || saving}
+                            disabled={(import.meta.env.VITE_DST_EDITION !== 'docker' && !coordinated && (!state.target.stopped || state.target.serverPodCount !== 0)) || saving}
                             className="min-w-28 border border-border bg-surface px-2 py-1 text-xs font-semibold text-text disabled:cursor-not-allowed disabled:opacity-60"
                           >
                             {setting.present === false && <option value="">Not configured</option>}
@@ -600,7 +599,7 @@ export function OfficialRetailServerSettingsCard({
                             aria-label={setting.label}
                             value={values[setting.key] ?? setting.value}
                             onChange={event => setValues(previous => ({ ...previous, [setting.key]: event.target.value }))}
-                            disabled={(!coordinated && (!state.target.stopped || state.target.serverPodCount !== 0)) || saving}
+                            disabled={(import.meta.env.VITE_DST_EDITION !== 'docker' && !coordinated && (!state.target.stopped || state.target.serverPodCount !== 0)) || saving}
                             className="min-w-36 border border-border bg-surface px-2 py-1 text-xs text-text disabled:cursor-not-allowed disabled:opacity-60"
                           >
                             {setting.present === false && <option value="">Not configured</option>}
@@ -610,7 +609,7 @@ export function OfficialRetailServerSettingsCard({
                           <NumericSettingControl
                             setting={setting}
                             value={values[setting.key] ?? setting.value}
-                            disabled={(!coordinated && (!state.target.stopped || state.target.serverPodCount !== 0)) || saving}
+                            disabled={(import.meta.env.VITE_DST_EDITION !== 'docker' && !coordinated && (!state.target.stopped || state.target.serverPodCount !== 0)) || saving}
                             onChange={value => setValues(previous => ({ ...previous, [setting.key]: value }))}
                             onCommit={() => setValues(previous => ({
                               ...previous,

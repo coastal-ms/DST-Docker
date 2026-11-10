@@ -1,3 +1,4 @@
+import { confirmAction } from '../util/actionConfirmation'
 import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import { Link } from '../router'
 import { PageHeader } from '../components/PageHeader'
@@ -424,7 +425,7 @@ function StepConnectExisting() {
   }, [loadPf])
 
   const generate = useCallback(async () => {
-    if (!window.confirm('Generate a NEW SSH key and authorize it on the VM?\n\nThe VM must be running. A console window opens and asks for the \'dune\' user\'s password — you MUST type it there to authorize the new key. If you close it without entering the password, DST stays locked out until you re-run this.')) return
+    if (!confirmAction('Generate a NEW SSH key and authorize it on the VM?\n\nThe VM must be running. A console window opens and asks for the \'dune\' user\'s password — you MUST type it there to authorize the new key. If you close it without entering the password, DST stays locked out until you re-run this.')) return
     setRotating(true); setMsg(null); setError(null)
     try {
       const r = await api<{ ok: boolean; rotated: boolean; message?: string }>('/api/config/rotate-ssh-key', { method: 'POST' })
@@ -1037,7 +1038,7 @@ function StepInstallLan() {
           {(failed || cancelled) && (status.vmId || status.stageRoot) && <div className="space-y-2">
             <p className="text-xs text-text-dim">Files and any VM already created have been kept. Check host to resume setup, or remove this attempt to start fresh.</p>
             <button type="button" className="btn-secondary" disabled={checking} onClick={() => {
-              if (!window.confirm('Remove the VM and staging files created by this unfinished installation? This permanently deletes that VM and its data.')) return
+              if (!confirmAction('Remove the VM and staging files created by this unfinished installation? This permanently deletes that VM and its data.')) return
               setChecking(true); setError(null)
               void removeHyperVLanAttempt(hostIp, user || undefined, password || undefined).then(async () => {
                 setStatus(null); setRes(null)

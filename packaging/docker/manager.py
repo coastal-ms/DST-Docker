@@ -31,10 +31,12 @@ from log_export import export_logs
 import asset_updates
 import service_generations
 import world_update
+import update_progress
 import resource_policy
 import map_modes
 import memory_swap
 import memory_swap_control
+import tailscale_access
 import director_web
 import regis_compatibility
 import backup_schedule
@@ -887,21 +889,25 @@ def prepare_settings_service(state,engine):
     engine.lifecycle(entry['id'],state['id'],'start')
 
 
+def settings_pending(timestamp,observed):
+    if not timestamp:return False
+    if not observed or observed.get('State',{}).get('Status')!='running':return True
+    try:
+        from datetime import datetime
+        return datetime.fromisoformat(observed['State']['StartedAt'].replace('Z','+00:00')).timestamp()<=timestamp
+    except (KeyError,ValueError):return True
+
+
 def write_settings(state,engine,request):
-    # Serialize against starts/stops/restores and reject a retail save while
-    # any process can still consume its runtime projection.
     key=request.get('file')
     if not isinstance(key,str) or key not in {'game','engine','server'}:raise ValueError('Choose a supported server INI file.')
-    if key=='server':
-        if state.get('desiredState')!='stopped':raise ValueError('Stop the battlegroup fully before saving Official Retail Server Settings.')
-        for component,entry in state.get('services',{}).items():
-            if component.startswith('game-') and engine.assert_owned(entry['id'],state['id'],component)['State']['Status'] not in {'exited','created'}:
-                raise ValueError('Every game process must finish stopping before saving Official Retail Server Settings.')
     payload={key:request.get(key) for key in ['file','raw','revision','expectedExists','remove'] if key in request}
     payload['action']='write'
     reply=settings_client.request(payload)
     if not reply.get('ok'):raise ValueError(reply.get('error','Server settings could not be saved.'))
-    return reply['data']
+    if reply['data'].get('changed'):
+        state.setdefault('globalSettingsPending',{})[key]=time.time();save(state)
+    return {**reply['data'],'restartRequired':True}
 
 
 def read_settings(state,engine,key):
@@ -1095,17 +1101,16 @@ def set_resources(state,engine,request):
     pending=state.get('pendingResourceChange')
     if pending and {key:value for key,value in pending.items() if key!='cpuCount'}!=change:
         raise ValueError('Retry the pending resource allocation before choosing different values.')
-    if state.get('desiredState')=='running':raise ValueError('Stop the battlegroup before changing its resource allocations.')
     entries=[]
     for component,entry in state.get('services',{}).items():
         if not component.startswith('game-'):continue
         observed=engine.assert_owned(entry['id'],state['id'],component)
-        if observed['State']['Status'] not in {'created','exited'}:raise ValueError('Every map must finish stopping before resource changes.')
         row=next(row for row in state['worldPlan']['maps'] if int(component[5:]) in row['partitions'])
         allocation=next(item for item in change['maps'] if item['map']==row['map'])
-        entries.append((component,entry['id'],allocation))
+        entries.append((component,entry['id'],allocation,observed.get('HostConfig',{}).get('Memory',0)))
+    entries.sort(key=lambda entry: int(entry[2]['memoryGiB']*1024**3)-entry[3])
     state['pendingResourceChange']=change;save(state)
-    for component,identifier,allocation in entries:
+    for component,identifier,allocation,previous in entries:
         if state.get('memorySwap'):engine.set_component_memory(identifier,state['id'],component,int(allocation['memoryGiB']*1024**3),state['memorySwap'])
         else:engine.set_component_memory(identifier,state['id'],component,int(allocation['memoryGiB']*1024**3))
         engine.set_component_cpu(identifier,state['id'],component,allocation['cpus'])
@@ -1133,15 +1138,15 @@ def set_map_memory(state,engine,map_name,gib):
         selected=int(component[5:]) in rows[0]['partitions']
         previous=current['HostConfig']['Memory']
         if selected:
-            if current['State']['Status']=='running' and amount<previous:raise ValueError('Stop the map before reducing its memory allocation.')
             instances.append((component,entry['id']))
         if current['State']['Status']=='running':
             reserved+=amount if selected else previous
             if selected:increase+=max(0,amount-previous)
-    if reserved>int(counters['MemTotal'])*1024-2*1024**3 or increase+2*1024**3>int(counters['MemAvailable'])*1024:
+    raising=amount>rows[0]['memoryBytes']
+    if raising and (reserved>int(counters['MemTotal'])*1024-2*1024**3 or increase+2*1024**3>int(counters['MemAvailable'])*1024):
         raise ValueError('The requested map allocation needs more memory than is available with 2 GiB host headroom.')
     budget=state.get('resourcePolicy',{}).get('memoryGiB')
-    if budget is not None and max(reserved,amount)+resource_policy.SERVICE_RESERVE>budget*1024**3:
+    if raising and budget is not None and max(reserved,amount)+resource_policy.SERVICE_RESERVE>budget*1024**3:
         raise ValueError('This map limit exceeds the server RAM budget with its supporting services. Lower it or change the host allocation in Settings.')
     state['pendingMemoryChange']={'map':map_name,'bytes':amount};save(state)
     for component,identifier in instances:
@@ -1580,11 +1585,15 @@ def run_operation(state,engine,request):
 def dispatch(request, engine=None, *, resume_running_only=False):
     engine = engine or Engine()
     action = request.get('action')
+    if action in {'tailscale.get','tailscale.set','tailscale.link'}:
+        return tailscale_access.request(engine,project_state()['id'],STATE,CONFIG,action.split('.')[1],request.get('mode'),request.get('port',8088))
     with LOCK:
         state = project_state()
         if resume_running_only and (state.get('desiredState')!='running' or state.get('operation',{}).get('phase') not in {None,'completed'}):
             return public_state(state,engine)
         if action == 'status': return public_state(state, engine)
+        if action == 'updates.progress':
+            return update_progress.snapshot(state, engine, request.get('operationId'), request.get('includeOutput', False))
         # Turning chat Off must remove its listener even while a game command
         # or maintenance operation is in progress. This touches only DST's queue.
         if action == 'chat.queue.delete':return chat_queue(state,engine,'delete')
@@ -1668,7 +1677,11 @@ def dispatch(request, engine=None, *, resume_running_only=False):
                     current=read_settings(state,engine,key)
                     result=write_settings(state,engine,{'file':key,'raw':request.get('raw'),'revision':request.get('revision'),'expectedExists':current['fileExists']})
                 else:result=read_settings(state,engine,key)
-                return {**result,'target':'global','overridden':False,'pendingRestart':False,'adapterReady':True,'running':False}
+                timestamp=state.get('globalSettingsPending',{}).get(key)
+                games=[engine.assert_owned(entry['id'],state['id'],component) for component,entry in state.get('services',{}).items() if component.startswith('game-')]
+                running=any(game.get('State',{}).get('Status')=='running' for game in games)
+                pending=bool(timestamp and (not games or any(settings_pending(timestamp,game) for game in games)))
+                return {**result,'target':'global','overridden':False,'pendingRestart':pending,'adapterReady':True,'running':running}
             if not isinstance(target,str) or not re.fullmatch(r'[1-9][0-9]{0,5}',target) or not any(str(row['partition'])==target for row in state.get('worldPlan',{}).get('games',[])):
                 raise ValueError('Choose a map partition from this world.')
             game=next(row for row in state['worldPlan']['games'] if str(row['partition'])==target)
@@ -1684,14 +1697,11 @@ def dispatch(request, engine=None, *, resume_running_only=False):
             result=settings_request(state,engine,payload)
             if action.endswith('.write') and result.get('changed'):
                 state.setdefault('mapSettingsPending',{})[target]=time.time();save(state)
-            pending=state.get('mapSettingsPending',{}).get(target)
-            started=observed.get('State',{}).get('StartedAt','') if observed else ''
-            if pending and started:
-                try:
-                    from datetime import datetime
-                    if observed['State'].get('Status')=='running' and datetime.fromisoformat(started.replace('Z','+00:00')).timestamp()>pending:
-                        state['mapSettingsPending'].pop(target);save(state);pending=None
-                except ValueError:pass
+            local=state.get('mapSettingsPending',{}).get(target)
+            inherited=0 if result.get('overridden') else state.get('globalSettingsPending',{}).get(request.get('file'),0)
+            pending=settings_pending(max(local or 0,inherited or 0),observed)
+            if local and not settings_pending(local,observed):
+                state['mapSettingsPending'].pop(target,None);save(state)
             return {**result,'pendingRestart':bool(pending),'adapterReady':supported,
                     'running':bool(observed and observed['State'].get('Status')=='running')}
         if action in {'settings.backups.list','settings.backups.inspect','settings.backups.read','settings.backups.delete-checked'}:
@@ -1875,6 +1885,7 @@ if __name__ == '__main__':
     if updating:threading.Thread(target=resume_interrupted_update,args=(recovered,Engine()),daemon=True).start()
     if restarting_world:threading.Thread(target=resume_interrupted_world_restart,args=(recovered,Engine()),daemon=True).start()
     if recovering_research:threading.Thread(target=resume_interrupted_world_research,args=(recovered,Engine()),daemon=True).start()
+    tailscale_access.resume(Engine(),recovered['id'],STATE,CONFIG)
     SOCKET.parent.mkdir(parents=True, exist_ok=True)
     if SOCKET.exists(): SOCKET.unlink()
     server = socketserver.UnixStreamServer(str(SOCKET), Handler)

@@ -41,6 +41,10 @@ class NativeUpdate:
 
     def phase(self,name,**values):
         self.run.update(phase=name,**values)
+        events = self.run.setdefault('events', [])
+        if not events or events[-1]['phase'] != name:
+            events.append({'phase': name, 'at': time.time()})
+            self.run['events'] = events[-80:]
         self.s['operation']['message']='Server update: '+name.replace('-',' ')
         self.m.save(self.s)
 
@@ -214,7 +218,7 @@ class NativeUpdate:
                 if changed:self.m.save(self.s)
                 if update['expectedBuild']!=build:raise ValueError('The staged package is for a different build.')
                 if update['phase']=='ready':break
-                if update['phase']=='failed':raise ValueError('The official package could not be staged.')
+                if update['phase']=='failed':raise ValueError(update.get('error') or 'The official package could not be staged.')
                 if update['phase'] not in {'preparing','downloading'}:raise ValueError('Recover the previous package operation before updating.')
                 time.sleep(1)
             self.phase('validating',stageId=update['id'])

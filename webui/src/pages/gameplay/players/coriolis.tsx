@@ -1,3 +1,4 @@
+import { confirmAction } from '../../../util/actionConfirmation'
 // CoriolisAdmin — v11.5.7 storm seed inspector + editor.
 //
 // Lives in the Server Overview pane (Players tab, no player selected) so admins
@@ -28,7 +29,7 @@ export function CoriolisAdmin({ flash }: { flash: Flash }) {
   const [parts, setParts]       = useState<CoriolisPartition[]>([])
   const [busy, setBusy]         = useState(false)
   const [tick, setTick]         = useState(0)
-  const [unlocked, setUnlocked] = useState(false)
+  const [unlocked, setUnlocked] = useState(import.meta.env.VITE_DST_EDITION === 'docker')
 
   // Per-scope draft inputs.
   const [farmDraft, setFarmDraft]               = useState('')
@@ -74,19 +75,19 @@ export function CoriolisAdmin({ flash }: { flash: Flash }) {
   const applyFarm = () => {
     const seed = Number(farmDraft)
     if (!Number.isFinite(seed) || seed < -1 || seed > 11) return flash('Farm seed must be -1 (auto) or 0-11.', 'err')
-    if (!confirm(`Set FARM coriolis seed to ${seed}?\n\nThis cascades to every map + partition and (when changed) cleans up corpses / coriolis-affected loose state.`)) return
+    if (!confirmAction(`Set FARM coriolis seed to ${seed}?\n\nThis cascades to every map + partition and (when changed) cleans up corpses / coriolis-affected loose state.`)) return
     run(() => setCoriolisFarmSeed(seed), 'Set farm seed')
   }
   const applyMap = (map: string) => {
     const seed = Number(mapDrafts[map])
     if (!Number.isFinite(seed) || seed < -1 || seed > 11) return flash(`Map seed for ${map} must be -1 (auto) or 0-11.`, 'err')
-    if (!confirm(`Set MAP "${map}" coriolis seed to ${seed}?\n\nCascades to that map's partitions.`)) return
+    if (!confirmAction(`Set MAP "${map}" coriolis seed to ${seed}?\n\nCascades to that map's partitions.`)) return
     run(() => setCoriolisMapSeed(map, seed), `Set ${map} seed`)
   }
   const applyPart = (p: CoriolisPartition) => {
     const seed = Number(partDrafts[p.partition_id])
     if (!Number.isFinite(seed) || seed < -1 || seed > 11) return flash(`Partition seed must be -1 (auto) or 0-11.`, 'err')
-    if (!confirm(`Set PARTITION ${p.partition_id} (${p.map}) coriolis seed to ${seed}?`)) return
+    if (!confirmAction(`Set PARTITION ${p.partition_id} (${p.map}) coriolis seed to ${seed}?`)) return
     run(() => setCoriolisPartitionSeed(p.partition_id, seed), `Set partition ${p.partition_id} seed`)
   }
   const reroll = () => {
@@ -98,7 +99,7 @@ export function CoriolisAdmin({ flash }: { flash: Flash }) {
   // (-1 = no forced seed / auto). The farm write already cascades to every map
   // and partition, so a single -1 farm apply clears them all.
   const resetAllDefault = () => {
-    if (!confirm('Reset ALL Coriolis seeds — farm, every map, and every partition — to game default (-1 = auto)?\n\nThis clears every forced seed so the game picks layouts on its own. Where a seed actually changes, the next storm tick runs the usual cleanup. No undo.')) return
+    if (!confirmAction('Reset ALL Coriolis seeds — farm, every map, and every partition — to game default (-1 = auto)?\n\nThis clears every forced seed so the game picks layouts on its own. Where a seed actually changes, the next storm tick runs the usual cleanup. No undo.')) return
     run(() => setCoriolisFarmSeed(-1), 'Reset all seeds to game default')
   }
 
@@ -151,7 +152,7 @@ export function CoriolisAdmin({ flash }: { flash: Flash }) {
           layout deliberately, set <strong className="text-text">Forced Coriolis World Seed</strong> in
           Game Config instead. If you don't know exactly what these do, leave them alone.
         </p>
-        {unlocked ? (
+        {import.meta.env.VITE_DST_EDITION !== 'docker' && (unlocked ? (
           <button className="btn-secondary text-xs" disabled={busy} onClick={() => setUnlocked(false)}>
             <Icon name="Lock" size={12} /> Lock controls
           </button>
@@ -160,14 +161,14 @@ export function CoriolisAdmin({ flash }: { flash: Flash }) {
             className="btn-secondary text-xs text-danger border-danger/50"
             disabled={busy}
             onClick={() => {
-              if (confirm('Unlock Coriolis storm seed controls?\n\nThese rewrite world-reset generation and wipe corpses / loose loot when a seed changes. There is no undo. Only continue if you fully understand the consequences.')) {
+              if (confirmAction('Unlock Coriolis storm seed controls?\n\nThese rewrite world-reset generation and wipe corpses / loose loot when a seed changes. There is no undo. Only continue if you fully understand the consequences.')) {
                 setUnlocked(true)
               }
             }}
           >
             <Icon name="Unlock" size={12} /> I understand the risks — unlock controls
           </button>
-        )}
+        ))}
       </div>
 
       {unlocked && (<>

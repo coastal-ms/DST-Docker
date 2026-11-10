@@ -38,7 +38,7 @@ export function ServerNameCard({ vmRunning, currentName, onRenamed }: Props) {
   const trimmed = name.trim()
   const changed = trimmed.length > 0 && trimmed !== currentName.trim()
   const tooLong = trimmed.length > MAX_LEN
-  const confirmed = confirm.trim().toUpperCase() === CONFIRM_PHRASE
+  const confirmed = import.meta.env.VITE_DST_EDITION === 'docker' || confirm.trim().toUpperCase() === CONFIRM_PHRASE
   const canSave = vmRunning && changed && !tooLong && confirmed && !saving
 
   function openEditor() {
@@ -138,6 +138,7 @@ export function ServerNameCard({ vmRunning, currentName, onRenamed }: Props) {
             </div>
           </div>
 
+          {import.meta.env.VITE_DST_EDITION !== 'docker' && <>
           <div>
             <label className="block text-xs uppercase tracking-wider text-text-dim mb-1">
               Type <span className="font-mono text-warning">{CONFIRM_PHRASE}</span> to confirm the restart
@@ -150,6 +151,7 @@ export function ServerNameCard({ vmRunning, currentName, onRenamed }: Props) {
               placeholder={CONFIRM_PHRASE}
             />
           </div>
+          </>}
 
           <div className="flex items-center gap-2">
             <button type="button" className="btn-primary" onClick={() => void save()} disabled={!canSave}>

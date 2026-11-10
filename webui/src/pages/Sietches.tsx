@@ -1,3 +1,4 @@
+import { confirmAction } from '../util/actionConfirmation'
 import { useCallback, useEffect, useState } from 'react'
 import { PageHeader } from '../components/PageHeader'
 import { Icon } from '../components/Icon'
@@ -120,7 +121,7 @@ export function Sietches() {
     const nameNote = applyNames
       ? '\n\nThe MAIN sietch will also be renamed, and DST will disable the global server-name line in UserEngine.ini.'
       : (count >= 2 ? '\n\nAll shards will use the default Funcom name.' : '')
-    if (!confirm(`Configure ${count} Hagga sietch${count === 1 ? '' : 'es'} and clean-restart the battlegroup?${nameNote}${warn}`)) return
+    if (!confirmAction(`Configure ${count} Hagga sietch${count === 1 ? '' : 'es'} and clean-restart the battlegroup?${nameNote}${warn}`)) return
     setApplying(true); setMessage(null); setError(null)
     try {
       const r = await setSietchConfig(count, applyNames ? names.slice(0, count) : [], applyNames)

@@ -5,6 +5,7 @@ import { Link } from '../../router'
 import DockerResourcesCard from './DockerResourcesCard'
 import { PortalAccountsManager } from '../settings/PortalAccountsManager'
 import { usePortalAccess } from '../../auth/portalAccess'
+import { DockerTailscaleAccess } from './DockerTailscaleAccess'
 
 export default function DockerSettingsPage() {
   const { canAccessOwnerSurfaces } = usePortalAccess()
@@ -13,6 +14,7 @@ export default function DockerSettingsPage() {
     <div className="space-y-5">
       <DockerResourcesCard />
       <MemoryBalancingControl />
+      {canAccessOwnerSurfaces && <DockerTailscaleAccess />}
       <AppearanceCard />
       {canAccessOwnerSurfaces && <div className="card p-5"><PortalAccountsManager docker /></div>}
       <div className="card p-5 flex flex-wrap gap-4"><Link to="/server-settings" className="text-accent">Server settings</Link><Link to="/setup" className="text-accent">Server setup</Link></div>

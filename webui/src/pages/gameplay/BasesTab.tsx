@@ -55,12 +55,12 @@ export function BasesTab() {
     }
   }
 
-  const handleDestroy = async () => {
-    if (!confirmBase || !confirmBase.totemId) return
+  const handleDestroy = async (target = confirmBase) => {
+    if (!target || !target.totemId) return
     setDestroying(true); setError(null); setFlash(null)
     try {
-      const r = await destroyClaim(confirmBase.totemId)
-      setFlash(r.message || `Released claim (totem ${confirmBase.totemId}).`)
+      const r = await destroyClaim(target.totemId)
+      setFlash(r.message || `Released claim (totem ${target.totemId}).`)
       setConfirmBase(null); setAckBackup(false)
       await load()
     } catch (e) {
@@ -164,7 +164,8 @@ export function BasesTab() {
                   <button className="btn-secondary py-1 px-2 text-xs text-danger ml-2" disabled={source === 'demo' || !bgOff}
                     onClick={() => {
                       if (!b.totemId) { setError(null); setFlash(`${b.name || 'This base'} has no active land claim — nothing to release.`); return }
-                      setConfirmBase(b); setAckBackup(false)
+                      if (import.meta.env.VITE_DST_EDITION === 'docker') void handleDestroy(b)
+                      else { setConfirmBase(b); setAckBackup(false) }
                     }}
                     title={!bgOff ? 'Release claim requires the battlegroup to be OFF — stop the battlegroup first, or a running map server will restore the claim'
                       : !b.totemId ? 'No active land claim on this base (already released)'

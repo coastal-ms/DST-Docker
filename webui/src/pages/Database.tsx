@@ -1,3 +1,4 @@
+import { promptConfirmation, confirmAction } from '../util/actionConfirmation'
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import { PageHeader } from '../components/PageHeader'
 import { Icon } from '../components/Icon'
@@ -160,7 +161,7 @@ export function Database() {
     // to the chosen snapshot and everything since is permanently lost. Gate it
     // behind a typed confirmation so it can't be triggered by a stray click.
     if (name === 'import') {
-      const typed = window.prompt(
+      const typed = promptConfirmation("RESTORE",
         'FULL DATABASE RESTORE — SEVERE, IRREVERSIBLE.\n\n' +
         'This REPLACES the entire battlegroup database with the backup you pick in the console window. ' +
         'ALL players, bases, inventories, storage, blueprints, and the market will be rolled back to that snapshot. ' +
@@ -287,7 +288,7 @@ export function Database() {
   }, [worldRestart?.phase, worldRestart?.researchRecoveryRunning, loadResearchAudit])
 
   async function runWorldRestart() {
-    const typed = window.prompt(
+    const typed = promptConfirmation("RESTART WORLD",
       'WORLD RESTART\n\n' +
       (docker ? 'This stops the battlegroup, creates and rehearses a full rollback backup, then replaces only its logical gameplay database. It preserves the SAME battlegroup identity, token, packages, INIs, ports, Saved volumes and DST settings. A stopped battlegroup stays stopped; a running battlegroup resumes after verification.\n\n' : 'This creates and verifies a full rollback backup, stops the battlegroup, replaces only its gameplay database storage, then starts the SAME battlegroup with its existing name, token, packages, INIs, ports, and DST settings.\n\n') +
       'BEFORE CONTINUING: every player must return from Deep Desert and log out. Keep everyone offline until DST reports ' +
@@ -320,7 +321,7 @@ export function Database() {
   }
 
   async function runWorldRollback() {
-    const typed = window.prompt(
+    const typed = promptConfirmation("ROLL BACK WORLD",
       'ROLL BACK WORLD\n\nThis restores the exact verified backup created immediately before the last World Restart.\n\n' +
       'Every player must log out before rollback. Keep everyone offline until DST reports completion.\n\n' +
       'Type ROLL BACK WORLD to continue:',
@@ -351,7 +352,7 @@ export function Database() {
     ) ?? []
     if (mismatches.length === 0) return
     const characterName = mismatches[0].characterName
-    const typed = window.prompt(
+    const typed = promptConfirmation("RESET RESEARCH",
       `REPAIR REHYDRATED RESEARCH\n\n` +
       `${characterName} has ${mismatches.length} purchased research item(s) whose pre-restart runtime recipe is missing:\n` +
       `${mismatches.map(m => `- ${m.baseRecipeId}`).join('\n')}\n\n` +
@@ -386,7 +387,7 @@ export function Database() {
   }
 
   async function rollbackResearchRecovery() {
-    const typed = window.prompt(
+    const typed = promptConfirmation("ROLL BACK RESEARCH RECOVERY",
       'ROLL BACK RESEARCH RECOVERY\n\n' +
       'This restores the fresh full-world backup created immediately before the failed research recovery. ' +
       'It does NOT restore the old pre-World-Restart backup.\n\n' +
@@ -434,7 +435,7 @@ export function Database() {
     const current = editorRef.current?.getValue?.() ?? sql
     if (!current.trim()) return
     if (!readOnly && !confirmWrite) {
-      const ok = window.confirm(
+      const ok = confirmAction(
         'Read-only mode is OFF. This SQL will execute against the live database and changes are PERMANENT.\n\nProceed?'
       )
       if (!ok) return
@@ -1278,7 +1279,7 @@ function BackupScheduleCard({ vmRunning, showToast }: BackupScheduleCardProps) {
   }
 
   async function handleVerify(path: string) {
-    if (!window.confirm('Rehearse restoring this trusted backup into a separate temporary database? Only verify backups from a source you trust. The current world is preserved, and the temporary database is removed afterward.')) return
+    if (!confirmAction('Rehearse restoring this trusted backup into a separate temporary database? Only verify backups from a source you trust. The current world is preserved, and the temporary database is removed afterward.')) return
     setTransferring('verify:' + path)
     try { await verifyDockerBackup(path); showToast('ok', 'Restore rehearsal passed. This backup is available in Restore.'); await loadAll() }
     catch (e) { showToast('err', `Verification failed: ${e instanceof Error ? e.message : String(e)}`) }
@@ -1286,7 +1287,7 @@ function BackupScheduleCard({ vmRunning, showToast }: BackupScheduleCardProps) {
   }
 
   async function handleDockerUpload(file: File) {
-    if (!window.confirm(`Import ${file.name} as a separate backup? Only use a backup from a source you trust. This does not restore or start the world. Verify restore before using it to restore a world.`)) return
+    if (!confirmAction(`Import ${file.name} as a separate backup? Only use a backup from a source you trust. This does not restore or start the world. Verify restore before using it to restore a world.`)) return
     setTransferring('upload')
     try {
       await importDockerBackup(file)
@@ -1397,7 +1398,7 @@ function BackupScheduleCard({ vmRunning, showToast }: BackupScheduleCardProps) {
   }
 
   function handleDeleteOne(path: string) {
-    const ok = window.confirm(
+    const ok = confirmAction(
       `Permanently delete this backup from the server?\n\n${backupRelName(path)}\n\n` +
       (docker ? 'This removes the backup file from this world’s Docker backup storage. It cannot be undone.' : 'This removes the .backup file (and its .yaml sidecar) from the VM. It cannot be undone.')
     )
@@ -1408,7 +1409,7 @@ function BackupScheduleCard({ vmRunning, showToast }: BackupScheduleCardProps) {
   function handleDeleteSelected() {
     const paths = [...selected]
     if (paths.length === 0) return
-    const ok = window.confirm(
+    const ok = confirmAction(
       `Permanently delete ${paths.length} selected backup${paths.length === 1 ? '' : 's'} from the server?\n\n` +
       (docker ? 'This removes the selected files from this world’s Docker backup storage. It cannot be undone.' : 'This removes the .backup files (and their .yaml sidecars) from the VM. It cannot be undone.')
     )

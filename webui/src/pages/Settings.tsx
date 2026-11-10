@@ -1,3 +1,4 @@
+import { confirmAction } from '../util/actionConfirmation'
 import { useSoloInstallation } from '../hooks/useInstallationMode'
 import { useState, useEffect, type FormEvent } from 'react'
 import { PageHeader } from '../components/PageHeader'
@@ -92,7 +93,7 @@ export function Settings() {
 
   async function onOpenBattlegroupBat() {
     const lan = values.VmHostMode?.toLowerCase() === 'lan'
-    if (!window.confirm(lan
+    if (!confirmAction(lan
       ? 'Open the Funcom server console for your remote VM?\n\nThe console connects using the configured SSH key and offers Funcom status, start, stop, restart, update and editing actions.'
       : 'Open Funcom\'s original battlegroup.bat?\n\nThis launches the battlegroup.bat in the root of your Steam install folder in an ELEVATED (administrator) window. Approve the Windows UAC prompt if it appears.')) return
     setOpeningBat(true)
@@ -402,7 +403,7 @@ export function Settings() {
     const oldDbPort = oldDbPortRaw || '15432 (default)'
     if (newDbPort !== oldDbPortRaw) {
       const target = newDbPort || '15432 (default)'
-      const ok = window.confirm(
+      const ok = confirmAction(
         `Change the database port?\n\n`
         + `  Current port:  ${oldDbPort}\n`
         + `  New port:      ${target}\n\n`

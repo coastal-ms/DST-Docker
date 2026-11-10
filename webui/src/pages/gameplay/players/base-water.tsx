@@ -1,3 +1,4 @@
+import { promptConfirmation, confirmAction } from '../../../util/actionConfirmation'
 import { useMemo, useState } from 'react'
 import { Icon } from '../../../components/Icon'
 import { fillBaseWater, getBaseWaterSummary, type Player } from '../../../api/gameplay'
@@ -37,7 +38,7 @@ export function BaseWaterAdmin({
       const counts = `${summary.total} cisterns across ${summary.owners} owner${summary.owners === 1 ? '' : 's'} ` +
         `(${summary.small} small, ${summary.medium} medium, ${summary.large} large)`
       if (allPlayers) {
-        const typed = window.prompt(
+        const typed = promptConfirmation("FILL ALL",
           `Fill ALL player-owned base cisterns?\n\nAffected: ${counts}.\n\n` +
           'DST will create a database backup, stop the battlegroup, disconnect every online player, ' +
           'fill every supported cistern attached to a rank-1-owned totem, then start the battlegroup again. ' +
@@ -47,7 +48,7 @@ export function BaseWaterAdmin({
         if (typed !== 'FILL ALL') return
       } else {
         const name = selected!.name || `controller ${selected!.controller_id}`
-        const confirmed = window.confirm(
+        const confirmed = confirmAction(
           `Fill every small, medium, and large cistern on ${name}'s owned bases?\n\nAffected: ${counts}.\n\n` +
           'DST will create a database backup, stop the battlegroup, disconnect every online player, ' +
           'fill only this player\'s owned cisterns, then start the battlegroup again. ' +

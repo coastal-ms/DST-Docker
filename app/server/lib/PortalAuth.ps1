@@ -545,7 +545,24 @@ function Get-DuneDockerTlsOrigin {
     param($Request)
     # Only our explicitly paired local TLS proxy may supply the external scheme.
     # Generic forwarding headers never authorize HTTPS or a local launch session.
-    if($env:DST_HOSTING_BACKEND -ne 'docker' -or -not $env:DST_TLS_PROXY_CONFIG){return $null}
+    if($env:DST_HOSTING_BACKEND -ne 'docker'){return $null}
+    # The optional owned Tailscale node terminates TLS and preserves Host.
+    # Trust only its persisted exact ts.net origin on a loopback connection.
+    # This never grants a local principal or bypasses portal authentication.
+    try {
+        if([Net.IPAddress]::IsLoopback($Request.RemoteEndPoint.Address)){
+            $path=Join-Path $env:APPDATA 'DuneServer/docker-tailscale-origin.json'
+            if(Test-Path -LiteralPath $path){
+                $tail=Get-Content -LiteralPath $path -Raw -ErrorAction Stop|ConvertFrom-Json -AsHashtable
+                $origin=[uri]$tail.origin
+                if($tail.mode -in @('private','public') -and $origin.Scheme -ceq 'https' -and
+                   $origin.Host -cmatch '^[a-z0-9-]+(?:\.[a-z0-9-]+)+\.ts\.net$' -and $origin.IsDefaultPort -and
+                   -not $origin.UserInfo -and $origin.AbsolutePath -eq '/' -and -not $origin.Query -and -not $origin.Fragment -and
+                   [string]$Request.Headers['Host'] -ieq $origin.Authority){return $origin}
+            }
+        }
+    }catch{}
+    if(-not $env:DST_TLS_PROXY_CONFIG){return $null}
     try {
         if(-not [Net.IPAddress]::IsLoopback($Request.RemoteEndPoint.Address)){return $null}
         if([string]$Request.Headers['X-Forwarded-Proto'] -cne 'https'){return $null}

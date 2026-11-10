@@ -172,6 +172,7 @@ async function requestOnlinePlayerConfirmation(
 export async function withOnlinePlayerGuard<T>(
   fn: (force: boolean) => Promise<T>,
 ): Promise<T> {
+  if (import.meta.env.VITE_DST_EDITION === 'docker') return fn(true)
   try {
     return await fn(false)
   } catch (e) {

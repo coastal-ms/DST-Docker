@@ -1,3 +1,4 @@
+import { confirmAction } from '../util/actionConfirmation'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   DndContext,
@@ -308,7 +309,7 @@ function LegacyMapSpinUp({ embedded = false }: { embedded?: boolean }) {
   }, [])
 
   const onRestartPods = useCallback(async (key: 'survival' | 'deepdesert', label: string) => {
-    const ok = window.confirm(
+    const ok = confirmAction(
       `Restart the ${label} pod(s)?\n\n`
         + (dockerEdition
           ? 'This restarts the running map server. Loading can take a few minutes. Its saved spin-up policy stays the same.\n\n'

@@ -1,3 +1,4 @@
+import { confirmAction } from '../../util/actionConfirmation'
 import { useEffect, useState } from 'react'
 import { api, PlayerGuardCancelledError, withOnlinePlayerGuard } from '../../api/client'
 import { completeDockerCommand } from '../../api/dockerCommand'
@@ -33,7 +34,7 @@ export function RegisTankSetup({ vmRunning, stopped, onBusyChange }: { vmRunning
   async function toggle(recover = false) {
     if (!state || busy || !stopped || (state.pending && !recover)) return
     const enabled = !state.enabled
-    if (!recover && !enabled && !window.confirm('Disable Tank support? Saved Tanks may be affected when the official server starts.')) return
+    if (!recover && !enabled && !confirmAction('Disable Tank support? Saved Tanks may be affected when the official server starts.')) return
     setBusy(true); onBusyChange?.(true); setError('')
     try {
       const result = recover
@@ -55,7 +56,7 @@ export function RegisTankSetup({ vmRunning, stopped, onBusyChange }: { vmRunning
 
   async function updateWithTanks() {
     if (busy || !state?.supported || state.pending || (docker && !state.updateSupported)) return
-    if (!window.confirm(docker ? 'Update the server with Tank support? DST will check the new build, back up the world, and prepare verified Tank compatibility before starting maps. An already stopped battlegroup stays stopped.' : 'Update the server with Tank support? DST will stop the battlegroup, disable Tank support, update, and restore support before restarting. If the new build is unsupported, it will stay stopped.')) return
+    if (!confirmAction(docker ? 'Update the server with Tank support? DST will check the new build, back up the world, and prepare verified Tank compatibility before starting maps. An already stopped battlegroup stays stopped.' : 'Update the server with Tank support? DST will stop the battlegroup, disable Tank support, update, and restore support before restarting. If the new build is unsupported, it will stay stopped.')) return
     setBusy(true); onBusyChange?.(true); setError(''); setMessage('')
     try {
       const result = await withOnlinePlayerGuard(force => api<{operationId?: string}>(`/api/commands/run/update-with-tanks${force ? '?force=true' : ''}`, { method: 'POST' }))

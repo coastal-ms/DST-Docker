@@ -84,3 +84,35 @@ Describe 'Paired Docker HTTPS proxy' {
         Get-DuneDockerTlsOrigin (New-TlsRequest)|Should -BeNullOrEmpty
     }
 }
+
+Describe 'Owned Docker Tailscale TLS origin' {
+    BeforeEach {
+        $env:DST_HOSTING_BACKEND='docker'
+        $env:DST_HTTP_INTERNAL_PORT=''
+        $env:DST_TLS_PROXY_CONFIG=''
+        $script:TailOldAppData=$env:APPDATA
+        $env:APPDATA=Join-Path $TestDrive 'tailscale-appdata'
+        New-Item -ItemType Directory -Path (Join-Path $env:APPDATA 'DuneServer') -Force|Out-Null
+        @{origin='https://dst.tail123.ts.net';mode='public'}|ConvertTo-Json|Set-Content (Join-Path $env:APPDATA 'DuneServer/docker-tailscale-origin.json')
+    }
+    AfterEach {$env:APPDATA=$script:TailOldAppData}
+    It 'accepts only the persisted Tailscale origin and retains remote account authentication' {
+        $request=New-TlsRequest
+        $request.Headers.Host='dst.tail123.ts.net';$request.Headers.Origin='https://dst.tail123.ts.net'
+        Test-DunePortalRequestOrigin $request|Should -BeTrue
+        Test-DuneLocalOnlyRequest $request|Should -BeFalse
+        $response=[pscustomobject]@{Headers=@{}}
+        Set-DunePortalSessionCookie $response 'synthetic-token' -Request $request
+        $response.Headers['Set-Cookie']|Should -Match '; Secure; HttpOnly'
+        $request.Headers.Origin='https://evil.example'
+        Test-DunePortalRequestOrigin $request|Should -BeFalse
+        $request.Headers.Host='another.tail123.ts.net';$request.Headers.Origin='https://another.tail123.ts.net'
+        Test-DunePortalRequestOrigin $request|Should -BeFalse
+    }
+    It 'rejects remote peers that claim the configured hostname' {
+        $request=New-TlsRequest
+        $request.Headers.Host='dst.tail123.ts.net';$request.Headers.Origin='https://dst.tail123.ts.net'
+        $request.RemoteEndPoint.Address=[Net.IPAddress]::Parse('192.0.2.51')
+        Test-DunePortalRequestOrigin $request|Should -BeFalse
+    }
+}

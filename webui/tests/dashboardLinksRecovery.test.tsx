@@ -27,6 +27,16 @@ beforeEach(() => { vi.useFakeTimers(); getLinks.mockReset(); localStorage.clear(
 afterEach(() => { cleanup(); vi.useRealTimers() })
 
 describe('dashboard web interfaces after VM startup', () => {
+  it('shows Docker stopping and stopped in the heartbeat despite an old map signal', async () => {
+    getLinks.mockResolvedValue(ready)
+    snapshot.value={hostingBackend:'docker',bg:{state:'stopping',info:{status:'stopping'},gameServers:[{map:'Survival_1',phase:'Starting',ready:'false',players:'0'}]}}
+    const view=render(<Dashboard />)
+    await act(async()=>{await Promise.resolve()})
+    expect(screen.getByText('Game Ready State').parentElement).toHaveTextContent('Stopping')
+    snapshot.value={hostingBackend:'docker',bg:{state:'stopped',info:{status:'stopped'},gameServers:[]}}
+    view.rerender(<Dashboard />)
+    expect(screen.getByText('Game Ready State').parentElement).toHaveTextContent('Stopped')
+  })
   it('displays a same-origin Docker File Browser link as an address that can be copied', async () => {
     getLinks.mockResolvedValue({ ...ready, fileBrowser: { available: true, url: '/api/docker/file-browser/', reason: null } })
     render(<Dashboard />)
