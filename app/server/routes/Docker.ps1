@@ -258,7 +258,8 @@ Register-DuneRoute -Method POST -Path '/api/docker/backup-import' -StreamBody -H
 Register-DuneRoute -Method GET -Path '/api/docker/host' -Handler {
     param($req,$res,$routeParams,$body)
     try {
-        $reply=Invoke-DuneDockerManager -HostSession -Request @{action='status'}
+        $action=if($req.QueryString['detail'] -ceq 'memory'){'memory.get'}else{'status'}
+        $reply=Invoke-DuneDockerManager -HostSession -Request @{action=$action}
         if(-not $reply.ok){
             $platform=if($env:DST_HOST_PLATFORM -ceq 'wsl'){'wsl'}else{'linux'}
             Write-DuneJson -Response $res -Body @{available=$false;platform=$platform;message=$reply.error};return
@@ -269,8 +270,9 @@ Register-DuneRoute -Method GET -Path '/api/docker/host' -Handler {
 Register-DuneRoute -Method POST -Path '/api/docker/host' -Handler {
     param($req,$res,$routeParams,$body)
     try {
-        if($body -isnot [hashtable] -or $body.action -cnotin @('shortcut','shutdown')){throw 'Choose a supported host action.'}
-        $reply=Invoke-DuneDockerManager -HostSession -Request @{action=$body.action;confirmation=$body.confirmation}
+        if($body -isnot [hashtable] -or $body.action -cnotin @('shortcut','shutdown','memory.set')){throw 'Choose a supported host action.'}
+        if($body.action -ceq 'memory.set' -and (-not $body.ContainsKey('memoryGiB') -or ($null -ne $body.memoryGiB -and $body.memoryGiB -isnot [int] -and $body.memoryGiB -isnot [long]))){throw 'Choose a whole RAM limit in GiB or the WSL default.'}
+        $reply=Invoke-DuneDockerManager -HostSession -Request @{action=$body.action;confirmation=$body.confirmation;memoryGiB=$body.memoryGiB}
         if(-not $reply.ok){throw $reply.error}
         Write-DuneJson -Response $res -Body $reply.data
     }catch{Write-DuneError -Response $res -Status 409 -Message $_.Exception.Message}

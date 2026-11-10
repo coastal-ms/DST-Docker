@@ -98,10 +98,12 @@ function GameServerMobileRow({ s }: { s: BgGameServer }) {
 }
 
 export function GameServerList({ servers }: { servers: BgGameServer[] }) {
+  const orderedServers = [...servers].sort((left, right) =>
+    Number(right.map.trim().toLowerCase() === 'overmap') - Number(left.map.trim().toLowerCase() === 'overmap'))
   return (
     <>
       <ul className="md:hidden" data-game-server-layout="stacked">
-        {servers.map((server, index) => (
+        {orderedServers.map((server, index) => (
           <GameServerMobileRow
             key={`${server.sietchName || server.map}-${index}`}
             s={server}
@@ -127,7 +129,7 @@ export function GameServerList({ servers }: { servers: BgGameServer[] }) {
             </tr>
           </thead>
           <tbody>
-            {servers.map((server, index) => (
+            {orderedServers.map((server, index) => (
               <GameServerRow
                 key={`${server.sietchName || server.map}-${index}`}
                 s={server}

@@ -1,5 +1,13 @@
 # DST Docker changelog
 
+## Unreleased
+
+- Keep Overmap first in the Game Servers list.
+- Set a lower WSL RAM ceiling from Settings, with changes applied at the next WSL restart.
+- Choose a preferred Windows browser for the desktop launcher without changing the system default.
+- Sort maps by name, status, players, mode, RAM usage or swap usage.
+- Document a Chrome video playback workaround for simultaneous portal and video use.
+
 ## [1.0.1]
 
 - Fix server update staging and recovery, including Tank compatibility with Funcom 1.5.20.1.

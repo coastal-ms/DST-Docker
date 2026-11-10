@@ -6,6 +6,19 @@ import { GameServerList } from '../src/pages/Dashboard'
 afterEach(() => cleanup())
 
 describe('Game Servers responsive layout', () => {
+  it('keeps Overmap first on desktop and mobile across status refreshes without changing the source order', () => {
+    const source = ['Survival_1', 'DeepDesert_1', 'Overmap', 'SH_Arrakeen'].map(map => ({ map, phase: 'Starting', ready: 'Unknown', players: 'Unknown', age: '1m' }))
+    const { container, rerender } = render(<GameServerList servers={source} />)
+    const desktopNames = () => Array.from(container.querySelectorAll('tbody tr td:first-child')).map(cell => cell.textContent?.trim())
+    const mobileNames = () => Array.from(container.querySelectorAll('[data-game-server-layout="stacked"] li p:first-child')).map(cell => cell.textContent?.trim())
+    const expected = ['Overmap', 'Hagga Basin', 'Deep Desert', 'Arrakeen']
+    expect(desktopNames()).toEqual(expected)
+    expect(mobileNames()).toEqual(expected)
+    expect(source.map(server => server.map)).toEqual(['Survival_1', 'DeepDesert_1', 'Overmap', 'SH_Arrakeen'])
+    rerender(<GameServerList servers={[source[1], source[0], {...source[2], phase: 'Running', ready: 'True'}, source[3]]} />)
+    expect(desktopNames()).toEqual(['Overmap', 'Deep Desert', 'Hagga Basin', 'Arrakeen'])
+    expect(mobileNames()).toEqual(desktopNames())
+  })
   const servers = [{
     map: 'Survival_1',
     sietchName: 'Long Sietch Name That Must Wrap',

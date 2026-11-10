@@ -78,6 +78,18 @@ sh bin/dst-docker reset-owner "OWNER_USERNAME"
 
 Use the exact existing Owner username and type `RESET OWNER` at the prompt. Recovery re-enables that Owner, replaces their password, revokes their sessions and clears sign-in lockouts. The terminal shows a one-time password; sign in and replace it before continuing. Other account passwords and sessions stay unchanged. For a custom Linux installation, change to the `current` folder under its chosen path first. Recovery does not start the database or maps.
 
+### Preferred Windows browser
+
+In the Windows hosting window, **6 - Choose browser** saves your choice of system default, Chrome, Edge or Firefox. **1 - Open browser** and subsequent desktop launches use that choice without changing your Windows default browser. The selected browser must be installed.
+
+### WSL RAM limit
+
+On Windows, open **Settings > WSL RAM limit** to choose a lower RAM ceiling in GiB, or restore the WSL default of 50% of Windows RAM. Select **Save WSL RAM limit**. Other WSL settings are preserved, and the server keeps running. The limit applies to all WSL 2 distributions after WSL restarts; the page shows when a restart is pending. Adjust per-map allocations to fit the smaller ceiling before restarting.
+
+### Chrome: video freezes while the portal is visible
+
+If YouTube or another video freezes while the portal is visible in Chrome despite having buffered video, try opening `chrome://flags/#disable-accelerated-video-decode`, setting **Hardware-accelerated video decode** to **Disabled**, and selecting **Relaunch**. Leave Chrome's general graphics acceleration enabled. This switches video decoding to the CPU and can increase CPU use. It is a workaround for the observed Chrome playback issue, not a required setting for every installation. Opening the portal in Edge is another workaround. Return the flag to **Default** if it does not help.
+
 ## Manage this installation
 
 Run these commands from `~/.local/share/dst-docker/current` (or the `current` folder under your selected installation path):
