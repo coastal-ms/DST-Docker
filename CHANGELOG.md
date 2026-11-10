@@ -1,5 +1,15 @@
 # DST Docker changelog
 
+## [1.0.1]
+
+- Fix server update staging and recovery, including Tank compatibility with Funcom 1.5.20.1.
+- Show update progress, console output and retained results through Details.
+- Simplify map settings with inline resource editors, preserved drafts and feedback beside each action.
+- Apply supported RAM, CPU and swap changes live, and save settings while maps run.
+- Remove redundant confirmations and fix hosting-menu prompts and shutdown status.
+- Add optional Tailscale private access and public HTTPS Funnel access with shareable links and map QR codes.
+- Align Docker CI with its Linux runtime.
+
 ## [1.0.0]
 
 - Host Dune Awakening servers on Linux and Windows WSL with setup and administration in the browser.

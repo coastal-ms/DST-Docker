@@ -5,9 +5,9 @@ Describe 'Independent Docker product identity' {
     It 'loads its own release version and repository' {
         $product=Get-DuneDockerProduct
         $product.name|Should -BeExactly 'DST Docker'
-        $product.version|Should -BeExactly '1.0.0'
+        $product.version|Should -BeExactly '1.0.1'
         $product.repository|Should -BeExactly 'coastal-ms/DST-Docker'
-        $product.tag|Should -BeExactly 'v1.0.0'
+        $product.tag|Should -BeExactly 'v1.0.1'
     }
     It 'rejects a mixed Windows product identity' {
         $path=Join-Path $TestDrive 'wrong.json'
