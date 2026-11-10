@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { api, withOnlinePlayerGuard } from '../../api/client'
-import { ConfirmationModal } from '../../components/ConfirmationModal'
 import { NumericSettingControl, RETAIL_SETTING_GUIDANCE } from './OfficialRetailServerSettingsCard'
 import { Link } from '../../router'
 import { Icon } from '../../components/Icon'
@@ -47,13 +46,12 @@ export function PerMapSettings({ onDirtyChange, onTargetChange, initialTarget = 
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [message, setMessage] = useState('')
-  const [review, setReview] = useState<'inherit' | 'restart' | null>(null)
-  const [switchTo, setSwitchTo] = useState<{ target: string; file: File } | null>(null)
   const [restartTick, setRestartTick] = useState(0)
   const [restartInFlight, setRestartInFlight] = useState(false)
   const [mapProgress, setMapProgress] = useState<{ phase: string; detail: string } | null>(null)
   const editorState = useRef({ dirty: false, pending: false })
   const sequence = useRef(0)
+  const drafts = useRef(new Map<string, { snapshot: Snapshot; values: Record<string, string> }>())
   const snapshotMatches = snapshot?.target === target && snapshot?.file === file
   const fields = snapshotMatches ? snapshot.fields : []
   const changes = useMemo(() => Object.fromEntries(fields.filter(field => field.editable && (values[field.id] ?? '') !== field.value).map(field => [field.id, values[field.id] ?? ''])), [fields, values])
@@ -67,12 +65,7 @@ export function PerMapSettings({ onDirtyChange, onTargetChange, initialTarget = 
   }, [target, file, query, view])
 
   useEffect(() => { onDirtyChange?.(dirty); return () => onDirtyChange?.(false) }, [dirty, onDirtyChange])
-  useEffect(() => {
-    if (!dirty) return
-    const prevent = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = '' }
-    window.addEventListener('beforeunload', prevent)
-    return () => window.removeEventListener('beforeunload', prevent)
-  }, [dirty])
+
 
   const load = async (selected: string, kind: File) => {
     const request = ++sequence.current
@@ -86,7 +79,7 @@ export function PerMapSettings({ onDirtyChange, onTargetChange, initialTarget = 
       const result = await api<Snapshot>(`/api/docker/map-settings?target=${encodeURIComponent(selected)}&file=${kind}`)
       if (request !== sequence.current) return
       if (selected) {
-        const draft = readDraft(selected, kind)
+        const draft = drafts.current.get(draftKey(selected, kind)) ?? readDraft(selected, kind)
         setSnapshot(draft?.snapshot ?? result); setValues(draft?.values ?? valuesFrom(result))
         if (draft && draft.snapshot.revision !== result.revision) setError('The saved file changed while you were away. Your draft is preserved; discard it and Refresh to load the current file.')
       }
@@ -97,6 +90,8 @@ export function PerMapSettings({ onDirtyChange, onTargetChange, initialTarget = 
   useEffect(() => { void load(target, file); return () => { sequence.current++ } }, [target, file])
   useEffect(() => {
     if (!snapshotMatches) return
+    if (dirty && snapshot) drafts.current.set(draftKey(target, file), { snapshot, values })
+    else drafts.current.delete(draftKey(target, file))
     try {
       if (dirty) sessionStorage.setItem(draftKey(target, file), JSON.stringify({ snapshot, values }))
       else sessionStorage.removeItem(draftKey(target, file))
@@ -105,23 +100,27 @@ export function PerMapSettings({ onDirtyChange, onTargetChange, initialTarget = 
   const select = (nextTarget: string, nextFile: File) => {
     if (scopeLocked && nextTarget !== target) return
     if (nextTarget === target && nextFile === file) return
-    if (dirty) { setSwitchTo({ target: nextTarget, file: nextFile }); return }
+    if (dirty && snapshotMatches && snapshot) {
+      drafts.current.set(draftKey(target, file), { snapshot, values })
+      try { sessionStorage.setItem(draftKey(target, file), JSON.stringify({ snapshot, values })) } catch { /* The in-memory draft remains available. */ }
+    }
     setTarget(nextTarget); setFile(nextFile); setCategory(''); setMessage('')
     if (nextTarget !== target) onTargetChange?.(nextTarget)
   }
   const save = async (inherit: boolean) => {
     if (!snapshotMatches || busy) return
-    setReview(null); setBusy(true); setError(''); setMessage('')
+    setBusy(true); setError(''); setMessage('')
     try {
       const result = await api<Snapshot>('/api/docker/map-settings', { method: 'PUT', body: JSON.stringify({ target, file, revision: snapshot.revision, updates: changes, inherit }) })
       setSnapshot(result); setValues(valuesFrom(result))
+      drafts.current.delete(draftKey(target, file))
       setMessage(global ? `${fileNames[file]} saved as Global defaults. Maps without their own copy use these values at their next start.` : `${fileNames[file]} saved for ${label}. ${result.pendingRestart ? 'Pending restart: this map will read the saved file at its next start.' : 'No restart is pending.'}`)
       try { sessionStorage.removeItem(draftKey(target, file)) } catch { /* Storage may be disabled. */ }
     } catch (e) { setError(messageOf(e)) }
     finally { setBusy(false) }
   }
   const restart = async () => {
-    setReview(null); setBusy(true); setError('')
+    setBusy(true); setError('')
     setRestartInFlight(true); setMapProgress({ phase: 'Restarting', detail: `Requesting a restart of ${label}…` })
     try {
       await withOnlinePlayerGuard(force => api(`/api/docker/map-settings/restart${force ? '?force=true' : ''}`, { method: 'POST', body: JSON.stringify({ target }) }))
@@ -173,18 +172,16 @@ export function PerMapSettings({ onDirtyChange, onTargetChange, initialTarget = 
       <label className="space-y-1 text-sm">Find a setting<input className="map-management-input w-full" type="search" value={query} onChange={event => setQuery(event.target.value)} placeholder="Name, key or description" /></label>
       <div className="flex items-end gap-1" aria-label="Settings view">{(['grid', 'list'] as const).map(mode => <button type="button" key={mode} aria-pressed={view === mode} className={view === mode ? 'btn-primary' : 'btn-secondary'} onClick={() => setView(mode)}>{mode === 'grid' ? 'Grid' : 'List'}</button>)}</div>
     </div>
-    {busy && <p role="status">Loading or saving map settings…</p>}
-    {error && <p role="alert" className="text-danger">{error}</p>}
-    {message && <p role="status" className="rounded-lg border border-success/40 p-3 text-success">{message}</p>}
+    {busy && !snapshotMatches && <p role="status">Loading map settings…</p>}
+    {!snapshotMatches && error && <p role="alert" className="text-danger">{error}</p>}
     {!global && mapProgress && <div role="status" aria-live="polite" className="flex items-center gap-3 rounded-lg border border-border p-3 text-sm">
       {restartInFlight && <Icon name="Loader2" size={18} className="animate-spin shrink-0" />}
       <p><strong>{mapProgress.phase}</strong> · {mapProgress.detail}</p>
     </div>}
     {snapshotMatches && <>
-      <div className="rounded-lg border border-border p-3 text-sm"><strong>Editing: {label} · {fileNames[file]}</strong><p className="mt-1 text-text-muted">{global ? 'Defaults for all maps. A map with its own saved file keeps that copy. Changes apply at the next map start.' : snapshot.overridden ? 'This map uses its own saved file. Future global edits will not replace it.' : 'Currently using the global file. Saving creates an independent copy for this map.'}{!global && ' Changes take effect when this map starts again.'}</p></div>
+      <details className="rounded-lg border border-border p-3 text-sm"><summary className="cursor-pointer">How these settings apply</summary><p className="mt-1 text-text-muted">{global ? 'Defaults for all maps. A map with its own saved file keeps that copy. Changes apply at the next map start.' : snapshot.overridden ? 'This map uses its own saved file. Future global edits will not replace it.' : 'Currently using the global file. Saving creates an independent copy for this map.'}{!global && ' Changes take effect when this map starts again.'}</p></details>
       {!snapshot.adapterReady && <p className="text-warning">This map needs the updated DST adapter before per-map saves are available. Existing settings are preserved.</p>}
-      {!global && snapshot.pendingRestart && <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-warning/40 p-3"><p><strong>{snapshot.running === false ? 'Saved for next start' : 'Pending restart'}</strong> · {snapshot.running === false ? `${label} is stopped. Its saved settings will load when it next starts.` : `Saved settings for ${label} have not been loaded by a new map process.`}</p>{snapshot.running !== false && <button type="button" className="btn-secondary" disabled={busy || dirty || restartInFlight} onClick={() => setReview('restart')}>{restartInFlight ? 'Restart in progress…' : 'Restart this map'}</button>}<button type="button" className="btn-secondary" disabled={busy || dirty} onClick={() => void load(target, file)}>Check applied status</button></div>}
-      {global && file === 'server' && <p className="text-sm text-text-muted">Stop the battlegroup before saving global Custom Settings. Saving does not start maps.</p>}
+      {!global && snapshot.pendingRestart && <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-warning/40 p-3"><p><strong>{snapshot.running === false ? 'Saved for next start' : 'Pending restart'}</strong> · {snapshot.running === false ? `${label} is stopped. Its saved settings will load when it next starts.` : `Saved settings for ${label} have not been loaded by a new map process.`}</p>{snapshot.running !== false && <button type="button" className="btn-secondary" disabled={busy || dirty || restartInFlight} onClick={() => void restart()}>{restartInFlight ? 'Restart in progress…' : 'Restart this map'}</button>}<button type="button" className="btn-secondary" disabled={busy || dirty} onClick={() => void load(target, file)}>Check applied status</button></div>}
       {file === 'server' && <p className="text-sm text-text-muted">Custom Settings and UserGame PvP controls can overlap. Review both files when changing PvP.</p>}
       {file !== 'server' && <p className="text-sm text-text-muted">Structured settings are shown here. Complex arrays and startup console variables remain in the specialized global controls. Settings marked “Player files too” also require matching client configuration.</p>}
       <div className={view === 'grid' ? 'grid gap-3 md:grid-cols-2 xl:grid-cols-3' : 'space-y-3'}>{visible.map(field => {
@@ -204,9 +201,13 @@ export function PerMapSettings({ onDirtyChange, onTargetChange, initialTarget = 
         </div>
       })}</div>
       {!visible.length && <p>No settings match this filter.</p>}
-      <div className="sm:sticky bottom-2 flex flex-wrap items-center gap-2 rounded-lg border border-border bg-base p-3 shadow-lg">
+      <div className="sticky bottom-2 z-10 flex flex-wrap items-center gap-2 rounded-lg border border-border bg-base p-3 shadow-lg" aria-label="Save map settings controls">
+        {error && <p role="alert" className="w-full text-sm text-danger">Settings not saved. {error}</p>}
+        {message && <p role="status" className="w-full text-sm text-success">{message}</p>}
+        {busy && <p role="status" className="w-full text-sm text-text-muted">Applying…</p>}
         <button type="button" className="btn-primary" disabled={!dirty || !!invalid || busy || !snapshot.adapterReady} onClick={() => void save(false)}>{global ? 'Save global defaults' : 'Save map settings'}{dirty ? ` (${Object.keys(changes).length})` : ''}</button>
         <button type="button" className="btn-secondary" disabled={!dirty || busy} onClick={() => { setValues(valuesFrom(snapshot)); setError('') }}>Discard changes</button>
+        <details className="relative"><summary className="btn-secondary cursor-pointer list-none">More</summary><div className="absolute bottom-full right-0 mb-2 flex w-52 flex-col gap-2 rounded-lg border border-border bg-base p-2 shadow-lg">
         <button type="button" className="btn-secondary" disabled={busy} onClick={() => setValues(previous => {
           const next = { ...previous }
           for (const field of fields) {
@@ -216,13 +217,12 @@ export function PerMapSettings({ onDirtyChange, onTargetChange, initialTarget = 
           return next
         })}>Restore defaults</button>
         <button type="button" className="btn-secondary" disabled={busy || dirty} onClick={() => void load(target, file)}>Refresh</button>
-        {!global && <button type="button" className="btn-secondary" disabled={!snapshot.overridden || dirty || busy || !snapshot.adapterReady} onClick={() => setReview('inherit')}>Use global settings</button>}
+        {!global && <button type="button" className="btn-secondary" disabled={!snapshot.overridden || dirty || busy || !snapshot.adapterReady} onClick={() => void save(true)}>Use global settings</button>}
+        </div></details>
         <span className="text-xs text-text-muted">Save now; apply at the next map start.</span>
       </div>
       <details className="rounded-lg border border-border p-3"><summary className="cursor-pointer text-sm">View saved INI for {label}</summary><p className="my-2 text-xs text-text-muted">The saved file is shown here. Unsaved changes above are not included.</p><textarea className="map-management-input h-56 w-full font-mono text-xs" aria-label="Saved map INI" readOnly value={snapshot.raw} /></details>
     </>}
     <div className="flex flex-wrap gap-3 text-sm"><button type="button" className="text-accent" disabled={busy || scopeLocked} onClick={() => select('global', file)}>Global defaults</button><Link to="/server-settings?section=tools" className="text-accent">Specialized editors</Link><Link to="/map?view=lifecycle" className="text-accent">Back to Maps &amp; memory</Link></div>
-    {switchTo && <ConfirmationModal title="Discard these map changes?" description={`Your unsaved ${fileNames[file]} changes for ${label} will be discarded before switching.`} confirmLabel="Discard & switch" onCancel={() => setSwitchTo(null)} onConfirm={() => { try { sessionStorage.removeItem(draftKey(target, file)) } catch { /* Storage may be disabled. */ } setValues({}); setTarget(switchTo.target); setFile(switchTo.file); setCategory(''); setMessage(''); if (switchTo.target !== target) onTargetChange?.(switchTo.target); setSwitchTo(null) }} />}
-    {review && <ConfirmationModal title={review === 'restart' ? `Restart ${label}?` : 'Use the global file for this map?'} description={review === 'restart' ? 'Players on this map will disconnect. DST will request a restart of this partition; check Server Overview for readiness.' : 'This removes this map’s override for the selected settings file. A backup is kept. The global file will apply at this map’s next start.'} confirmLabel={review === 'restart' ? 'Restart this map' : 'Use global settings'} onCancel={() => setReview(null)} onConfirm={() => review === 'restart' ? void restart() : void save(true)} />}
   </section>
 }

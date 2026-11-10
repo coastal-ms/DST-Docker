@@ -1,3 +1,4 @@
+import { confirmAction } from '../../util/actionConfirmation'
 import { useEffect, useState } from 'react'
 import { api } from '../../api/client'
 import { CollapsibleCard } from '../../components/CollapsibleCard'
@@ -30,7 +31,7 @@ export function VmMapHelperCard() {
   }, [progressing])
   if (!local) return null
   const update = async (method: 'POST' | 'DELETE') => {
-    if (method === 'POST' && !state?.enabled && !window.confirm('Live Maps uses the VM’s existing resources: allow 500 MB of free disk space for initial setup, including Python, maps, icons and working data. The helper has a 250 MB RAM limit; this is not extra VM RAM allocation or constant usage. DST installs the helper automatically. Enable Live Maps and install the helper?')) return
+    if (method === 'POST' && !state?.enabled && !confirmAction('Live Maps uses the VM’s existing resources: allow 500 MB of free disk space for initial setup, including Python, maps, icons and working data. The helper has a 250 MB RAM limit; this is not extra VM RAM allocation or constant usage. DST installs the helper automatically. Enable Live Maps and install the helper?')) return
     setBusy(true); setAction(method === 'DELETE' ? 'Removing map helper' : 'Setting up VM-hosted map'); setError('')
     try { setState(await api<State>('/api/v1/maps/vm-helper', { method, body: JSON.stringify({ resourcesAccepted: true }) })) }
     catch (e) { setError(e instanceof Error ? e.message : String(e)) }

@@ -1,3 +1,4 @@
+import { confirmAction } from '../../util/actionConfirmation'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Icon } from '../../components/Icon'
 import {
@@ -101,7 +102,7 @@ export function RemoteMaps() {
   }
 
   const onSpinDown = async (key: string) => {
-    if (!window.confirm('Spin this map down? Any active session will end.')) return
+    if (!confirmAction('Spin this map down? Any active session will end.')) return
     setMapAction(key, { busy: 'spin-down', message: null, isError: false })
     try {
       const r = await spinDownMap(key)

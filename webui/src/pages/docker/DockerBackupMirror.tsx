@@ -1,3 +1,4 @@
+import { confirmAction } from '../../util/actionConfirmation'
 import { useCallback, useEffect, useState } from 'react'
 import { api } from '../../api/client'
 import { CollapsibleCard } from '../../components/CollapsibleCard'
@@ -22,7 +23,7 @@ export function DockerBackupMirror() {
     return () => { closed = true; window.clearInterval(timer) }
   }, [load])
   async function perform(action: string, enabled?: boolean) {
-    if (action === 'backups.mirror.cancel' && !window.confirm('Stop retrying this failed mirror batch? Original backups and existing mirror copies are kept. Main backup retention may prune the originals afterward.')) return
+    if (action === 'backups.mirror.cancel' && !confirmAction('Stop retrying this failed mirror batch? Original backups and existing mirror copies are kept. Main backup retention may prune the originals afterward.')) return
     setPosting(true); setError(''); setMessage('')
     try {
       const reply = await api<Reply>('/api/docker/setup', { method: 'POST', body: JSON.stringify({ action, ...(enabled === undefined ? {} : { enabled }) }) })

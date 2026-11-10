@@ -20,6 +20,16 @@ Describe 'Docker database lifecycle presentation' {
         $script:metadata.services=@(@{component='director';state='running'})
         (Get-DuneDockerStatus -SnapshotPath $script:snapshot -LifecycleOnly).bg.state | Should -Be 'stopping'
     }
+    It 'shows stopping in game phases and BG info even with stale ready heartbeats' {
+        $script:metadata.operation=@{phase='running';action='services.stop'}
+        $script:metadata.plan.games=@(@{map='Survival_1';partition=1})
+        $script:metadata.services=@(@{component='game-1';state='running';gameReady=$true;desiredState='stopped'})
+        $status=Get-DuneDockerStatus -SnapshotPath $script:snapshot -LifecycleOnly
+        $status.bg.state|Should -Be 'stopping'
+        $status.bg.info.status|Should -Be 'stopping'
+        $status.bg.gameServers[0].phase|Should -Be 'Stopping'
+        $status.bg.gameServers[0].ready|Should -Be 'False'
+    }
     It 'retains a real health failure while the database is running' {
         $script:metadata.database.state='running'
         (Get-DuneDockerStatus -SnapshotPath $script:snapshot -LifecycleOnly).bg.info.database|Should -Be 'unhealthy'

@@ -29,6 +29,7 @@ vi.mock('../src/pages/WickMaps', () => ({
 vi.mock('../src/pages/MapSpinUp', () => ({
   MapSpinUp: () => <div>Lifecycle fixture</div>,
 }))
+vi.mock('../src/pages/gameconfig/PerMapSettings', () => ({ PerMapSettings: () => <div>Map settings fixture</div> }))
 vi.mock('../src/pages/workspaces/MapLiveState', () => ({
   MapLiveState: () => {
     liveRender()
@@ -38,6 +39,7 @@ vi.mock('../src/pages/workspaces/MapLiveState', () => ({
 
 afterEach(() => {
   cleanup()
+  vi.unstubAllEnvs()
   capabilityState.loading = false
   capabilityState.dataPresent = true
   capabilityState.error = null
@@ -48,6 +50,14 @@ afterEach(() => {
 })
 
 describe('Map workspace capability gating', () => {
+  it('opens Docker settings in its own workspace tab', async () => {
+    vi.stubEnv('VITE_DST_EDITION','docker')
+    window.history.replaceState(null,'','/map?view=settings')
+    render(<BrowserRouter><MapWorkspace /></BrowserRouter>)
+    expect(await screen.findByText('Map settings fixture')).toBeInTheDocument()
+    expect(screen.getByRole('link',{name:'Settings'})).toHaveAttribute('href','/map?view=settings')
+    expect(screen.queryByText('Lifecycle fixture')).toBeNull()
+  })
   it('renders and polls Live State only when the capability is advertised', async () => {
     capabilityState.ids.add('map.live-cache')
     window.history.replaceState(null, '', '/map?view=live')

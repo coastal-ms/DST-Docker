@@ -13,7 +13,7 @@ import shutil
 import subprocess
 import sys
 
-BUILDS = frozenset({'2147284', '2156652', '2160922', '2162777', '2168446', '2173753'})
+BUILDS = frozenset({'2147284', '2156652', '2160922', '2162777', '2168446', '2173753', '2177228', '2180427'})
 STEMS = {
     'modules': 'DuneSandbox/Content/Dune/Systems/Vehicles/Modules/DT_Tank_Modules',
     'blueprint': 'DuneSandbox/Content/Dune/Systems/Vehicles/Blueprints/GroundVehicles/BP_Tank_CHOAM',

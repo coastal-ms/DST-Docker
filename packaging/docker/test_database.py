@@ -1,6 +1,7 @@
 """Integration tests against an isolated PostgreSQL fixture, never a game DB."""
 import importlib.util
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -19,10 +20,10 @@ class DatabaseTests(unittest.TestCase):
         cls.config = cls.root / 'database.json'
         cls.secret = cls.root / 'password'
         cls.secret.write_text('')
-        cls.settings = {'host': '127.0.0.1', 'port': 18767, 'database': 'dune', 'user': 'dune',
+        cls.settings = {'host': os.environ.get('DST_TEST_POSTGRES_HOST','127.0.0.1'), 'port': int(os.environ.get('DST_TEST_POSTGRES_PORT','18767')), 'database': 'dune', 'user': 'dune',
                         'passwordFile': str(cls.secret), 'allowWrites': True}
         cls.config.write_text(json.dumps(cls.settings))
-        with psycopg.connect(host='127.0.0.1', port=18767, dbname='dune', user='dune', autocommit=True) as connection:
+        with psycopg.connect(host=cls.settings['host'], port=cls.settings['port'], dbname='dune', user='dune', autocommit=True) as connection:
             connection.execute('CREATE TABLE IF NOT EXISTS dst_transport_fixture (id integer PRIMARY KEY, value text)')
             connection.execute("INSERT INTO dst_transport_fixture VALUES (1,'original') ON CONFLICT (id) DO UPDATE SET value='original'")
 

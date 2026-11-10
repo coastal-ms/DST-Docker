@@ -1,3 +1,4 @@
+import { confirmAction } from '../../util/actionConfirmation'
 import { useState } from 'react'
 import { api } from '../../api/client'
 
@@ -36,7 +37,7 @@ export function ServerIniBackups({ vmRunning }: { vmRunning: boolean }) {
   }
 
   async function remove() {
-    if (!window.confirm(`Delete ${chosen.length} selected INI backup(s) from the server? Check that your downloaded ZIP is saved first.`)) return
+    if (!confirmAction(`Delete ${chosen.length} selected INI backup(s) from the server? Check that your downloaded ZIP is saved first.`)) return
     setBusy(true); setError(''); setMessage('')
     try {
       const result = await api<{ deleted: number; results: { path: string; ok: boolean }[] }>('/api/gameconfig/ini-backups/delete', { method: 'POST', body: JSON.stringify({ files: chosen }) })

@@ -142,9 +142,9 @@ function VehicleFleetWorkspace() {
       setBusy(null)
     }
   }, [load])
-  const removeVehicle = useCallback(async () => {
-    if (deleteTargets.length === 0) return
-    const ids = deleteTargets.map(vehicle => vehicle.id)
+  const removeVehicle = useCallback(async (targets = deleteTargets) => {
+    if (targets.length === 0) return
+    const ids = targets.map(vehicle => vehicle.id)
     setDeleteTargets([])
     setBusy('delete'); setError('')
     setMessage('Deleting vehicle. Backup and battlegroup restart usually take 1–5 minutes.')
@@ -327,11 +327,12 @@ function VehicleFleetWorkspace() {
                   disabled={busy !== null || source !== 'live' || selectedVehicles.length === 0}
                   onClick={() => {
                     setError('')
-                    setDeleteTargets(selectedVehicles)
+                    if (import.meta.env.VITE_DST_EDITION === 'docker') void removeVehicle(selectedVehicles)
+                    else setDeleteTargets(selectedVehicles)
                   }}
                 >
                   <Icon name={busy === 'delete' ? 'Loader2' : 'Trash2'} size={14} className={busy === 'delete' ? 'animate-spin' : undefined} />
-                  {busy === 'delete' ? 'Restarting BG & deleting… 1–5 min' : `Delete selected (${selectedVehicles.length})`}
+                  {busy === 'delete' ? 'Restarting BG & deleting… 1–5 min' : `${import.meta.env.VITE_DST_EDITION === 'docker' ? 'Delete & restart BG' : 'Delete selected'} (${selectedVehicles.length})`}
                 </button>}
                 <button className="btn-secondary" disabled={busy !== null || refreshing} onClick={() => { void load() }}>
                   <Icon name="RefreshCw" size={14} />

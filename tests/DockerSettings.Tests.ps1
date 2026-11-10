@@ -71,10 +71,10 @@ Describe 'Existing settings workflows use the native file transport' {
         $snapshot.fileAuthority|Should -BeTrue
     }
 
-    It 'does not permit a retail save while the world is running' {
+    It 'saves retail settings while the world is running without stopping maps' {
         Mock Invoke-DuneDockerManager {@{ok=$true;data=@{projectId=('a'*32);desiredState='running';services=@(@{component='game-1';state='running'})}}}
-        {Set-DuneRetailServerSettings -Ip docker -ExpectedRevision ('a'*64) -Updates @{}}|Should -Throw '*Stop the battlegroup fully*'
-        Should -Invoke Write-DuneDockerSettingsFile -Times 0
+        {Set-DuneRetailServerSettings -Ip docker -ExpectedRevision ('a'*64) -Updates @{GatheringAmount='2'}}|Should -Not -Throw
+        Should -Invoke Invoke-DuneDockerManager -Times 0 -ParameterFilter {$Request.action -in @('services.stop','services.restart')}
     }
 
     It 'returns the selected image defaults without VM image discovery' {

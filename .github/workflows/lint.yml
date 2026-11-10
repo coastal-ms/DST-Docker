@@ -27,98 +27,32 @@ concurrency:
 jobs:
   lint:
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
-    runs-on: windows-latest
+    runs-on: ubuntu-24.04
+    container: mcr.microsoft.com/powershell:7.5-ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Install PSScriptAnalyzer
         shell: pwsh
-        # Newer windows-latest runner images don't pre-register PSGallery
-        # for the legacy PowerShellGet v2 cmdlets, so prefer PowerShellGet
-        # v3 (`Install-PSResource`) which has PSGallery baked in. We've
-        # also seen two transient failure modes worth tolerating:
-        #   1. PSGallery returns 403/429 during high CI load.
-        #   2. The legacy fallback shells out to nuget.exe, which prints a
-        #      "Missing option value for: '-source'" parser error and exits
-        #      non-zero on some runner images even when PSScriptAnalyzer is
-        #      ultimately installed.
-        # Strategy: retry v3 install up to 3x with backoff, then attempt
-        # the legacy install in a try/catch, and treat success as
-        # "Import-Module PSScriptAnalyzer works" rather than "no command
-        # exited non-zero". Suppresses noise; only fails if we genuinely
-        # can't get the module loaded.
-        run: |
-          $ErrorActionPreference = 'Continue'
+        run: Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Scope CurrentUser -Force -SkipPublisherCheck
 
-          $haveV3 = [bool](Get-Command Install-PSResource -ErrorAction SilentlyContinue)
-          $installed = $false
-
-          if ($haveV3) {
-              for ($i = 1; $i -le 3 -and -not $installed; $i++) {
-                  try {
-                      Install-PSResource -Name PSScriptAnalyzer -Scope CurrentUser `
-                          -TrustRepository -Reinstall -ErrorAction Stop
-                      $installed = $true
-                  } catch {
-                      Write-Host "::warning::Install-PSResource attempt $i failed: $($_.Exception.Message)"
-                      if ($i -lt 3) { Start-Sleep -Seconds ([Math]::Pow(2, $i)) }
-                  }
-              }
-          }
-
-          if (-not $installed) {
-              try {
-                  if (-not (Get-PSRepository -Name PSGallery -ErrorAction SilentlyContinue)) {
-                      Register-PSRepository -Default -ErrorAction Stop
-                  }
-                  Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
-                  Install-Module PSScriptAnalyzer -Scope CurrentUser -Force -ErrorAction Stop
-                  $installed = $true
-              } catch {
-                  Write-Host "::warning::Install-Module fallback failed: $($_.Exception.Message)"
-              }
-          }
-
-          # Success criterion is Import-Module, not exit codes from the
-          # install path. nuget.exe noise from the legacy installer is
-          # routinely non-zero even on successful installs.
-          Import-Module PSScriptAnalyzer -ErrorAction Stop
-          $v = (Get-Module PSScriptAnalyzer).Version
-          Write-Host "PSScriptAnalyzer $v ready."
-
-          # The Actions pwsh wrapper appends `exit $LASTEXITCODE`, so a
-          # non-zero code left behind by nuget.exe in the fallback path
-          # would fail this step even though the import above succeeded.
-          # Import-Module uses -ErrorAction Stop, so reaching this line
-          # means the module really is loaded; make that the exit code.
-          exit 0
-
-      - name: Parse-validate dune-server.ps1
+      - name: Parse Docker PowerShell sources
         shell: pwsh
         run: |
-          $tokens = $null; $errors = $null
-          [System.Management.Automation.Language.Parser]::ParseFile(
-              "$PWD\dune-server.ps1", [ref]$tokens, [ref]$errors) | Out-Null
-          if ($errors.Count -gt 0) {
-              $errors | ForEach-Object {
-                  "::error file=dune-server.ps1,line=$($_.Extent.StartLineNumber)::$($_.Message)"
-              }
-              exit 1
+          $paths = @('app/DuneServer-Linux.ps1') + @(Get-ChildItem app/server,packaging/docker -Recurse -Filter '*.ps1' -File | ForEach-Object FullName)
+          foreach ($path in $paths) {
+              $tokens = $null; $errors = $null
+              [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $path).Path, [ref]$tokens, [ref]$errors) | Out-Null
+              if ($errors.Count) { $errors | Write-Error; exit 1 }
           }
-          Write-Host "Parse OK"
 
-      - name: Run PSScriptAnalyzer
+      - name: Analyze the Linux entry point and Docker scripts
         shell: pwsh
         run: |
-          $results = Invoke-ScriptAnalyzer -Path .\dune-server.ps1 -Severity @('Error','Warning')
-          if ($results) {
-              $results | Format-Table -AutoSize
-              $errs = $results | Where-Object Severity -eq 'Error'
-              if ($errs) { exit 1 }
-          } else {
-              Write-Host "No issues found."
-          }
+          $paths = @('app/DuneServer-Linux.ps1') + @(Get-ChildItem packaging/docker -Filter '*.ps1' -File | ForEach-Object FullName)
+          $issues = @($paths | ForEach-Object { Invoke-ScriptAnalyzer -Path $_ -Severity Error })
+          if ($issues.Count) { $issues | Format-Table -AutoSize; exit 1 }
 
       - name: Guard remote-portal isolation
         shell: pwsh

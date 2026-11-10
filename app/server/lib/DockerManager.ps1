@@ -116,12 +116,15 @@ function Get-DuneDockerStatus {
     $allReady=$connected -and $coreRunning -and $queuesHealthy -and $databaseReady -and $expectedGames.Count-gt 0 -and @($expectedGames | Where-Object { $_.ready-ne'True' }).Count-eq 0
     $activeServices=@($metadata.services | Where-Object {$_.state -in @('running','restarting')}).Count -gt 0
     $state=if(-not $connected){'unknown'}elseif($metadata.operation.phase-eq'running'-and $metadata.operation.action-eq'services.stop'){'stopping'}elseif($metadata.desiredState-eq'stopped'){if($activeServices){'stopping'}else{'stopped'}}elseif($allReady){'running'}elseif($coreRunning){'starting'}else{'unknown'}
+    if($state -in @('stopping','stopped')){
+        foreach($game in $games){$game.phase=if($state -eq 'stopping'){'Stopping'}else{'Stopped'};$game.ready='False'}
+    }
     $director=@($metadata.services | Where-Object { $_.component-eq'director' }) | Select-Object -First 1
     $gateway=@($metadata.services | Where-Object { $_.component-eq'gateway' }) | Select-Object -First 1
     $uptime=if($director.state-eq'running' -and $director.startedAt){Format-DuneKubeAge -Start ([DateTimeOffset]::FromUnixTimeSeconds([long]$director.startedAt).UtcDateTime)}else{''}
     $group=@{available=$connected;state=$state;name=$metadata.profile.name;title=$metadata.profile.name;gameServers=$games;
         reason=$(if(-not $connected){'Docker observations are unavailable or stale.'}else{$null});
-        info=@{status=$(if($allReady){'Ready'}else{$state});database=$databaseStatus;gateway=$(if($gateway.state-eq'running'){'Running'}else{[string]$gateway.state});director=$(if($director.state-eq'running'){'Running'}else{[string]$director.state});uptime=$uptime}}
+        info=@{status=$(if($state -in @('stopping','stopped')){$state}elseif($allReady){'Ready'}else{$state});database=$databaseStatus;gateway=$(if($gateway.state-eq'running'){'Running'}else{[string]$gateway.state});director=$(if($director.state-eq'running'){'Running'}else{[string]$director.state});uptime=$uptime}}
     $ports=$null
     if($metadata.profile -and -not $LifecycleOnly){
         $required=@(@{Port=[int]$metadata.profile.gamePortBase;Protocol='UDP';Label='Game (first)'},

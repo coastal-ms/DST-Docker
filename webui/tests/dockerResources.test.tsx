@@ -38,13 +38,18 @@ it('lets users opt into a per-map CPU cap and clear it back to shared', async ()
   expect(JSON.parse(request.mock.calls.find(call => call[1]?.method === 'PUT')![1].body).maps[0].cpus).toBeNull()
 })
 
-it('requires an explicit battlegroup stop before allocations can be changed', async () => {
+it('applies explicit RAM and CPU allocations while the world is running', async () => {
   request.mockResolvedValue({ ...snapshot, worldRunning: true })
   render(<DockerResourcesCard />)
-  await screen.findByText(/Stop the battlegroup before changing/)
-  expect(screen.getByLabelText('Survival_1 RAM')).toBeDisabled()
-  expect(screen.getByRole('button', { name: 'Save allocations' })).toBeDisabled()
-  expect(request).toHaveBeenCalledTimes(1)
+  await screen.findByLabelText('Survival_1 RAM')
+  expect(screen.getByLabelText('Survival_1 RAM')).toBeEnabled()
+  fireEvent.change(screen.getByLabelText('Survival_1 RAM'),{target:{value:'10'}})
+  fireEvent.click(screen.getByLabelText('Show optional per-map CPU limits'))
+  fireEvent.change(screen.getByLabelText('Survival_1 CPUs'),{target:{value:'2'}})
+  fireEvent.click(screen.getByRole('button',{name:'Save allocations'}))
+  await screen.findByText('Resource allocations applied.')
+  expect(JSON.parse(request.mock.calls.find(call=>call[1]?.method==='PUT')![1].body).maps[0]).toMatchObject({memoryGiB:10,cpus:2})
+  expect(screen.queryByText(/Stop the battlegroup/)).toBeNull()
 })
 
 it('retains the draft and displays rejected changes without claiming success', async () => {
@@ -54,6 +59,7 @@ it('retains the draft and displays rejected changes without claiming success', a
   fireEvent.change(screen.getByLabelText('Survival_1 RAM'), { target: { value: '14' } })
   fireEvent.click(screen.getByRole('button', { name: 'Save allocations' }))
   await screen.findByRole('alert')
+  expect(screen.getByRole('alert').parentElement).toHaveAttribute('aria-label','Resource allocation save controls')
   expect(screen.getByLabelText('Survival_1 RAM')).toHaveValue(14)
   expect(screen.queryByText(/saved and verified/)).not.toBeInTheDocument()
 })

@@ -6,7 +6,7 @@ function Get-DunePlayerRoutePolicy {
     if ($Path -eq '/api/player-portal/teleports' -and $Method -in @('GET','POST','DELETE')) { return 'teleports' }
     if ($Method -eq 'GET' -and $Path -in @(
         '/api/portal-auth/status','/api/v1/capabilities','/api/v1/platform/status',
-        '/api/player-portal/status','/api/v1/maps/catalog','/api/v1/maps/deep-desert',
+        '/api/player-portal/status','/api/map/remote-link','/api/v1/maps/catalog','/api/v1/maps/deep-desert',
         '/api/v1/maps/atlas/view','/api/v1/maps/atlas/resource',
         '/api/v1/maps/deep-desert/layers/{layer}', '/api/maps/{key}',
         '/api/catalog/items','/api/catalog/cosmetics','/api/catalog/vehicle-kits',

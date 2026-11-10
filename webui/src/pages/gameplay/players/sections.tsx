@@ -1,3 +1,4 @@
+import { confirmAction, promptConfirmation } from '../../../util/actionConfirmation'
 import { CosmeticMultiSelect, type CosmeticGrantSummary } from '../../../components/CosmeticMultiSelect'
 import { CharacterActivityEvent } from '../../../components/CharacterActivityEvent'
 import { JourneyCompletionChoices } from '../../../components/JourneyCompletionChoices'
@@ -244,11 +245,11 @@ export function SpecsSection({ player, canWrite, demo, refreshKey, flash, onChan
                 <Icon name="Star" size={13} /> Grant All Keystones
               </button>
               <button className="btn-secondary text-warning" disabled={busy}
-                onClick={() => { if (window.confirm(`Reset ALL keystones for ${player.name}? Cannot be undone.`)) void run(() => resetAllKeystones(player.controller_id), 'Reset all keystones') }}>
+                onClick={() => { if (confirmAction(`Reset ALL keystones for ${player.name}? Cannot be undone.`)) void run(() => resetAllKeystones(player.controller_id), 'Reset all keystones') }}>
                 <Icon name="RotateCcw" size={13} /> Reset All Keystones
               </button>
               <button className="btn-secondary text-danger" disabled={busy}
-                onClick={() => { if (window.confirm(`Reset ALL spec tracks + keystones for ${player.name}? Cannot be undone.`)) void run(() => resetAllSpecs(player.controller_id), 'Reset all specs') }}>
+                onClick={() => { if (confirmAction(`Reset ALL spec tracks + keystones for ${player.name}? Cannot be undone.`)) void run(() => resetAllSpecs(player.controller_id), 'Reset all specs') }}>
                 <Icon name="AlertTriangle" size={13} /> Reset All
               </button>
             </>
@@ -274,7 +275,7 @@ export function SpecsSection({ player, canWrite, demo, refreshKey, flash, onChan
                 onGrantMax={() => void run(() => grantMaxSpec(player.controller_id, name), 'Grant max')}
                 onReset={() => void run(() => resetSpec(player.controller_id, name), 'Reset')}
                 onSetLevel={(level) => {
-                  if (window.confirm(`Set ${name} to level ${level} for ${player.name}?\n\nThis writes the track's level directly, which the game treats as authoritative on next login (it recomputes the track's XP from this level). If the character has in-game spec progress not yet saved to the server, it can be overwritten (the stored value wins). Make sure you have a database backup before using this. The change appears in-game after a full re-login.`)) {
+                  if (confirmAction(`Set ${name} to level ${level} for ${player.name}?\n\nThis writes the track's level directly, which the game treats as authoritative on next login (it recomputes the track's XP from this level). If the character has in-game spec progress not yet saved to the server, it can be overwritten (the stored value wins). Make sure you have a database backup before using this. The change appears in-game after a full re-login.`)) {
                     void run(() => setSpecLevel(player.controller_id, name, level), 'Set level')
                   }
                 }}
@@ -282,7 +283,7 @@ export function SpecsSection({ player, canWrite, demo, refreshKey, flash, onChan
                   const patternNote = name === 'Crafting' && level >= 52
                     ? '\n\nPattern Upgrading includes the Grade 2–5 schematic-pattern recipes.'
                     : ''
-                  if (window.confirm(`Set ${name} to level ${level} and apply every ${name} specialization reward available through that level for ${player.name}?\n\nThe player must be fully offline because skill-point rewards update character state. Existing rewards are preserved. Rewards above level ${level} are not removed. The change appears in-game after a full re-login.${patternNote}`)) {
+                  if (confirmAction(`Set ${name} to level ${level} and apply every ${name} specialization reward available through that level for ${player.name}?\n\nThe player must be fully offline because skill-point rewards update character state. Existing rewards are preserved. Rewards above level ${level} are not removed. The change appears in-game after a full re-login.${patternNote}`)) {
                     void run(() => applySpecLevel(player.controller_id, name, level), 'Apply level')
                   }
                 }}
@@ -641,7 +642,7 @@ const storyOnlyResetMessage = (name: string) =>
   `Reset story, contracts, faction progression, Codex and Find the Fremen rewards for ${name}, keeping learned skills, skill points and tech points? The NPE stays completed so the story restarts at the skipped-tutorial starting point, before crossing from South Hagga to Vermillius. The Base Reconstruction Tool and Fremen quest rewards, including the full Scavenger Stillsuit bundle, both Deathstills and Prescience/third ability-slot unlock, must be earned again. The character returns to Griffin's Reach. Other research, level, inventory, equipment and property are preserved. Take a database backup first. Player must remain offline.\n\nThis is the first of two confirmations.`
 
 function runStoryOnlyReset(player: Player) {
-  const typed = window.prompt(`Reset to post-NPE for ${player.name}. Type  i acknowledge  to proceed:`) || ''
+  const typed = promptConfirmation("i acknowledge", `Reset to post-NPE for ${player.name}. Type  i acknowledge  to proceed:`) || ''
   if (typed.trim().toLowerCase() !== 'i acknowledge') throw new Error('Post-NPE reset cancelled.')
   return resetStoryOnly(player.account_id)
 }
@@ -745,7 +746,7 @@ const ACTIONS: ActionDef[] = [
     confirm: p => `RESET ${p.name}'s post-tutorial journey and restart at Find the Fremen? Journey/contract tags, rows, and contract items will be cleared. The NPE remains completed because veteran bases, skills, and items cannot reliably replay one-time tutorial events. Faction state, research, and active loadout are preserved. Only the chosen starter-class skill tree is reset, with its points refunded. This cannot be undone.\n\n` +
       `This is the FIRST of two confirmations. If you continue, the next step asks you to type an acknowledgement before the journey is reset.`,
     run: p => {
-      const typed = window.prompt(
+      const typed = promptConfirmation("i acknowledge",
         `SECOND confirmation — RESET ${p.name}'s entire journey.\n` +
         `This cannot be undone.\n\n` +
         `Type  i acknowledge  to proceed:`
@@ -884,7 +885,7 @@ const ACTIONS: ActionDef[] = [
     confirm: p => `Wipe ${p.name}'s codex?\n\n` +
       `This is the FIRST of two confirmations. If you continue, the next step asks you to type an acknowledgement before the codex is wiped. This cannot be undone.`,
     run: p => {
-      const typed = window.prompt(
+      const typed = promptConfirmation("i acknowledge",
         `SECOND confirmation — WIPE ${p.name}'s codex.\n` +
         `This cannot be undone.\n\n` +
         `Type  i acknowledge  to proceed:`
@@ -903,7 +904,7 @@ const ACTIONS: ActionDef[] = [
     confirm: p => `Permanently delete account ${p.account_id} (${p.name})?\n\n` +
       `This is the FIRST of two confirmations. If you continue, the next step asks you to type an acknowledgement before the account is deleted. This cannot be undone.`,
     run: p => {
-      const typed = window.prompt(
+      const typed = promptConfirmation("i acknowledge",
         `SECOND confirmation — PERMANENTLY delete account ${p.account_id} (${p.name}).\n` +
         `This cannot be undone.\n\n` +
         `Type  i acknowledge  to proceed:`
@@ -966,7 +967,7 @@ export function ActionsSection({ player, canWrite, demo, flash, onChanged, onFlu
   const runAction = async (def: ActionDef, exec: () => Promise<{ message: string }>) => {
     if (def.confirm) {
       const msg = def.confirm(player)
-      if (msg && !window.confirm(msg)) return false
+      if (msg && !confirmAction(msg)) return false
     }
     setBusy(true)
     onWorking?.(def.label)
@@ -1231,7 +1232,7 @@ function ActionRow({ def, player, busy, stats, open, danger, onToggle, runAction
           ) : def.custom === 'cheat-scripts' ? (
             <CheatScriptForm busy={busy}
               onSubmit={name => runAction(def, async () => {
-                const typed = window.prompt(
+                const typed = promptConfirmation("i acknowledge",
                   `SECOND confirmation — fire cheat script "${name}" on ${player.name}.\n` +
                   `This runs a server-side cheat command and cannot be undone.\n\n` +
                   `Type  i acknowledge  to proceed:`
@@ -1245,7 +1246,7 @@ function ActionRow({ def, player, busy, stats, open, danger, onToggle, runAction
           ) : def.custom === 'dev-scripts' ? (
             <DevScriptForm busy={busy}
               onSubmit={name => runAction(def, async () => {
-                const typed = window.prompt(
+                const typed = promptConfirmation("i acknowledge",
                   `SECOND confirmation — fire dev script "${name}" on ${player.name}.\n` +
                   `This runs a server-side dev/perf command and cannot be undone.\n\n` +
                   `Type  i acknowledge  to proceed:`
@@ -1350,7 +1351,7 @@ function ActionRow({ def, player, busy, stats, open, danger, onToggle, runAction
           ) : def.custom === 'starter-class' ? (
             <StarterClassForm busy={busy}
               onSubmit={(job, name) => runAction(def, () => {
-                const typed = window.prompt(
+                const typed = promptConfirmation("i acknowledge",
                   `SECOND confirmation — set ${player.name}'s starter class to "${name}".\n` +
                   `This cannot be undone.\n\n` +
                   `Type  i acknowledge  to proceed:`
@@ -1816,7 +1817,7 @@ function GrantUnlockTokensForm({ busy, playerName, accountId, kind, playerOnline
         disabled={busy || !playerOnline || missingTokens.length === 0}
         title={!playerOnline ? 'Player must be online' : undefined}
         onClick={async () => {
-          if (!window.confirm(
+          if (!confirmAction(
             `Deliver ${missingTokens.length} missing ${tokenLabel} token${missingTokens.length === 1 ? '' : 's'} to ${playerName}?\n\n` +
             (bulkUnlocks ? `Some ${buildingSets ? 'sets' : 'skins'} may not unlock because of Funcom's game-side limitations. Delivery does not guarantee activation.\n\n` : '') +
             'Online required. Delivery starts immediately. Remain online until the activation notifications stop.\n\nDST forces overflow, so excess tokens drop beside the player. Pick up all dropped tokens before running this action again.'
@@ -2753,7 +2754,7 @@ function ResetFactionForm({ busy, playerName, onReset }: {
   const [deep, setDeep] = useState(false)
   const go = () => {
     const extra = deep ? '\nDEEP RESET: also wipes faction-related Dunipedia lore fragments (House Atreides/Harkonnen/Leto/Paul/Baron/Feyd/etc.).' : ''
-    const typed = window.prompt(
+    const typed = promptConfirmation("reset faction",
       `Reset ALL faction progression for ${playerName} — zeroes rep, removes every faction tag (rank grid, MaasKharet, storyline milestones), and resets ClimbTheRanks journey nodes (revealed AND completed) for both factions. Cannot be undone.${extra}\n\nType  reset faction  to proceed:`
     ) || ''
     if (typed.trim().toLowerCase() !== 'reset faction') return
@@ -2866,7 +2867,7 @@ function ItemsActionBlock({ player, canWrite, flash, onChanged, onFlush }: {
   const runAction = async (def: ActionDef, exec: () => Promise<{ message: string }>) => {
     if (def.confirm) {
       const msg = def.confirm(player)
-      if (msg && !window.confirm(msg)) return false
+      if (msg && !confirmAction(msg)) return false
     }
     setBusy(true)
     try {
@@ -4046,11 +4047,11 @@ export function JourneySection({ player, canWrite, demo, refreshKey, flash, onCh
   }
 
   const resetAll = () => {
-    if (!window.confirm(
+    if (!confirmAction(
       `RESET ${player.name}'s post-tutorial journey and restart at Find the Fremen? Journey/contract tags, rows, and contract items will be cleared. The NPE remains completed because veteran bases, skills, and items cannot reliably replay one-time tutorial events. Faction state, research, and active loadout are preserved. Only the chosen starter-class skill tree is reset, with its points refunded. This cannot be undone.\n\n` +
       `This is the FIRST of two confirmations. If you continue, the next step asks you to type an acknowledgement before the journey is reset.`
     )) return
-    const typed = window.prompt(
+    const typed = promptConfirmation("i acknowledge",
       `SECOND confirmation — RESET ${player.name}'s entire journey.\n` +
       `This cannot be undone.\n\n` +
       `Type  i acknowledge  to proceed:`
@@ -4093,7 +4094,7 @@ export function JourneySection({ player, canWrite, demo, refreshKey, flash, onCh
         {canWrite && (
           <button type="button" className="btn-secondary shrink-0 text-xs" disabled={busy || isOnline}
             title={isOnline ? 'Player must be offline' : 'Reset story, faction, Codex and Fremen rewards after NPE; keep skills and point balances'}
-            onClick={() => { if (window.confirm(storyOnlyResetMessage(player.name))) void run(() => runStoryOnlyReset(player)) }}>
+            onClick={() => { if (confirmAction(storyOnlyResetMessage(player.name))) void run(() => runStoryOnlyReset(player)) }}>
             <Icon name="RefreshCw" size={12} /> Reset to Post-NPE
           </button>
         )}

@@ -8,9 +8,10 @@ import { LiveMapPreviewDisclosure } from './LiveMapPreviewDisclosure'
 
 const Atlas = lazy(() => import('../WickMaps').then(module => ({ default: module.WickMaps })))
 const LiveState = lazy(() => import('./MapLiveState').then(module => ({ default: module.MapLiveState })))
+const Settings = lazy(() => import('../gameconfig/PerMapSettings').then(module => ({ default: module.PerMapSettings })))
 const Lifecycle = lazy(() => import('../MapSpinUp').then(module => ({ default: module.MapSpinUp })))
 
-type MapView = 'atlas' | 'live' | 'lifecycle'
+type MapView = 'atlas' | 'live' | 'lifecycle' | 'settings'
 
 const STATIC_TABS: readonly WorkspaceTab[] = [
   { id: 'atlas', label: 'DD Atlas', to: '/map?view=atlas', icon: 'Map' },
@@ -26,6 +27,7 @@ const LIVE_TAB: WorkspaceTab = {
 
 function currentView(search: string): MapView {
   const view = new URLSearchParams(search).get('view')
+  if (view === 'settings' && import.meta.env.VITE_DST_EDITION === 'docker') return 'settings'
   return view === 'live' || view === 'lifecycle' || view === 'atlas' ? view : import.meta.env.VITE_DST_EDITION === 'docker' ? 'lifecycle' : 'atlas'
 }
 
@@ -35,9 +37,12 @@ export default function MapWorkspace() {
   const { data, loading, error, refresh, hasCapability } = usePlatformCapabilities()
   const capabilityResponseReceived = data !== null
   const liveCacheAvailable = hasCapability('map.live-cache') || (import.meta.env.VITE_DST_EDITION === 'docker' && hasCapability('map.observer'))
-  const tabs = liveCacheAvailable
+  const mapTabs = liveCacheAvailable
     ? [STATIC_TABS[0], LIVE_TAB, STATIC_TABS[1]]
     : STATIC_TABS
+  const tabs: readonly WorkspaceTab[] = import.meta.env.VITE_DST_EDITION === 'docker'
+    ? [...mapTabs, { id: 'settings', label: 'Settings', to: '/map?view=settings', icon: 'Settings' }]
+    : mapTabs
 
   if (requestedView === 'live' && !capabilityResponseReceived && loading) {
     return (
@@ -103,13 +108,13 @@ export default function MapWorkspace() {
                 <DataState state="loading" title="Loading live map state…" />
               </div>
             )
-          : <DataState state="loading" title={`Loading ${view === 'atlas' ? 'DD Atlas' : 'map lifecycle'}…`} />}
+          : <DataState state="loading" title={`Loading ${view === 'atlas' ? 'DD Atlas' : view === 'settings' ? 'map settings' : 'map lifecycle'}…`} />}
       >
         {view === 'atlas'
           ? <Atlas embedded />
           : view === 'live'
             ? <LiveState />
-            : <Lifecycle embedded />}
+            : view === 'settings' ? <Settings /> : <Lifecycle embedded />}
       </Suspense>
     </WorkspaceLayout>
   )

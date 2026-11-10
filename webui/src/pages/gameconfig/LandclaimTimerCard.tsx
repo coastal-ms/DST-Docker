@@ -190,7 +190,7 @@ export function LandclaimTimerCard({ vmRunning }: Props) {
       )}
 
       <div className="mt-3 flex items-center gap-2">
-        <button type="button" className="btn-primary" onClick={() => setReviewOpen(true)} disabled={!canApply}>
+        <button type="button" className="btn-primary" onClick={() => docker ? void apply() : setReviewOpen(true)} disabled={!canApply}>
           <Icon name={saving ? 'Loader2' : 'Check'} size={14} className={saving ? 'animate-spin' : ''} />
           {saving ? 'Applying…' : enabled ? 'Review timer changes' : 'Review restore defaults'}
         </button>

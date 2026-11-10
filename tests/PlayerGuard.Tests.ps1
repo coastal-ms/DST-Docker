@@ -5,10 +5,13 @@ BeforeAll {
     function Write-DuneJson {}
     function Write-DuneLog { param($Message, $Level) }
     function Get-DuneDbContext {}
+    function Invoke-DuneDockerManager {}
 }
 
 Describe 'Disruptive action player guard' {
     BeforeEach {
+        $script:savedGuardBackend = $env:DST_HOSTING_BACKEND
+        $env:DST_HOSTING_BACKEND = ''
         $script:guardResponse = $null
         Mock Write-DuneJson {
             param($Response, $Status, $Body)
@@ -16,6 +19,40 @@ Describe 'Disruptive action player guard' {
         }
         Mock Write-DuneLog {}
         Mock Get-DuneDbContext { @{ ok = $true; ip = '192.0.2.1' } }
+    }
+    AfterEach { $env:DST_HOSTING_BACKEND = $script:savedGuardBackend }
+
+    It 'allows a Docker update with every game container observed stopped and the database offline' {
+        $env:DST_HOSTING_BACKEND = 'docker'
+        Mock Invoke-DuneDockerManager { @{ok=$true;data=@{desiredState='stopped';services=@(
+            @{component='game-1';state='exited'}, @{component='game-2';state='created'}
+        )}} }
+        Mock Get-DuneDbContext { throw 'Stopped database must not be required' }
+        Mock Get-V6OnlinePlayersStrict { throw 'Stopped database must not be queried' }
+        Test-DuneDisruptiveActionGuard -Req ([pscustomobject]@{QueryString=@{}}) -Res $null -Action 'updating the battlegroup' | Should -BeTrue
+        Should -Invoke Get-DuneDbContext -Times 0
+        Should -Invoke Get-V6OnlinePlayersStrict -Times 0
+    }
+
+    It 'checks Docker players when a game still runs despite stopped intent' {
+        $env:DST_HOSTING_BACKEND = 'docker'
+        Mock Invoke-DuneDockerManager { @{ok=$true;data=@{desiredState='stopped';services=@(@{component='game-1';state='running'})}} }
+        Mock Get-V6OnlinePlayersStrict { @([pscustomobject]@{id=10;name='Player';status='Online'}) }
+        Test-DuneDisruptiveActionGuard -Req ([pscustomobject]@{QueryString=@{}}) -Res $null -Action 'updating the battlegroup' | Should -BeFalse
+        $script:guardResponse.body.conflict | Should -Be 'players_online'
+        Should -Invoke Get-V6OnlinePlayersStrict -Times 1 -ParameterFilter { $Ip -eq 'docker' }
+    }
+
+    It 'does not infer an empty Docker roster from incomplete or unavailable observations' -ForEach @(
+        @{reply=@{ok=$false}}, @{reply=@{ok=$true;data=@{services=@()}}},
+        @{reply=@{ok=$true;data=@{services=@(@{component='game-1';state='unknown'})}}}
+    ) {
+        $env:DST_HOSTING_BACKEND = 'docker'
+        $script:dockerGuardReply = $reply
+        Mock Invoke-DuneDockerManager { $script:dockerGuardReply }
+        Mock Get-V6OnlinePlayersStrict { throw 'No verified roster' }
+        Test-DuneDisruptiveActionGuard -Req ([pscustomobject]@{QueryString=@{}}) -Res $null -Action 'updating the battlegroup' | Should -BeFalse
+        $script:guardResponse.body.conflict | Should -Be 'player_status_unknown'
     }
 
     It 'blocks with player details when connected players would be disconnected' {

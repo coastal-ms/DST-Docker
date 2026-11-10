@@ -85,7 +85,27 @@ export function ServerSettings({ initialSection = 'official' }: { initialSection
     setSummary(previous => JSON.stringify(previous) === JSON.stringify(next) ? previous : next)
   }, [])
 
+  const saveDockerSettings = async () => {
+    if (applying || !summary.ready || !summary.changes.length) return
+    const selected = [...drafts.current.entries()].filter(([,draft]) => draft.changes.length > 0).map(([id,draft]) => [id,draft.snapshot?.() ?? draft] as const)
+    await runSettingsApply(async update => {
+      const saved: string[] = []
+      try {
+        for (const [,draft] of selected) await draft.validate?.()
+        for (const [id,draft] of selected) {
+          update({stage:'saving',message:`Saving ${id} settings…`})
+          await draft.apply();saved.push(id)
+        }
+        window.dispatchEvent(new Event('dst:server-settings-saved'))
+        update({message:'Settings saved. Changes load at the next map start.'})
+        try { await forceRefresh() } catch { /* Saved files are already verified. */ }
+      } catch (error) {
+        update({message:null,error:`${error instanceof Error ? error.message : String(error)}${saved.length ? ` Already saved: ${saved.join(', ')}.` : ''}`})
+      }
+    })
+  }
   const review = async () => {
+    if (docker) { await saveDockerSettings(); return }
     if (applying || reviewingRef.current) return
     reviewingRef.current = true
     clearSettingsApplyResult()
@@ -253,7 +273,7 @@ export function ServerSettings({ initialSection = 'official' }: { initialSection
         api<LaunchResult>(`/api/commands/run/stop${force ? '?force=true' : ''}`, { method: 'POST' }),
       )
       setStopRequested(true)
-      setStopMessage('Stop launched. Settings can be saved after the battlegroup is fully stopped and all server pods exit.')
+      setStopMessage(docker ? 'Stop launched.' : 'Stop launched. Settings can be saved after the battlegroup is fully stopped and all server pods exit.')
       stopRefreshInFlight.current = true
       try {
         await forceRefresh()
@@ -326,14 +346,14 @@ export function ServerSettings({ initialSection = 'official' }: { initialSection
           <p className="mt-1 text-xs text-text-muted">{import.meta.env.VITE_DST_EDITION === 'docker' ? 'After saving server settings, share the complete instructions below. Each player edits their own Game.ini and Engine.ini while the game is closed.' : 'Changes this PC’s game files for every server you play on. Other players’ files stay unchanged.'}</p>
         </> : section === 'official' || section === 'advanced' ? <>
           <strong>Selected server's files</strong>
-          <p className="mt-1 text-xs text-text-muted">Applies to the selected server. Review &amp; Apply shows all file changes before saving.</p>
+          <p className="mt-1 text-xs text-text-muted">{docker ? 'Save files while maps are running. Changes load at their next start.' : 'Applies to the selected server. Review & Apply shows all file changes before saving.'}</p>
         </> : <>
           <strong>{section === 'tools' ? 'Targets vary by tool' : 'Selected server management'}</strong>
           <p className="mt-1 text-xs text-text-muted">Each tool shows what it changes before you apply it.</p>
         </>}
       </div>
       <div hidden={section === 'maps'} role="region" aria-label="Settings actions" className="sticky top-16 z-20 mb-4 flex flex-wrap items-center gap-3 rounded-lg border border-border bg-base/95 p-3 shadow-lg backdrop-blur-sm">
-          <button className="btn-primary" type="button" disabled={!vmRunning || !summary.ready || applying || reviewOpen || launchingStart || launchingStop || stopRequested || startRequested || tankSetupBusy} onClick={() => void review()}>{applying ? 'Applying settings…' : 'Review & Apply'}{summary.changes.length > 0 ? ` (${summary.changes.length})` : ''}</button>
+          <button className="btn-primary" type="button" disabled={!vmRunning || !summary.ready || (docker && !summary.changes.length) || applying || reviewOpen || launchingStart || launchingStop || stopRequested || startRequested || tankSetupBusy} onClick={() => void review()}>{applying ? 'Applying settings…' : docker ? 'Save settings' : 'Review & Apply'}{summary.changes.length > 0 ? ` (${summary.changes.length})` : ''}</button>
           <span className="text-xs text-text-muted">{docker ? 'Review changes and choose whether to start afterward. Saved settings include matching player instructions.' : 'Review changes and choose whether to start afterward. You can keep intentional local differences.'}</span>
           {stopError && (
             <div className="flex w-full min-w-0 items-start gap-2 rounded-lg border border-danger/40 bg-danger/10 p-3 text-sm text-danger" role="alert">

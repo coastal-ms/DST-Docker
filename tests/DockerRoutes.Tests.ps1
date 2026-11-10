@@ -194,6 +194,9 @@ Describe 'Docker adapter routing boundary' {
         Test-DuneDockerRouteQualified -Method POST -Path '/api/db/backup-upload'|Should -BeFalse
     }
     It 'allows only typed resource reads and updates' {
+        Test-DuneDockerRouteQualified -Method GET -Path '/api/docker/update-progress' | Should -BeTrue
+        Test-DuneDockerRouteQualified -Method POST -Path '/api/docker/update-progress' | Should -BeFalse
+        Test-DuneDockerRouteQualified -Method GET -Path '/api/docker/update-progress/extra' | Should -BeFalse
         Test-DuneDockerRouteQualified -Method GET -Path '/api/docker/resources' | Should -BeTrue
         Test-DuneDockerRouteQualified -Method PUT -Path '/api/docker/resources' | Should -BeTrue
         Test-DuneDockerRouteQualified -Method POST -Path '/api/docker/resources' | Should -BeFalse
@@ -302,5 +305,16 @@ Describe 'WSL host route boundary' {
             Test-DuneDockerOwnerHostRoute -Method $method -Path '/api/docker/host' | Should -BeFalse
         }
         Test-DuneDockerOwnerHostRoute -Method POST -Path '/api/docker/host/exec' | Should -BeFalse
+    }
+}
+
+Describe 'Docker Tailscale route boundary' {
+    It 'exposes exact setup and read-only map-link methods' {
+        Test-DuneDockerRouteQualified -Method GET -Path '/api/docker/tailscale'|Should -BeTrue
+        Test-DuneDockerRouteQualified -Method PUT -Path '/api/docker/tailscale'|Should -BeTrue
+        Test-DuneDockerRouteQualified -Method POST -Path '/api/docker/tailscale'|Should -BeFalse
+        Test-DuneDockerRouteQualified -Method GET -Path '/api/docker/tailscale/exec'|Should -BeFalse
+        Test-DuneDockerRouteQualified -Method GET -Path '/api/map/remote-link'|Should -BeTrue
+        Test-DuneDockerRouteQualified -Method PUT -Path '/api/map/remote-link'|Should -BeFalse
     }
 }

@@ -50,7 +50,7 @@ beforeEach(() => {
     throw new Error(`Unexpected ${path}`)
   })
 })
-afterEach(() => { cleanup(); vi.useRealTimers() })
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllEnvs() })
 
 async function editBothAndReview() {
   fireEvent.change(screen.getByLabelText('official value'), { target: { value: 'official draft' } })
@@ -232,4 +232,18 @@ it('reports a save failure after navigation and does not restart', async () => {
   await act(async () => { releaseStop() })
   await waitFor(() => expect(screen.getByTestId('apply-observer')).toHaveTextContent('Already saved: official'), { timeout: 4000 })
   expect(state.events).toEqual(['stop', 'save:official:official draft', 'save:advanced:advanced draft'])
+})
+
+
+it('saves Docker drafts while maps run without a confirmation or stop/start', async () => {
+  vi.stubEnv('VITE_DST_EDITION','docker')
+  render(<ServerSettings initialSection="advanced" />)
+  fireEvent.click(screen.getByRole('button',{name:'Global custom settings'}))
+  fireEvent.change(screen.getByLabelText('official value'),{target:{value:'live draft'}})
+  fireEvent.click(screen.getByRole('button',{name:/Save settings/}))
+  await waitFor(()=>expect(state.events).toEqual(['save:official:live draft']))
+  expect(screen.queryByRole('alertdialog')).toBeNull()
+  expect(screen.getAllByText('Settings saved. Changes load at the next map start.').length).toBeGreaterThan(0)
+  expect(state.stopped).toBe(false)
+  expect(state.api.mock.calls.some(([path])=>String(path).includes('/commands/run/')||String(path).includes('reload-pods'))).toBe(false)
 })

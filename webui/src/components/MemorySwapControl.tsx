@@ -66,10 +66,6 @@ function OwnerMemorySwapControl() {
       setError('Use 1–16 GiB per running map, a 0–32 GiB managed pool, and swappiness from 0–100.'); return
     }
     if (enabled && selectedPool > status.safeAvailableDiskGiB) { setError('The selected pool would consume the host disk safety reserve.'); return }
-    const review = enabled
-      ? `Apply Memory Swap?\n\nEach map may use up to ${selectedAllowance} GiB of swap when RAM is under pressure.\nExisting shared host swap: ${status.existingSwapGiB} GiB\nAdditional swap file to create: ${selectedPool} GiB\nSwappiness: ${selectedSwappiness}\n\nThe allowance is a limit, not reserved memory. All maps share the host’s available swap. RAM limits stay unchanged. Disk-backed memory can increase loading time and lag.`
-      : 'Disable Memory Swap?\n\nRestore Docker’s default swap allowance and remove only this installation’s managed swap file. Administrator-managed host swap remains available. Host swappiness is restored only if DST still owns the current value.'
-    if (!window.confirm(review)) return
     setBusy(true); setError(''); setMessage('Applying Memory Swap…')
     try {
       await wait(await api<Started>('/api/docker/memory-swap', { method: 'PUT', body: JSON.stringify({ enabled, perServerGiB: selectedAllowance, poolGiB: selectedPool, swappiness: selectedSwappiness, confirmation: enabled ? 'ENABLE MEMORY SWAP' : 'DISABLE MEMORY SWAP' }) }))
@@ -78,7 +74,6 @@ function OwnerMemorySwapControl() {
     finally { setBusy(false) }
   }
   async function recover(restorePrevious: boolean) {
-    if (!window.confirm(restorePrevious ? 'Restore the Memory Swap policy from before the interrupted change?' : 'Retry the recorded Memory Swap change?')) return
     setBusy(true); setError(''); setMessage('Recovering Memory Swap…')
     try {
       await wait(await api<Started>('/api/docker/memory-swap/recover', { method: 'POST', body: JSON.stringify({ restorePrevious, confirmation: 'RECOVER MEMORY SWAP' }) }))

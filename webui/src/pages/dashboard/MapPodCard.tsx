@@ -1,3 +1,4 @@
+import { confirmAction } from '../../util/actionConfirmation'
 import { useCallback, useEffect, useState } from 'react'
 import { Icon } from '../../components/Icon'
 import { getMapState, startMap, stopMap, type MapState, type MapStopResult } from '../../api/maps'
@@ -56,7 +57,7 @@ export function MapPodCard({ mapKey, label, icon = 'Mountain', bgReady }: MapPod
       if (e instanceof ApiError && e.status === 409) {
         const body = e.body as MapStopResult | undefined
         const n = body?.playersOnline ?? 0
-        const ok = window.confirm(
+        const ok = confirmAction(
           `${n} player${n === 1 ? '' : 's'} currently connected to ${label}.\n\n`
           + `Force shutdown anyway? They will be disconnected.`,
         )

@@ -47,9 +47,7 @@ class Engine:
     def set_component_memory(self, identifier, project, component, amount, swap_policy=None):
         if not re.fullmatch(r'game-[0-9]+',component) or type(amount) is not int or not 256*1024**2<=amount<=128*1024**3:
             raise ValueError('Invalid map memory allocation.')
-        observed=self.assert_owned(identifier,project,component)
-        if observed['State']['Status']=='running' and amount<observed['HostConfig']['Memory']:
-            raise ValueError('Stop the map before reducing its memory allocation.')
+        self.assert_owned(identifier,project,component)
         import memory_swap
         total=memory_swap.total_limit(amount,swap_policy)
         self.request('POST','/containers/'+identifier+'/update',{'Memory':amount,'MemorySwap':total})
@@ -128,7 +126,11 @@ class Engine:
                 'Mounts':[{'Type':'volume', 'Source':assets_volume, 'Target':'/srv/dst'}],
                 'LogConfig':{'Type':'json-file','Config':{'max-size':'2m','max-file':'2'}}}})['Id']
 
-    def iter_logs(self, identifier, expected_labels):
+    def iter_logs(self, identifier, expected_labels, *, tail='all', max_bytes=None):
+        if tail != 'all' and (type(tail) is not int or not 1 <= tail <= 500):
+            raise ValueError('Invalid log tail limit.')
+        if max_bytes is not None and (type(max_bytes) is not int or not 1 <= max_bytes <= 1024 * 1024):
+            raise ValueError('Invalid log byte limit.')
         observed = self.inspect(identifier)
         actual = observed.get('Config', {}).get('Labels', {})
         if not expected_labels or any(actual.get(key) != value for key, value in expected_labels.items()):
@@ -136,9 +138,12 @@ class Engine:
         tty = observed.get('Config', {}).get('Tty', False)
         connection = EngineConnection()
         try:
-            connection.request('GET', '/containers/' + identifier + '/logs?stdout=1&stderr=1&timestamps=1&tail=all')
+            if max_bytes is not None:
+                connection.timeout = 5
+            connection.request('GET', '/containers/' + identifier + '/logs?stdout=1&stderr=1&timestamps=1&tail=' + str(tail))
             response = connection.getresponse()
             if response.status != 200: raise EngineError('Container logs are unavailable.')
+            emitted = 0
             while True:
                 if tty:
                     chunk = response.read(65536)
@@ -152,7 +157,12 @@ class Engine:
                     if length > 2 * 1024 * 1024: raise EngineError('Container log frame is too large.')
                     chunk = response.read(length)
                     if len(chunk) != length: raise EngineError('Container log stream was interrupted.')
+                if max_bytes is not None:
+                    chunk = chunk[:max_bytes - emitted]
+                emitted += len(chunk)
                 yield chunk
+                if max_bytes is not None and emitted >= max_bytes:
+                    return
         finally: connection.close()
 
     def create_scaler(self,project,network,control_volume):

@@ -1,18 +1,5 @@
 name: Tests
 
-# Runs the existing test suites that `Run-AllTests.ps1` already orchestrates
-# locally, but which nothing in CI was executing (only `lint.yml` ran, and it
-# only parse-checks + PSScriptAnalyzes dune-server.ps1). This wires up:
-#   * the Pester 5 backend suite under tests/ (24 files)  -> job `pester`
-#   * the Vitest webui suite under webui/tests/           -> job `vitest`
-#
-# Triggered on:
-#   - ready pull_request to any branch (no path filter). Same rationale as
-#     lint.yml -- if these ever become required status checks, a path filter
-#     would make PRs that don't touch the filtered paths wait forever on a
-#     check that never runs. The jobs are cheap when there's nothing to test.
-#   - push to main: filtered to the paths that actually affect test outcomes,
-#     to keep CI minutes low on doc / site-only pushes.
 on:
   push:
     branches: [main]
@@ -22,11 +9,15 @@ on:
       - 'tests/**'
       - 'app/**'
       - 'webui/**'
+      - 'packaging/docker/**'
+      - 'bin/**'
       - '.github/workflows/test.yml'
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
 
-# Draft PRs run no jobs. Ready PRs validate each new head; superseded runs stop.
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -34,270 +25,104 @@ concurrency:
 jobs:
   pester:
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
-    name: PowerShell (Pester)
-    runs-on: windows-latest
+    name: Linux PowerShell (Pester)
+    runs-on: ubuntu-24.04
+    container: mcr.microsoft.com/powershell:7.5-ubuntu-24.04
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Ensure Pester 5
-        shell: pwsh
-        # windows-latest usually ships Pester 5.x, but don't rely on it. If a
-        # 5+ module isn't already available, install it with the same
-        # resilience pattern lint.yml uses for PSScriptAnalyzer (PSResource v3
-        # first, legacy Install-Module fallback, tolerate transient PSGallery
-        # 403/429 + nuget.exe noise; success == the module imports).
+      - uses: actions/checkout@v4
+      - name: Install scheduler timezone data
+        shell: bash
         run: |
-          $ErrorActionPreference = 'Continue'
-
-          $have = Get-Module -ListAvailable -Name Pester |
-              Where-Object {
-                  $_.Version -ge [version]'5.0.0' -and
-                  $_.ModuleBase -notlike "$env:USERPROFILE\*"
-              }
-          if ($have) {
-              Write-Host "Pester $($have[0].Version) already available."
-              return
-          }
-
-          $installed = $false
-          if (Get-Command Install-PSResource -ErrorAction SilentlyContinue) {
-              for ($i = 1; $i -le 3 -and -not $installed; $i++) {
-                  try {
-                      Install-PSResource -Name Pester -Version '[5.5.0,)' -Scope AllUsers `
-                          -TrustRepository -ErrorAction Stop
-                      $installed = $true
-                  } catch {
-                      Write-Host "::warning::Install-PSResource attempt $i failed: $($_.Exception.Message)"
-                      if ($i -lt 3) { Start-Sleep -Seconds ([Math]::Pow(2, $i)) }
-                  }
-              }
-          }
-
-          if (-not $installed) {
-              try {
-                  if (-not (Get-PSRepository -Name PSGallery -ErrorAction SilentlyContinue)) {
-                      Register-PSRepository -Default -ErrorAction Stop
-                  }
-                  Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
-                  Install-Module Pester -MinimumVersion 5.5.0 -Scope AllUsers -Force -SkipPublisherCheck -ErrorAction Stop
-              } catch {
-                  Write-Host "::warning::Install-Module fallback failed: $($_.Exception.Message)"
-              }
-          }
-
-          $ok = Get-Module -ListAvailable -Name Pester |
-              Where-Object {
-                  $_.Version -ge [version]'5.0.0' -and
-                  $_.ModuleBase -notlike "$env:USERPROFILE\*"
-              }
-          if (-not $ok) { throw "Pester 5+ could not be made available." }
-          Write-Host "Pester $($ok[0].Version) ready."
-
-      - name: Setup .NET 10 SDK
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '10.0.x'
-
-      - name: Build platform cache helper for Pester
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tzdata
+      - name: Install Pester
         shell: pwsh
         run: |
-          dotnet build app\tools\DunePlatformStore\DunePlatformStore.csproj -c Release --nologo
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-          # Hosted runners grant the checkout to Administrators rather than the
-          # user SID. Mirror the install's Users-readable executable ACL so the
-          # helper's restricted same-user token can load its build output.
-          $output = 'app\tools\DunePlatformStore\bin\Release'
-          & icacls.exe $output /grant:r "${env:USERNAME}:(OI)(CI)RX" /T /Q
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Start disposable PostgreSQL fixture
+          $ErrorActionPreference = 'Stop'
+          Install-Module Pester -RequiredVersion 5.7.1 -Scope CurrentUser -Force -SkipPublisherCheck
+          Import-Module Pester -RequiredVersion 5.7.1
+      - name: Run Docker backend tests
         shell: pwsh
         run: |
-          $bin = $env:PGBIN
-          if (-not $bin -or -not (Test-Path (Join-Path $bin 'initdb.exe'))) {
-              $bin = Get-ChildItem "$env:ProgramFiles\PostgreSQL" -Directory -ErrorAction SilentlyContinue |
-                  Sort-Object Name -Descending |
-                  ForEach-Object { Join-Path $_.FullName 'bin' } |
-                  Where-Object { Test-Path (Join-Path $_ 'initdb.exe') } |
-                  Select-Object -First 1
-          }
-          if (-not $bin) { throw 'PostgreSQL server binaries are unavailable on this runner.' }
-
-          $data = Join-Path $env:RUNNER_TEMP 'dst-inventory-postgres'
-          $log = Join-Path $env:RUNNER_TEMP 'dst-inventory-postgres.log'
-          $passwordFile = Join-Path $env:RUNNER_TEMP 'dst-inventory-postgres.pw'
-          $superPassword = "$([guid]::NewGuid().ToString('N'))aA1!"
-          $rolePassword = "$([guid]::NewGuid().ToString('N'))bB2!"
-          Set-Content -LiteralPath $passwordFile -Value $superPassword -NoNewline
-          try {
-              & (Join-Path $bin 'initdb.exe') -D $data -A scram-sha-256 -U postgres `
-                  "--pwfile=$passwordFile" --no-locale --encoding=UTF8
-              $initExit = $LASTEXITCODE
-          } finally {
-              Remove-Item -LiteralPath $passwordFile -Force -ErrorAction SilentlyContinue
-          }
-          if ($initExit -ne 0) { exit $initExit }
-          & (Join-Path $bin 'pg_ctl.exe') -D $data -l $log -o '-p 55439' start
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-          $env:PGPASSWORD = $superPassword
-          & (Join-Path $bin 'psql.exe') -h localhost -p 55439 -U postgres -d postgres `
-              -v ON_ERROR_STOP=1 -c "CREATE ROLE dst_inventory LOGIN PASSWORD '$rolePassword' NOSUPERUSER NOCREATEDB NOCREATEROLE;"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & (Join-Path $bin 'psql.exe') -h localhost -p 55439 -U postgres -d postgres `
-              -v ON_ERROR_STOP=1 -c 'CREATE DATABASE dst_inventory OWNER dst_inventory;'
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Remove-Item Env:\PGPASSWORD
-
-          "DST_TEST_POSTGRES_PSQL=$(Join-Path $bin 'psql.exe')" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-          "DST_TEST_POSTGRES_PG_CTL=$(Join-Path $bin 'pg_ctl.exe')" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-          "DST_TEST_POSTGRES_DATA=$data" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-          'DST_TEST_POSTGRES_DATABASE=dst_inventory' | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-          'PGHOST=localhost' | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-          'PGPORT=55439' | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-          'PGUSER=dst_inventory' | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-          'PGDATABASE=dst_inventory' | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-          "PGPASSWORD=$rolePassword" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-
-      - name: Verify Solo mods and Deck transfers under Windows PowerShell 5.1
-        shell: pwsh
-        run: |
-          $env:DST_PESTER_MODULE = (Get-Module -ListAvailable Pester | Sort-Object Version -Descending | Select-Object -First 1).Path
-          powershell.exe -NoProfile -Command 'Import-Module $env:DST_PESTER_MODULE; $result = Invoke-Pester -Path tests/SoloMods.Tests.ps1,tests/SoloDeck.Tests.ps1,tests/SoloDeckMods.Tests.ps1 -PassThru -Output Detailed; if ($result.FailedCount -gt 0) { exit 1 }'
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Run Pester suite
-        shell: pwsh
-        run: |
-          $user = 'dst-pester'
-          $passwordText = "$([guid]::NewGuid().ToString('N'))aA1!"
-          $password = ConvertTo-SecureString $passwordText -AsPlainText -Force
-          New-LocalUser -Name $user -Password $password -PasswordNeverExpires | Out-Null
-
-          $profile = Join-Path $env:SystemDrive "Users\$user"
-          $localAppData = Join-Path $profile 'AppData\Local'
-          $temp = Join-Path $localAppData 'Temp'
-          New-Item -ItemType Directory -Path $temp -Force | Out-Null
-          & icacls.exe $profile /grant:r "${user}:(OI)(CI)F" /T /Q
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & icacls.exe $env:GITHUB_WORKSPACE /grant:r "${user}:(OI)(CI)M" /T /Q
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-          $start = [Diagnostics.ProcessStartInfo]::new()
-          $start.FileName = (Get-Command pwsh).Source
-          $start.ArgumentList.Add('-NoProfile')
-          $start.ArgumentList.Add('-ExecutionPolicy')
-          $start.ArgumentList.Add('Bypass')
-          $start.ArgumentList.Add('-File')
-          $start.ArgumentList.Add('tests\Run-Tests.ps1')
-          $start.ArgumentList.Add('-CI')
-          $start.WorkingDirectory = $env:GITHUB_WORKSPACE
-          $start.UseShellExecute = $false
-          $start.RedirectStandardOutput = $true
-          $start.RedirectStandardError = $true
-          $start.LoadUserProfile = $true
-          $start.Domain = $env:COMPUTERNAME
-          $start.UserName = $user
-          $start.Password = $password
-          $start.Environment['USERPROFILE'] = $profile
-          $start.Environment['LOCALAPPDATA'] = $localAppData
-          $start.Environment['APPDATA'] = Join-Path $profile 'AppData\Roaming'
-          $start.Environment['TEMP'] = $temp
-          $start.Environment['TMP'] = $temp
-
-          $process = [Diagnostics.Process]::Start($start)
-          $stdout = $process.StandardOutput.ReadToEndAsync()
-          $stderr = $process.StandardError.ReadToEndAsync()
-          $process.WaitForExit()
-          Write-Host $stdout.Result
-          if ($stderr.Result) { Write-Host $stderr.Result }
-          exit $process.ExitCode
-
-      - name: Stop disposable PostgreSQL fixture
-        if: always()
-        shell: pwsh
-        run: |
-          if ($env:DST_TEST_POSTGRES_PG_CTL -and (Test-Path $env:DST_TEST_POSTGRES_PG_CTL) -and
-              $env:DST_TEST_POSTGRES_DATA -and (Test-Path $env:DST_TEST_POSTGRES_DATA)) {
-              & $env:DST_TEST_POSTGRES_PG_CTL -D $env:DST_TEST_POSTGRES_DATA -m fast stop
-          }
-
+          ./tests/Run-DockerTests.ps1 -CI
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pester-results
+          name: linux-pester-results
           path: tests/TestResults.xml
-          if-no-files-found: ignore
+          if-no-files-found: error
+
+  python:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    name: Docker manager (Python)
+    runs-on: ubuntu-24.04
+    container: python:3.13-bookworm
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: dune
+          POSTGRES_USER: dune
+          POSTGRES_HOST_AUTH_METHOD: trust
+        options: >-
+          --health-cmd "pg_isready -U dune -d dune"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      DST_TEST_POSTGRES_HOST: postgres
+      DST_TEST_POSTGRES_PORT: '5432'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install manager test dependencies
+        run: |
+          command -v git >/dev/null || (apt-get update && apt-get install -y --no-install-recommends git)
+          python -m pip install 'PyYAML==6.0.3' 'psycopg[binary]==3.3.8'
+      - name: Run native Docker manager and transport tests
+        working-directory: packaging/docker
+        run: python -B -m unittest discover -s . -p 'test_*.py' -v
+      - name: Verify map assets and item coverage
+        run: |
+          python -B -m unittest discover -s tests -p test_atlas_builds.py -v
+          python -B -m unittest discover -s tools/atlas -p test_live.py -v
+          python -B -m unittest discover -s tools/atlas -p test_assets.py -v
+          python -B -m unittest discover -s tools/atlas -p test_elf.py -v
+          python -B -m unittest discover -s tests -p test_item_catalog_coverage.py -v
 
   vitest:
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
     name: WebUI (Vitest)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
           cache-dependency-path: webui/package-lock.json
-
-      - name: Install deps
+      - name: Install dependencies
         working-directory: webui
         run: npm ci
-
-      - name: Run Vitest
+      - name: Build Docker UI
+        working-directory: webui
+        env:
+          VITE_DST_EDITION: docker
+        run: npm run build
+      - name: Run WebUI tests
         working-directory: webui
         run: npm test
 
-  deck-companion:
+  platform-helper:
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
-    name: SteamOS companion
-    runs-on: ubuntu-latest
+    name: Linux platform cache helper
+    runs-on: ubuntu-24.04
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Verify companion packaging and Linux file operations
-        run: python3 -B -m unittest discover -s tests -p test_deck_companion.py -v
-      - name: Verify Atlas server build profiles
-        run: python3 -B -m unittest discover -s tests -p test_atlas_builds.py -v
-      - name: Verify Atlas Live recovery
-        run: python3 -B -m unittest discover -s tools/atlas -p test_live.py -v
-      - name: Verify clean-install map art and automatic ELF discovery
-        run: |
-          python3 -B -m unittest discover -s tools/atlas -p test_assets.py -v
-          python3 -B -m unittest discover -s tools/atlas -p test_elf.py -v
-      - name: Verify current game item catalog coverage
-        run: python3 -B -m unittest discover -s tests -p test_item_catalog_coverage.py -v
-
-  solo-helper:
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
-    name: Solo database helper
-    runs-on: windows-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup .NET 10 SDK
-        uses: actions/setup-dotnet@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
-
-      - name: Audit, build, and self-test
-        shell: pwsh
+      - name: Build and self-test the packaged Linux helper
         run: |
-          $project = 'app\tools\DuneSoloDb\DuneSoloDb.csproj'
-          dotnet restore $project
-          if ($LASTEXITCODE -ne 0) { throw 'DuneSoloDb restore failed.' }
-          $audit = dotnet list $project package --include-transitive --vulnerable | Out-String
-          Write-Host $audit
-          if ($audit -match 'has the following vulnerable packages') {
-            throw 'DuneSoloDb dependency audit found a vulnerable package.'
-          }
-          dotnet run --project $project -c Release -- --command self-test --adapter app/data/solo-retail-v1.json
-          if ($LASTEXITCODE -ne 0) { throw 'DuneSoloDb self-test failed.' }
+          dotnet publish app/tools/DunePlatformStore/DunePlatformStore.Linux.csproj -c Release -o "$RUNNER_TEMP/dst-platform"
+          "$RUNNER_TEMP/dst-platform/DunePlatformStore" --command self-test

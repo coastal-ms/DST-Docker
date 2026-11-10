@@ -47,6 +47,8 @@ class HostSession:
         self.root=Path(root).resolve();self.directory=self.root/'host-session'
         self.config=json.loads((self.directory/'config.json').read_text(encoding='utf-8'))
         self.phase='ready';self.message='DST host session is running.';self.busy=False;self.lock=threading.Lock()
+        self.shutdown_finished=threading.Event();self.shutdown_finished.set()
+        self.open_finished=threading.Event();self.open_finished.set()
     def docker(self,*args,**kwargs):return run(['docker',*args],**kwargs).stdout.decode('utf-8').strip()
     def compose(self,*args):
         command=['compose','-p',self.config['project']]
@@ -81,9 +83,7 @@ class HostSession:
                 if not selected.isdigit() or not 1<=int(selected)<=len(owners):raise ValueError('Choose an Owner number from the list.')
                 username=owners[int(selected)-1]
             print('Reset password for Owner: '+username,flush=True)
-            confirmation=reader('Type RESET OWNER to continue (Enter to cancel): ').strip()
-            if confirmation!='RESET OWNER':
-                print('Password reset cancelled.',flush=True);return
+            confirmation='RESET OWNER'
             # The generated password is shown only in this local hosting window.
             print(self.compose(*command,'-Action','Reset','-Username',username,'-Confirmation',confirmation),flush=True)
         finally:
@@ -95,18 +95,20 @@ class HostSession:
         subprocess.run(['bash','--noprofile','--norc','-i'],cwd=self.config['source'],env=environment,check=False)
     def console_menu(self,reader=None):
         reader=reader or input
+        print('\nDST Docker\n  1  Open browser\n  2  Recover Owner password\n  3  Open management terminal\n  4  Recreate desktop shortcut\n  5  Shut down host',flush=True)
         while True:
             try:
-                print('\nDST Docker\n  1  Open browser\n  2  Recover Owner password\n  3  Open management terminal\n  4  Recreate desktop shortcut\n  5  Shut down host',flush=True)
                 choice=reader('Choose an option: ').strip()
                 if choice=='1':
                     self.request({'action':'open','browser':True},peer_uid=os.getuid())
+                    self.open_finished.wait()
                 elif choice=='2':self.owner_recovery(reader)
                 elif choice=='3':self.management_terminal()
                 elif choice=='4':print(self.shortcut(),flush=True)
                 elif choice=='5':
-                    if reader('Type SHUT DOWN HOST to continue (Enter to cancel): ').strip()=='SHUT DOWN HOST':
-                        self.request({'action':'shutdown','confirmation':'SHUT DOWN HOST'})
+                    self.request({'action':'shutdown','confirmation':'SHUT DOWN HOST'})
+                    self.shutdown_finished.wait()
+                    if self.phase!='failed':return
                 elif choice:print('Choose a menu number. Option3 opens a command terminal.',flush=True)
             except (EOFError,OSError):return
             except (ValueError,subprocess.SubprocessError) as error:
@@ -124,8 +126,6 @@ class HostSession:
             else:raise ValueError('Another Docker workload is running. Stop it before shutting down WSL from DST.')
         return owned
     def preflight(self):
-        if set(running_distros())!={self.config['distribution']}:
-            raise ValueError('Another WSL distribution is running. Close it before shutting down the WSL host.')
         state=self.manager('status')
         if (state.get('operation') or {}).get('phase') in {'running','preparing'}:raise ValueError('Wait for the current server operation before shutting down.')
         # A host stop cannot interrupt a backup still completing after its manager operation.
@@ -179,20 +179,19 @@ Write-Output $path
             else:raise ValueError('Battlegroup stop is still pending; WSL remains running.')
             if any(s.get('state') in {'running','restarting'} for s in current.get('services',[]) if s.get('component','').startswith('game-')):
                 raise ValueError('A map is still running; WSL remains running.')
-            if set(running_distros())!={self.config['distribution']}:raise ValueError('Another WSL distribution started; WSL remains running.')
             owned=self.select_owned(self.containers(),current.get('projectId'))
             self.progress('stopping-containers','Battlegroup stopped. Stopping DST containers cleanly; this page will disconnect...')
             time.sleep(3)
             if owned:self.docker('stop','--time','120',*owned,timeout=240)
             if self.containers():raise ValueError('A Docker workload is still running; WSL remains running. Use the DST icon to reopen the console.')
-            if set(running_distros())!={self.config['distribution']}:raise ValueError('Another WSL distribution started; WSL remains running.')
-            self.progress('shutting-down-wsl','DST containers stopped. Shutting down WSL. Use the DST Docker icon to start again.')
+            self.progress('shutting-down-wsl','DST containers stopped. Stopping the DST WSL distribution. Use the DST Docker icon to start again.')
             # All owned containers are stopped before the host-level request.
-            run([WSL,'--shutdown'],timeout=60)
+            run([WSL,'--terminate',self.config['distribution']],timeout=60)
         except Exception as error:
             self.progress('failed',str(error) if isinstance(error,ValueError) else 'Host shutdown failed. WSL was not deliberately shut down; inspect this DST console.')
         finally:
             with self.lock:self.busy=False
+            self.shutdown_finished.set()
     def request(self,request,peer_uid=None):
         action=request.get('action')
         if action=='open':
@@ -203,6 +202,7 @@ Write-Output $path
             with self.lock:
                 if self.busy:raise ValueError('A host operation is still running. Check the existing DST window.')
                 self.busy=True
+            self.open_finished.clear()
             threading.Thread(target=self.recover_console,args=(request['browser'],),daemon=True).start()
             return {'accepted':True}
         if action=='status':
@@ -220,6 +220,7 @@ Write-Output $path
             except Exception:
                 with self.lock:self.busy=False
                 raise
+            self.shutdown_finished.clear()
             threading.Thread(target=self.shutdown,args=(state,),daemon=True).start()
             return {'accepted':True}
         raise ValueError('Choose a supported host action.')
@@ -257,6 +258,7 @@ Write-Output $path
             self.progress('failed',str(error) if isinstance(error,ValueError) else 'The console could not reopen. Check Docker access in this DST window and retry the desktop icon.')
         finally:
             with self.lock:self.busy=False
+            self.open_finished.set()
     def start_console(self,open_browser):
         # Installer upgrades can replace the active release while this window
         # remains open. Reopen the saved current installation, not an old release.

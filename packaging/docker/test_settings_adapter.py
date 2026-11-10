@@ -39,18 +39,18 @@ class SettingsAdapterTests(unittest.TestCase):
         with self.assertRaises(ValueError):settings_adapter.create(self.state,self.engine,'control')
         with self.assertRaises(ValueError):settings_adapter.create(self.state,self.engine,'foreign-control')
 
-    def test_retail_writes_require_stopped_intent_and_every_game_process_stopped(self):
+    def test_retail_writes_stage_while_games_run_without_lifecycle_mutations(self):
         request={'action':'settings.write','file':'server','raw':'x','revision':'a'*64,'expectedExists':True}
-        with patch('manager.settings_client.request',return_value={'ok':True,'data':{'revision':'new'}}) as client:
-            self.state['desiredState']='running'
-            with self.assertRaises(ValueError):manager.write_settings(self.state,self.engine,request)
-            self.state['desiredState']='stopped';self.engine.assert_owned.return_value['State']['Status']='running'
-            with self.assertRaises(ValueError):manager.write_settings(self.state,self.engine,request)
-            client.assert_not_called()
-            self.engine.assert_owned.return_value['State']['Status']='exited'
-            self.assertEqual(manager.write_settings(self.state,self.engine,request),{'revision':'new'})
-            payload=client.call_args.args[0]
-            self.assertEqual(payload,{**request,'action':'write'})
+        self.state['desiredState']='running'
+        self.engine.assert_owned.return_value['State']['Status']='running'
+        with patch('manager.settings_client.request',return_value={'ok':True,'data':{'revision':'new','changed':True}}) as client,patch('manager.save') as persist:
+            self.assertEqual(manager.write_settings(self.state,self.engine,request),{'revision':'new','changed':True,'restartRequired':True})
+            self.assertEqual(client.call_args.args[0],{**request,'action':'write'})
+            self.assertGreater(self.state['globalSettingsPending']['server'],0)
+            persist.assert_called_once_with(self.state)
+        self.engine.request.assert_not_called()
+        self.engine.assert_owned.assert_not_called()
+        self.assertEqual(self.state['desiredState'],'running')
 
     def test_unsupported_settings_ids_and_service_failure_cannot_report_success(self):
         with patch('manager.settings_client.request',return_value={'ok':False,'conflict':True,'error':'Changed; refresh.'}) as client:

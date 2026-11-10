@@ -826,7 +826,7 @@ function Set-DuneRetailServerSettings {
     if (-not $ExpectedRevision -or $ExpectedRevision -cne [string]$current.revision) {
         throw [InvalidOperationException]::new('Retail Server Settings changed since they were loaded. Refresh and review the current values before saving.')
     }
-    if (-not $StageForRestart -and (-not $current.target.stopped -or [int]$current.target.serverPodCount -ne 0)) {
+    if ($env:DST_HOSTING_BACKEND -ne 'docker' -and -not $StageForRestart -and (-not $current.target.stopped -or [int]$current.target.serverPodCount -ne 0)) {
         throw [InvalidOperationException]::new('Stop the battlegroup fully before saving Official Retail Server Settings.')
     }
 
@@ -849,7 +849,7 @@ function Set-DuneRetailServerSettings {
         return @{ok=$true;applied=$Updates.Count;revision=$saved.revision;
             settings=@((ConvertFrom-DuneRetailServerSettingsRaw -Raw $updated).settings);
             target=(Get-DuneRetailServerSettingsPublicTarget -Target $target);restartRequired=$true;
-            message='Settings saved. Start the stopped battlegroup to apply them.'}
+            message='Settings saved. They apply at the next map start.'}
     }
     if (-not (Test-DuneConfigurationInjectionEnabled)) {
         if ($SynchronizeOnly) {return @{ok=$true;skipped=$true}}

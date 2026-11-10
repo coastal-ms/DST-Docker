@@ -3,6 +3,16 @@ $script:DuneDockerFileBrowserHandler = {
     Invoke-DuneDockerFileBrowser -Request $req -Response $res
 }
 
+Register-DuneRoute -Method GET -Path '/api/docker/update-progress' -Handler {
+    param($req,$res,$routeParams,$body)
+    if($env:DST_HOSTING_BACKEND -ne 'docker'){Write-DuneError -Response $res -Status 404 -Message 'Docker hosting is not enabled.';return}
+    $request=@{action='updates.progress';includeOutput=($req.QueryString['output'] -eq '1')}
+    if($req.QueryString['operationId']){$request.operationId=[string]$req.QueryString['operationId']}
+    $reply=Invoke-DuneDockerManager -Request $request
+    if(-not $reply.ok){Write-DuneError -Response $res -Status 503 -Message $reply.error;return}
+    Write-DuneJson -Response $res -Body $reply.data
+}
+
 Register-DuneRoute -Method GET -Path '/api/docker/map-settings' -Handler {
     param($req,$res,$routeParams,$body)
     if($env:DST_HOSTING_BACKEND -ne 'docker'){Write-DuneError -Response $res -Status 404 -Message 'Docker hosting is not enabled.';return}
@@ -264,4 +274,26 @@ Register-DuneRoute -Method POST -Path '/api/docker/host' -Handler {
         if(-not $reply.ok){throw $reply.error}
         Write-DuneJson -Response $res -Body $reply.data
     }catch{Write-DuneError -Response $res -Status 409 -Message $_.Exception.Message}
+}
+
+Register-DuneRoute -Method GET -Path '/api/docker/tailscale' -Handler {
+    param($req,$res,$routeParams,$body)
+    if($env:DST_HOSTING_BACKEND -ne 'docker'){Write-DuneError -Response $res -Status 404 -Message 'Docker hosting is not enabled.';return}
+    $reply=Invoke-DuneDockerManager -Request @{action='tailscale.get';port=(Get-DuneDockerListenerPort)}
+    if(-not $reply.ok){Write-DuneError -Response $res -Status 503 -Message $reply.error;return}
+    Write-DuneJson -Response $res -Body $reply.data
+}
+Register-DuneRoute -Method PUT -Path '/api/docker/tailscale' -Handler {
+    param($req,$res,$routeParams,$body)
+    if($env:DST_HOSTING_BACKEND -ne 'docker'){Write-DuneError -Response $res -Status 404 -Message 'Docker hosting is not enabled.';return}
+    $reply=Invoke-DuneDockerManager -Request @{action='tailscale.set';mode=$body.mode;port=(Get-DuneDockerListenerPort)}
+    if(-not $reply.ok){Write-DuneError -Response $res -Status 400 -Message $reply.error;return}
+    Write-DuneJson -Response $res -Body $reply.data
+}
+Register-DuneRoute -Method GET -Path '/api/map/remote-link' -Handler {
+    param($req,$res,$routeParams,$body)
+    if($env:DST_HOSTING_BACKEND -ne 'docker'){Write-DuneError -Response $res -Status 404 -Message 'Docker hosting is not enabled.';return}
+    $reply=Invoke-DuneDockerManager -Request @{action='tailscale.link'}
+    if(-not $reply.ok){Write-DuneError -Response $res -Status 503 -Message $reply.error;return}
+    Write-DuneJson -Response $res -Body $reply.data
 }

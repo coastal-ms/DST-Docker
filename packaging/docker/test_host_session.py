@@ -23,11 +23,11 @@ class HostSessionTests(unittest.TestCase):
         self.session.busy=True
         with self.assertRaisesRegex(ValueError,'already'):self.session.request({'action':'shutdown','confirmation':'SHUT DOWN HOST'})
         self.session.preflight.assert_not_called()
-    def test_other_distribution_blocks_before_manager_stop(self):
-        self.session.manager=Mock()
+    def test_other_distribution_does_not_block_owned_host_shutdown(self):
+        self.session.manager=Mock(return_value=self.state)
+        self.session.containers=Mock(return_value=[])
         with patch.object(host,'running_distros',return_value=['Ubuntu','Other']):
-            with self.assertRaisesRegex(ValueError,'Another WSL'):self.session.preflight()
-        self.session.manager.assert_not_called()
+            self.assertEqual(self.session.preflight(),self.state)
     def test_foreign_workload_is_rejected(self):
         with self.assertRaisesRegex(ValueError,'Another Docker'):self.session.select_owned([{'Id':'foreign','Config':{'Labels':{}}}],'world')
     def test_only_owned_installation_world_and_settings_are_selected(self):
@@ -58,15 +58,15 @@ class HostSessionTests(unittest.TestCase):
         return events
     def test_battlegroup_finishes_before_container_stop_and_wsl_shutdown(self):
         events=self.sequence()
-        self.assertEqual(events,['services.stop','status',['stop','--time','120','app','db'],[host.WSL,'--shutdown']])
+        self.assertEqual(events,['services.stop','status',['stop','--time','120','app','db'],[host.WSL,'--terminate','Ubuntu']])
         resume=json.loads((self.root/'host-session/resume.json').read_text());self.assertTrue(resume['resume']);self.assertEqual(resume['world'],'world')
-    def test_new_distribution_after_container_stop_prevents_wsl_shutdown(self):
+    def test_other_distribution_is_not_terminated(self):
         self.session.manager=Mock(return_value={'operation':{'id':'op','phase':'completed'},'projectId':'world','services':[]})
         self.session.containers=lambda:[];self.session.select_owned=lambda *_:['app']
         self.session.docker=Mock()
         with patch.object(host,'running_distros',side_effect=[['Ubuntu'],['Ubuntu','Other']]),patch.object(host.time,'sleep'),patch.object(host,'run') as command:
             self.session.shutdown(self.state)
-        command.assert_not_called();self.assertEqual(self.session.phase,'failed')
+        command.assert_called_once_with([host.WSL,'--terminate','Ubuntu'],timeout=60)
 
     def test_failed_bg_stop_never_stops_containers_or_wsl(self):
         events=self.sequence(stop_phase='failed')
@@ -106,7 +106,7 @@ class HostSessionTests(unittest.TestCase):
         self.assertFalse(self.session.busy);self.assertEqual(self.session.phase,'ready')
 
     def test_cancelled_owner_recovery_never_resets_an_account(self):
-        self.session.compose=Mock(return_value='Enabled\tReleaseOwner')
+        self.session.compose=Mock(return_value='Enabled\tFirstOwner\nEnabled\tSecondOwner')
         with redirect_stdout(io.StringIO()):self.session.owner_recovery(lambda _: '')
         self.session.compose.assert_called_once()
         self.assertFalse(self.session.busy)
@@ -120,6 +120,60 @@ class HostSessionTests(unittest.TestCase):
         with redirect_stdout(io.StringIO()) as output:self.session.console_menu(read)
         self.session.owner_recovery.assert_called_once_with(read)
         self.assertIn('Recover Owner password',output.getvalue())
+
+    def test_console_shutdown_runs_from_menu_selection_without_another_prompt(self):
+        answers=iter(['5'])
+        prompts=[]
+        def read(prompt):
+            prompts.append(prompt)
+            try:return next(answers)
+            except StopIteration:raise EOFError()
+        self.session.request=Mock()
+        with redirect_stdout(io.StringIO()):self.session.console_menu(read)
+        self.session.request.assert_called_once_with({'action':'shutdown','confirmation':'SHUT DOWN HOST'})
+        self.assertEqual(prompts,['Choose an option: '])
+
+    def test_console_shutdown_shows_progress_until_failure_then_allows_retry(self):
+        requested=host.threading.Event();second_prompt=host.threading.Event();prompts=[]
+        def read(prompt):
+            prompts.append(prompt)
+            if len(prompts)==1:return '5'
+            second_prompt.set();raise EOFError()
+        def request(_):
+            self.session.phase='stopping';self.session.shutdown_finished.clear();requested.set()
+        self.session.request=Mock(side_effect=request)
+        thread=host.threading.Thread(target=self.session.console_menu,args=(read,))
+        with redirect_stdout(io.StringIO()) as output:
+            thread.start()
+            try:
+                self.assertTrue(requested.wait(1))
+                self.assertFalse(second_prompt.wait(.03))
+                self.session.progress('failed','Host shutdown failed.')
+            finally:
+                self.session.shutdown_finished.set();thread.join(1)
+        self.assertFalse(thread.is_alive())
+        text=output.getvalue()
+        self.assertEqual(text.count('5  Shut down host'),1)
+        self.assertTrue(second_prompt.is_set())
+
+    def test_browser_open_finishes_before_next_prompt_and_menu_is_not_duplicated(self):
+        started=host.threading.Event();release=host.threading.Event();prompts=[]
+        def read(prompt):
+            prompts.append(prompt)
+            if len(prompts)==1:return '1'
+            self.assertTrue(release.is_set());raise EOFError()
+        def open_console(_):
+            started.set();release.wait(1)
+        self.session.start_console=open_console
+        thread=host.threading.Thread(target=self.session.console_menu,args=(read,))
+        with redirect_stdout(io.StringIO()) as output:
+            thread.start()
+            try:
+                self.assertTrue(started.wait(1));self.assertEqual(len(prompts),1)
+            finally:release.set();thread.join(1)
+        self.assertEqual(len(prompts),2)
+        self.assertEqual(output.getvalue().count('1  Open browser'),1)
+        self.assertIn('DST console is available.',output.getvalue())
 
     def test_container_cannot_reopen_the_host(self):
         with self.assertRaisesRegex(ValueError,'desktop icon'):

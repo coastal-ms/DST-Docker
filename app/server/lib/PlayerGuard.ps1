@@ -62,6 +62,28 @@ function Test-DuneDisruptiveActionGuard {
     } catch {}
     if ($force) { return $true }
 
+    if ($env:DST_HOSTING_BACKEND -eq 'docker') {
+        # A stopped world has no player sessions and needs no database startup.
+        # Use current owned-container observations, never the desired-state badge.
+        try {
+            $snapshot = Invoke-DuneDockerManager -Request @{ action = 'status' }
+            if (-not $snapshot.ok) { throw 'Docker observations are unavailable.' }
+            $games = @($snapshot.data.services | Where-Object { $_.component -like 'game-*' })
+            if ($games.Count -eq 0 -or @($games | Where-Object { $_.state -notin @('created','exited','dead') }).Count -gt 0) {
+                $Ip = 'docker'
+            } else {
+                return $true
+            }
+        } catch {
+            Write-DuneJson -Response $Res -Status 409 -Body @{
+                ok = $false; conflict = 'player_status_unknown'; verificationFailure = 'server_error'
+                playersOnline = $null; playerNames = @(); players = @()
+                message = "DST could not verify whether players are online before $Action. Docker observations are unavailable."
+            }
+            return $false
+        }
+    }
+
     if ([string]::IsNullOrWhiteSpace($Ip)) {
         try {
             $ctx = Get-DuneDbContext

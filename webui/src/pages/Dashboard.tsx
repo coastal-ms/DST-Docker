@@ -146,11 +146,13 @@ export function GameServerList({ servers }: { servers: BgGameServer[] }) {
 //   in a startup phase      → yellow + "Starting"
 //   down / missing / failed → red    + "Not Ready"
 // Before the first status load (loading, no pods yet) the sensor goes flat.
-function survivalHeartbeat(servers: BgGameServer[], loading: boolean): {
+function survivalHeartbeat(servers: BgGameServer[], loading: boolean, state?: string): {
   cls: string
   label: string
   beating: boolean
 } {
+  if (state === 'stopping') return { cls: 'text-warning', label: 'Stopping', beating: false }
+  if (state === 'stopped') return { cls: 'text-text-dim', label: 'Stopped', beating: false }
   const sv = findSurvivalServer(servers)
   if (!sv) {
     if (loading) return { cls: 'text-text-dim', label: 'No signal', beating: false }
@@ -166,8 +168,8 @@ function survivalHeartbeat(servers: BgGameServer[], loading: boolean): {
   return { cls: 'text-danger', label: 'Not Ready', beating: true }
 }
 
-function HeartbeatSensor({ servers, loading }: { servers: BgGameServer[]; loading: boolean }) {
-  const hb = survivalHeartbeat(servers, loading)
+function HeartbeatSensor({ servers, loading, state }: { servers: BgGameServer[]; loading: boolean; state?: string }) {
+  const hb = survivalHeartbeat(servers, loading, state)
   return (
     <div className="mt-auto pt-2 border-t border-border/30">
       <div className="flex items-center gap-2"
@@ -416,7 +418,7 @@ export function Dashboard() {
           ) : (
             <GameServerList servers={gameServers} />
           )}
-          <HeartbeatSensor servers={gameServers} loading={loading} />
+          <HeartbeatSensor servers={gameServers} loading={loading} state={docker ? bgState : undefined} />
         </CollapsibleCard>
       </section>
 

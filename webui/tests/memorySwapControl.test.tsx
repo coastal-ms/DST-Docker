@@ -11,7 +11,7 @@ beforeEach(() => { access.owner = true; vi.mocked(api).mockReset(); vi.spyOn(win
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
 
 describe('Docker Memory Swap', () => {
-  it('uses existing host swap and reviews the automatic policy before sending a typed operation', async () => {
+  it('applies the selected live swap policy directly without another confirmation', async () => {
     vi.mocked(api).mockResolvedValueOnce(status)
       .mockResolvedValueOnce({ operation: { id: 'swap-op' } })
       .mockResolvedValueOnce({ ...status, enabled: true, operation: { id: 'swap-op', phase: 'completed' } })
@@ -21,15 +21,7 @@ describe('Docker Memory Swap', () => {
     await waitFor(() => expect(screen.getByText(/Memory Swap saved and verified/)).toBeInTheDocument())
     const options = vi.mocked(api).mock.calls.find(([path, value]) => path === '/api/docker/memory-swap' && value?.method === 'PUT')?.[1]
     expect(JSON.parse(String(options?.body))).toEqual({ enabled: true, perServerGiB: 2, poolGiB: 0, swappiness: 10, confirmation: 'ENABLE MEMORY SWAP' })
-    expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining('RAM limits stay unchanged'))
-  })
-
-  it('does not start a host operation when the review is cancelled', async () => {
-    vi.mocked(api).mockResolvedValue(status); vi.mocked(window.confirm).mockReturnValue(false)
-    render(<MemorySwapControl />)
-    fireEvent.click(await screen.findByRole('button', { name: 'Memory Swap: Off' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Enable Memory Swap' }))
-    expect(api).toHaveBeenCalledTimes(1)
+    expect(window.confirm).not.toHaveBeenCalled()
   })
 
   it('restores the previous recorded policy after an interrupted change', async () => {
