@@ -8,6 +8,6 @@ Report security problems privately through [GitHub security advisories](https://
 
 ## Release integrity
 
-Download `dst-docker-install.sh` and `SHA256SUMS` from this repository's release page. Check a downloaded installer with `sha256sum --check SHA256SUMS`. The installer includes its source commit and version, available with `bash dst-docker-install.sh --version`.
+The bootstrap resolves the latest release tag to its source commit and downloads that commit’s source from GitHub over HTTPS. It validates archive paths and entry types before running the installer. Releases use GitHub’s automatically generated source archives.
 
 This policy covers DST Docker's browser application, native hosting adapters and installer. Funcom publishes and maintains the underlying Dune Awakening server software separately.

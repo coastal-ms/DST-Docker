@@ -183,7 +183,7 @@ if [[ -n "$task_source" ]]; then
 elif [[ -n "$task_archive" ]]; then
   [[ -f "$task_archive" ]] || fail 'The source archive does not exist.'
   cp -- "$task_archive" "$task_temp/source.tar"
-  task_package_revision=local-archive
+  task_package_revision=${task_package_revision:-local-archive}
 elif declare -F dst_embedded_source >/dev/null; then
   dst_embedded_source > "$task_temp/source.tar"
 else

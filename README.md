@@ -27,17 +27,16 @@ You need an x86_64 Linux environment and a Funcom self-host service token. The i
 Run this in Ubuntu or your Linux terminal:
 
 ```sh
-curl -fsSL https://github.com/coastal-ms/DST-Docker/releases/latest/download/dst-docker-install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/coastal-ms/DST-Docker/main/bootstrap.sh | bash
 ```
 
-To download the installer before running it:
+The bootstrap downloads the latest tagged source release and starts installation. Releases contain GitHub’s source ZIP and tarball; there is no separate installer download.
+
+For this private repository, sign in with GitHub CLI and use:
 
 ```sh
-curl -fL https://github.com/coastal-ms/DST-Docker/releases/latest/download/dst-docker-install.sh -o dst-docker-install.sh
-bash dst-docker-install.sh
+gh api repos/coastal-ms/DST-Docker/contents/bootstrap.sh --jq .content | base64 --decode | bash
 ```
-
-The release page also provides `SHA256SUMS`. To check a downloaded installer, download that file beside it and run `sha256sum --check SHA256SUMS`.
 
 The installer walks you through missing prerequisites on supported Ubuntu/Debian hosts and asks for the Web UI port (press Enter for 8088). It installs Docker Engine inside Linux when needed; Docker Desktop is not required. If the current terminal needs `sudo` to access Docker, setup continues using it. The installer builds and starts the Web UI, prints the complete browser link, then downloads the official Linux server package. You can open the Web UI and create your Owner account while the game files download. Keep the installer terminal open until it finishes. It preserves existing Docker data and does not remove another container runtime to resolve a conflict. Existing installations retain their console port; use `--port PORT` to change it. Scripted installations can use `--non-interactive` or an explicit `--port PORT`.
 

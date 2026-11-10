@@ -1,20 +1,20 @@
 # DST Docker development
 
-DST Docker is a separate product for browser-based Dune Awakening server hosting on Linux and Windows WSL. Its product name, version, repository and release asset names are defined in `packaging/docker/release.json`. The Linux entry point reads this identity directly. Windows Dune Server Tool versions and updates are independent.
+DST Docker is a separate product for browser-based Dune Awakening server hosting on Linux and Windows WSL. Its product name, version, repository and distribution entry point are defined in `packaging/docker/release.json`. The Linux entry point reads this identity directly. Windows Dune Server Tool versions and updates are independent.
 
 ## Local setup
 
-From a committed checkout, run `bash bin/dst-install --source "$PWD"`. The normal user installation downloads the standalone shell installer described in README.md. Game data, credentials and local evidence stay outside the repository.
+From a committed checkout, run `bash bin/dst-install --source "$PWD"`. The normal user installation runs the source bootstrap described in README.md. Game data, credentials and local evidence stay outside the repository.
 
-## Release assets
+## Source releases
 
 Build from an explicit clean source commit:
 
 ```sh
-python3 packaging/docker/build_release.py --revision COMMIT --output /path/to/assets
+python3 packaging/docker/build_release.py --revision COMMIT --output /path/to/release-records
 ```
 
-The output contains `dst-docker-install.sh`, `SHA256SUMS`, release notes, the product/source manifest and a version-pinned install command. The builder reads both source and installer template from the selected Git commit. It does not publish, tag, upload or change repository visibility.
+The output contains release notes, a private product/source record and the bootstrap command. Publish a source tag and release with no uploaded assets; GitHub supplies the source ZIP and tarball. Keep `bootstrap.sh` on the default `main` branch. The helper does not publish, tag, upload or change repository visibility.
 
 The release repository is `coastal-ms/DST-Docker`. The Windows product repository and website are separate; inherited website deployment workflows are restricted to their original repository.
 

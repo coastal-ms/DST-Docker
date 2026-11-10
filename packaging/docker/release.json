@@ -3,6 +3,6 @@
   "version": "1.0.0",
   "repository": "coastal-ms/DST-Docker",
   "tag": "v1.0.0",
-  "installer": "dst-docker-install.sh",
-  "checksums": "SHA256SUMS"
+  "distribution": "source",
+  "bootstrap": "bootstrap.sh"
 }
