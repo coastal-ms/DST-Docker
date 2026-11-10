@@ -1,0 +1,147 @@
+# Regression coverage for the "Battlegroup Info" raw-output pane column drift.
+#
+# Funcom's `battlegroup status` script awk-parses a positional row, so a server
+# TITLE containing spaces or a comma (e.g. "Dune, my Arrakis") shifts the Status
+# cell (and every column after it) — the raw-output pane then shows the second
+# word of the name where the status should be. The Info *panel* is already
+# rebuilt from the Battlegroup CRD JSON (v12.16.1); Repair-DuneBgInfoRawOutput
+# also rewrites the drifted row in the raw text from those canonical values so
+# the debug pane reads correctly, tagging it "(DST-corrected)".
+
+BeforeAll {
+    . (Join-Path $PSScriptRoot '_TestHelpers.ps1')
+    Import-DstLib 'Status.ps1'
+
+    $script:Info = @{ status = 'Healthy'; database = 'Healthy'; gateway = 'Running'; director = 'Ready'; uptime = '3d4h' }
+
+    # Extract the single data row under the "Battlegroup Info" header.
+    function Get-InfoRow {
+        param([string] $Text)
+        $lines = $Text -split "`r?`n"
+        for ($i = 0; $i -lt $lines.Length; $i++) {
+            if ($lines[$i] -match '^\s*Battlegroup Info\s*$') { return $lines[$i + 3] }
+        }
+        return $null
+    }
+}
+
+Describe 'Stopped battlegroup Game Servers table' {
+    It 'keeps stopping ahead of an empty server table' {
+        Get-BgStateFromStatusText "Reconciling Stopping`nNo resources found in world namespace." | Should -Be 'stopping'
+    }
+    It 'uses the requested stop and structured phase independently of server rows' {
+        foreach ($phase in @('Healthy','Reconciling','Stopped')) {
+            $json = @{items=@(@{spec=@{stop=$true};status=@{phase=$phase}})} | ConvertTo-Json -Depth 6
+            $r = ConvertFrom-DuneBgJsonStatus $json
+            $expected = if ($phase -eq 'Stopped') {'stopped'} else {'stopping'}
+            $r.state | Should -Be $expected
+            $r.reason | Should -Not -BeNullOrEmpty
+        }
+    }
+    It 'reports zero servers for the kubectl empty-table notice' {
+        $text = @'
+Battlegroup: sh-example
+Battlegroup Info
+Status     Database   Gateway    Director   Uptime
+---------- ---------- ---------- ---------- --------
+Stopped    Ready      Suspended  Suspended
+
+Game Servers
+Map             Phase                  Ready  Players  Age
+--------------- ---------------------- ------ -------- ------
+No resources found in funcom-seabass-sh-example namespace.
+'@
+        $parsed = ConvertFrom-BgStatusText -Text $text
+        Get-BgStateFromStatusText -Text $text | Should -Be 'stopped'
+        @($parsed.gameServers).Count | Should -Be 0
+    }
+
+    It 'keeps actual draining server rows while ignoring an ANSI-colored empty-table notice' {
+        $notice = "$([char]27)[33mNo resources found in funcom-seabass-sh-example namespace.$([char]27)[0m"
+        @(Get-BgGameServerValues -Line $notice).Count | Should -Be 0
+        $text = "Game Servers`nMap Phase Ready Players Age`n--- ----- ----- ------- ---`nSurvival_1 Reconciling Stopping False 0 2m"
+        $parsed = ConvertFrom-BgStatusText -Text $text
+        @($parsed.gameServers).Count | Should -Be 1
+        $parsed.gameServers[0].map | Should -Be 'Survival_1'
+        $parsed.gameServers[0].phase | Should -Be 'Reconciling Stopping'
+    }
+}
+
+Describe 'Repair-DuneBgInfoRawOutput' {
+    It 'rewrites a drifted row from JSON and marks it corrected' {
+        # Multi-word title "Dune, my Arrakis" -> Funcom puts "my" in the Status cell.
+        $drifted = @"
+Battlegroup: sh-abc123
+Battlegroup Info
+Status     Database   Gateway    Director   Uptime
+---------- ---------- ---------- ---------- --------
+my         Healthy    Running    Ready      3d4h
+Game Servers
+"@
+        $out = Repair-DuneBgInfoRawOutput -Text $drifted -Info $script:Info
+        $row = Get-InfoRow -Text $out
+
+        $row | Should -Match 'DST-corrected'
+        # Each canonical value lands under its own column header.
+        $vals = @(Get-BgRowValues -Line $row -Cols (Get-BgColumnSpans -Header 'Status     Database   Gateway    Director   Uptime' -Dashes '---------- ---------- ---------- ---------- --------'))
+        $vals[0] | Should -Be 'Healthy'
+        $vals[1] | Should -Be 'Healthy'
+        $vals[2] | Should -Be 'Running'
+        $vals[3] | Should -Be 'Ready'
+    }
+
+    It 'leaves an already-correct row verbatim (no marker)' {
+        $clean = @"
+Battlegroup: sh-abc123
+Battlegroup Info
+Status     Database   Gateway    Director   Uptime
+---------- ---------- ---------- ---------- --------
+Healthy    Healthy    Running    Ready      3d4h
+"@
+        $out = Repair-DuneBgInfoRawOutput -Text $clean -Info $script:Info
+        $out | Should -Be ($clean -replace "`r`n", "`n")
+        $out | Should -Not -Match 'DST-corrected'
+    }
+
+    It 'returns text unchanged when JSON info is absent' {
+        $drifted = "Battlegroup Info`nStatus     Database`n---------- ----------`nmy         Healthy"
+        Repair-DuneBgInfoRawOutput -Text $drifted -Info $null | Should -Be $drifted
+    }
+
+    It 'does nothing when there is no Battlegroup Info table' {
+        $text = "Battlegroup: sh-abc123`nNo resources found in namespace"
+        Repair-DuneBgInfoRawOutput -Text $text -Info $script:Info | Should -Be $text
+    }
+}
+
+Describe 'ConvertFrom-DuneBgJsonStatus server title' {
+    It 'returns the title already present in the status SSH payload' {
+        $json = @{
+            items = @(@{
+                metadata = @{ name = 'sh-abc123' }
+                spec = @{ title = 'Dune, my Arrakis' }
+                status = @{ phase = 'Healthy' }
+            })
+        } | ConvertTo-Json -Depth 6
+
+        $result = ConvertFrom-DuneBgJsonStatus -JsonText $json
+
+        $result.name | Should -Be 'sh-abc123'
+        $result.title | Should -Be 'Dune, my Arrakis'
+    }
+
+    It 'falls back to the operator title annotation' {
+        $json = @{
+            items = @(@{
+                metadata = @{
+                    name = 'sh-abc123'
+                    annotations = @{ 'igw.funcom.com/battlegroup-title' = 'Annotated title' }
+                }
+                spec = @{}
+                status = @{ phase = 'Healthy' }
+            })
+        } | ConvertTo-Json -Depth 6
+
+        (ConvertFrom-DuneBgJsonStatus -JsonText $json).title | Should -Be 'Annotated title'
+    }
+}

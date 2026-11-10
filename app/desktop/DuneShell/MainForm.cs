@@ -1,0 +1,1666 @@
+using System.Diagnostics;
+using System.Drawing;
+using System.IO;
+using System.Net.Http;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Windows.Forms;
+using Microsoft.Web.WebView2.Core;
+using Microsoft.Web.WebView2.WinForms;
+
+namespace DuneShell;
+
+internal sealed class MainForm : Form
+{
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    private const int SW_RESTORE = 9;
+
+    private readonly WebView2 _web = new();
+    private readonly HashSet<AtlasMapForm> _atlasPopouts = new();
+    private readonly Label _status = new();
+
+    private readonly string? _initialUrl;
+    private readonly bool _useWaitFile;
+
+    private bool _firstLoadDone;
+    private string? _targetUrl;
+    private int _navRetries;
+    private ShellPreferences? _shellPreferences;
+    private bool _softwareRenderingActive;
+    private bool _restartShellOnly;
+    private bool _recoveringWebView;
+    private const int MaxNavRetries = 20;
+
+    // ----- Minimize-to-tray state --------------------------------------------
+    // When enabled, minimizing the window hides it (and its taskbar button) and
+    // leaves a single NotifyIcon in the system tray that reopens the portal.
+    // With Windows autostart enabled, X also hides to the tray; the tray's
+    // explicit Quit action bypasses that interception and shuts down normally.
+    private NotifyIcon? _tray;
+    private ToolStripMenuItem? _trayMinItem;
+    private bool _minimizeToTray;
+    private bool _trayBalloonShown;
+    private bool _quitFromTray;
+    private bool _closeRequestedByPortal;
+    private FormWindowState _restoreState = FormWindowState.Normal;
+    private Rectangle _restoreBounds;
+    private Rectangle? _widgetRestoreBounds;
+    private Rectangle? _widgetBounds = WidgetWindowPlacement.Load(WidgetStateFile);
+    private FormWindowState _widgetRestoreState;
+    private bool _changingWidgetMode;
+
+    public MainForm(string? initialUrl, bool useWaitFile)
+    {
+        _initialUrl = initialUrl;
+        _useWaitFile = useWaitFile;
+
+        Text = "Dune Server Tool";
+        MinimumSize = new Size(960, 600);
+        // Restore the last window size/position; default to 2000x1100 centered
+        // on first run. The window stays freely resizable and its bounds are
+        // saved on close so they persist across launches.
+        StartPosition = FormStartPosition.Manual;
+        ApplyStartupBounds();
+        BackColor = Color.FromArgb(17, 19, 24);
+        TryLoadIcon();
+        BuildTrayIcon();
+
+        Resize += OnResizeToTray;
+        Move += (_, _) =>
+        {
+            if (WindowState == FormWindowState.Normal && !_changingWidgetMode)
+                _restoreBounds = Bounds;
+        };
+        ResizeEnd += (_, _) => SaveWidgetBounds();
+
+        FormClosing += (_, e) =>
+        {
+            SaveWindowState();
+            if (ShouldHideToTrayOnClose(e.CloseReason))
+            {
+                e.Cancel = true;
+                ResetOneShotCloseIntent();
+                HideToTray();
+                return;
+            }
+            if (!_restartShellOnly && !StopCompanionProcesses(_quitFromTray))
+            {
+                e.Cancel = true;
+                ResetOneShotCloseIntent();
+                return;
+            }
+            DisposeTrayIcon();
+        };
+
+        // The React portal owns its own top menu bar, so the native window has
+        // just the WebView and a transient status label — no MenuStrip.
+        BuildWebView();
+        BuildStatus();
+        FormClosed += (_, _) =>
+        {
+            foreach (var popup in _atlasPopouts.ToArray()) popup.Close();
+        };
+
+        Load += async (_, _) => await InitializeAsync();
+    }
+
+    private void BuildStatus()
+    {
+        _status.Dock = DockStyle.Fill;
+        _status.TextAlign = ContentAlignment.MiddleCenter;
+        _status.ForeColor = Color.Gainsboro;
+        _status.Font = new Font(FontFamily.GenericSansSerif, 11f);
+        _status.Text = "Connecting to Dune Server Tool…";
+        Controls.Add(_status);
+    }
+
+    private void BuildWebView()
+    {
+        _web.Dock = DockStyle.Fill;
+        _web.Visible = false;
+        Controls.Add(_web);
+    }
+
+    private async Task InitializeAsync()
+    {
+        try
+        {
+            _shellPreferences = ShellPreferencesStore.Load();
+            _softwareRenderingActive = _shellPreferences.SoftwareRendering;
+        }
+        catch (Exception ex)
+        {
+            _status.Text =
+                "Shell settings could not be loaded.\r\n\r\n" +
+                ShellPreferencesStore.SettingsPath + "\r\n\r\n" +
+                ex.Message;
+            return;
+        }
+
+        // Warm WebView2 while the backend starts. Both cold paths take several
+        // seconds, and neither depends on the other until navigation.
+        Task<string?> urlTask = ResolveUrlAsync();
+
+        try
+        {
+            string userData = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "DuneServer", "WebView2");
+            Directory.CreateDirectory(userData);
+
+            var options = _softwareRenderingActive
+                ? new CoreWebView2EnvironmentOptions("--disable-gpu")
+                : null;
+            var env = await CoreWebView2Environment.CreateAsync(null, userData, options);
+            await _web.EnsureCoreWebView2Async(env);
+        }
+        catch (Exception ex)
+        {
+            _status.Text = "WebView2 failed to initialize.\r\n" + ex.Message;
+            return;
+        }
+
+        string? url = await urlTask;
+        if (string.IsNullOrWhiteSpace(url))
+        {
+            _status.Text = "Could not find the Dune Server Tool URL.\r\n" +
+                           "Start the server first, then reopen this window.";
+            return;
+        }
+
+        var core = _web.CoreWebView2;
+        core.Settings.AreDefaultContextMenusEnabled = true;
+        core.Settings.IsStatusBarEnabled = false;
+        // v12.0.1: DevTools enabled so users can press F12 and read JS console
+        // errors when a page misbehaves. The console output is also captured to
+        // %APPDATA%\DuneServer\webview2-debug.log by InitDiagnosticLogging below
+        // and bundled into Help -> Create GitHub Issue + Save Logs.
+        core.Settings.AreDevToolsEnabled = true;
+
+        core.NewWindowRequested += OnNewWindowRequested;
+        core.NavigationCompleted += OnNavigationCompleted;
+        core.DownloadStarting += OnDownloadStarting;
+        core.WebMessageReceived += OnWebMessageReceived;
+        core.ProcessFailed += OnProcessFailed;
+        core.DocumentTitleChanged += (_, _) =>
+        {
+            var t = core.DocumentTitle;
+            Text = string.IsNullOrWhiteSpace(t) ? "Dune Server Tool" : $"{t} — Dune Server Tool";
+        };
+
+        await InitDiagnosticLoggingAsync(core);
+
+        _targetUrl = url;
+        _web.Source = new Uri(url);
+    }
+
+    // ----- Diagnostic logging -------------------------------------------------
+    //
+    // v12.0.1: subscribe to WebView2 DevTools Protocol events so unhandled JS
+    // exceptions and console.error/warn calls land in
+    // %APPDATA%\DuneServer\webview2-debug.log. The diagnostics bundle
+    // (Help -> Create GitHub Issue + Save Logs) tails the last 200 KB of that
+    // file, which previously was always missing because nothing ever wrote it.
+    //
+    // We cap the file at WebView2LogMaxBytes and trim from the front on the
+    // next write when we exceed it, so a chatty page can't fill the user's
+    // disk. Writes are best-effort and silently swallow IO errors.
+
+    private const long WebView2LogMaxBytes = 2L * 1024 * 1024;  // 2 MB cap
+    private static readonly object _logLock = new();
+
+    private static string WebView2LogPath => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+        "DuneServer", "webview2-debug.log");
+
+    private async Task InitDiagnosticLoggingAsync(CoreWebView2 core)
+    {
+        try
+        {
+            // Runtime.enable is a prerequisite for consoleAPICalled /
+            // exceptionThrown events to fire on the protocol channel.
+            await core.CallDevToolsProtocolMethodAsync("Runtime.enable", "{}");
+
+            var consoleRecv = core.GetDevToolsProtocolEventReceiver("Runtime.consoleAPICalled");
+            consoleRecv.DevToolsProtocolEventReceived += OnConsoleApiCalled;
+
+            var exceptionRecv = core.GetDevToolsProtocolEventReceiver("Runtime.exceptionThrown");
+            exceptionRecv.DevToolsProtocolEventReceived += OnRuntimeExceptionThrown;
+
+            AppendDiagnosticLine($"[shell] DST v{typeof(MainForm).Assembly.GetName().Version} logging started; WebView2 runtime {core.Environment.BrowserVersionString}");
+        }
+        catch (Exception ex)
+        {
+            // Logging is best-effort. If the DevTools protocol can't be wired
+            // (older WebView2 runtime, etc.) the app still works — we just
+            // won't capture console output.
+            AppendDiagnosticLine($"[shell] failed to wire diagnostic logging: {ex.Message}");
+        }
+    }
+
+    private void OnConsoleApiCalled(object? sender, CoreWebView2DevToolsProtocolEventReceivedEventArgs e)
+    {
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(e.ParameterObjectAsJson);
+            var root = doc.RootElement;
+            string type = root.TryGetProperty("type", out var t) ? (t.GetString() ?? "log") : "log";
+
+            // We only persist console.error / console.warn / console.assert /
+            // console.trace — debug / info / log are extremely noisy on a
+            // live React page and rarely useful for postmortem analysis.
+            bool keep = type is "error" or "warning" or "warn" or "assert" or "trace";
+            if (!keep) return;
+
+            var sb = new StringBuilder();
+            sb.Append("[console.").Append(type).Append("] ");
+            if (root.TryGetProperty("args", out var args) && args.ValueKind == System.Text.Json.JsonValueKind.Array)
+            {
+                bool first = true;
+                foreach (var a in args.EnumerateArray())
+                {
+                    if (!first) sb.Append(' ');
+                    first = false;
+                    if (a.TryGetProperty("value", out var v))
+                        sb.Append(v.ToString());
+                    else if (a.TryGetProperty("description", out var d))
+                        sb.Append(d.GetString());
+                    else
+                        sb.Append(a.ToString());
+                }
+            }
+            if (root.TryGetProperty("stackTrace", out var st) &&
+                st.TryGetProperty("callFrames", out var cf) &&
+                cf.ValueKind == System.Text.Json.JsonValueKind.Array)
+            {
+                foreach (var frame in cf.EnumerateArray())
+                {
+                    string fn  = frame.TryGetProperty("functionName", out var f) ? (f.GetString() ?? "") : "";
+                    string url = frame.TryGetProperty("url",          out var u) ? (u.GetString() ?? "") : "";
+                    int line   = frame.TryGetProperty("lineNumber",   out var l) ? l.GetInt32() : 0;
+                    sb.Append("\r\n    at ").Append(string.IsNullOrEmpty(fn) ? "(anonymous)" : fn)
+                      .Append(" (").Append(url).Append(':').Append(line + 1).Append(')');
+                }
+            }
+            AppendDiagnosticLine(sb.ToString());
+        }
+        catch { /* best-effort */ }
+    }
+
+    private void OnRuntimeExceptionThrown(object? sender, CoreWebView2DevToolsProtocolEventReceivedEventArgs e)
+    {
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(e.ParameterObjectAsJson);
+            var root = doc.RootElement;
+            if (!root.TryGetProperty("exceptionDetails", out var ex)) return;
+
+            var sb = new StringBuilder("[exception] ");
+            if (ex.TryGetProperty("text", out var txt)) sb.Append(txt.GetString());
+            if (ex.TryGetProperty("exception", out var exo) &&
+                exo.TryGetProperty("description", out var exd))
+            {
+                sb.Append(" :: ").Append(exd.GetString());
+            }
+            else if (ex.TryGetProperty("exception", out var exo2) &&
+                     exo2.TryGetProperty("value", out var exv))
+            {
+                sb.Append(" :: ").Append(exv.ToString());
+            }
+            if (ex.TryGetProperty("url",        out var u))  sb.Append("\r\n    url:    ").Append(u.GetString());
+            if (ex.TryGetProperty("lineNumber", out var ln)) sb.Append("\r\n    line:   ").Append(ln.GetInt32() + 1);
+            if (ex.TryGetProperty("stackTrace", out var st) &&
+                st.TryGetProperty("callFrames", out var cf) &&
+                cf.ValueKind == System.Text.Json.JsonValueKind.Array)
+            {
+                foreach (var frame in cf.EnumerateArray())
+                {
+                    string fn  = frame.TryGetProperty("functionName", out var f) ? (f.GetString() ?? "") : "";
+                    string url = frame.TryGetProperty("url",          out var u2) ? (u2.GetString() ?? "") : "";
+                    int line   = frame.TryGetProperty("lineNumber",   out var l) ? l.GetInt32() : 0;
+                    sb.Append("\r\n    at ").Append(string.IsNullOrEmpty(fn) ? "(anonymous)" : fn)
+                      .Append(" (").Append(url).Append(':').Append(line + 1).Append(')');
+                }
+            }
+            AppendDiagnosticLine(sb.ToString());
+        }
+        catch { /* best-effort */ }
+    }
+
+    private void OnProcessFailed(object? sender, CoreWebView2ProcessFailedEventArgs e)
+    {
+        AppendDiagnosticLine(
+            $"[process-failed] kind={e.ProcessFailedKind} reason={e.Reason} exitCode={e.ExitCode} status={e.ProcessDescription}");
+
+        switch (e.ProcessFailedKind)
+        {
+            case CoreWebView2ProcessFailedKind.RenderProcessExited:
+            case CoreWebView2ProcessFailedKind.RenderProcessUnresponsive:
+                ScheduleWebViewRecovery(RecoverRenderProcess);
+                break;
+
+            case CoreWebView2ProcessFailedKind.BrowserProcessExited:
+                ScheduleWebViewRecovery(() =>
+                {
+                    AppendDiagnosticLine("[process-recovery] browser process exited; restarting shell");
+                    RestartShell();
+                });
+                break;
+
+            default:
+                AppendDiagnosticLine(
+                    $"[process-recovery] no automatic recovery for {e.ProcessFailedKind}");
+                break;
+        }
+    }
+
+    private void ScheduleWebViewRecovery(Action recovery)
+    {
+        if (_recoveringWebView || IsDisposed || Disposing)
+        {
+            AppendDiagnosticLine("[process-recovery] ignored duplicate recovery or shell shutdown");
+            return;
+        }
+
+        _recoveringWebView = true;
+        try
+        {
+            BeginInvoke(recovery);
+        }
+        catch (Exception ex)
+        {
+            AppendDiagnosticLine($"[process-recovery] failed to schedule UI recovery: {ex}");
+        }
+    }
+
+    private void RecoverRenderProcess()
+    {
+        if (IsDisposed || Disposing)
+        {
+            AppendDiagnosticLine("[process-recovery] render recovery cancelled during shell shutdown");
+            return;
+        }
+
+        try
+        {
+            CoreWebView2 core = _web.CoreWebView2
+                ?? throw new InvalidOperationException("WebView2 is unavailable for render recovery.");
+
+            _firstLoadDone = false;
+            _navRetries = 0;
+            _status.Text = "Recovering Dune Server Tool…";
+            _status.Visible = true;
+            _web.Visible = false;
+            AppendDiagnosticLine("[process-recovery] reloading WebView after render process failure");
+            core.Reload();
+        }
+        catch (Exception ex)
+        {
+            AppendDiagnosticLine($"[process-recovery] render reload failed; restarting shell: {ex}");
+            RestartShell();
+        }
+    }
+
+    private static void AppendDiagnosticLine(string line)
+    {
+        if (string.IsNullOrEmpty(line)) return;
+        try
+        {
+            string path = WebView2LogPath;
+            string dir = Path.GetDirectoryName(path)!;
+            Directory.CreateDirectory(dir);
+            string stamped = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}  {line}\r\n";
+
+            lock (_logLock)
+            {
+                // Front-trim when over cap so the file behaves like a ring buffer.
+                // Keeps the most recent ~half so old context still survives a
+                // single noisy burst.
+                try
+                {
+                    var fi = new FileInfo(path);
+                    if (fi.Exists && fi.Length > WebView2LogMaxBytes)
+                    {
+                        long keep = WebView2LogMaxBytes / 2;
+                        var bytes = File.ReadAllBytes(path);
+                        if (bytes.Length > keep)
+                        {
+                            int start = (int)(bytes.Length - keep);
+                            // Skip to the next line boundary so we don't leave
+                            // a half line at the top of the file.
+                            for (; start < bytes.Length; start++)
+                                if (bytes[start] == (byte)'\n') { start++; break; }
+                            File.WriteAllBytes(path, new ArraySegment<byte>(bytes, start, bytes.Length - start).ToArray());
+                        }
+                    }
+                }
+                catch { /* best-effort trim */ }
+
+                File.AppendAllText(path, stamped, Encoding.UTF8);
+            }
+        }
+        catch { /* logging must never throw into the caller */ }
+    }
+
+    private async void OnNavigationCompleted(object? sender, CoreWebView2NavigationCompletedEventArgs e)
+    {
+        if (_firstLoadDone) return;
+
+        if (e.IsSuccess)
+        {
+            bool recoveredWebView = _recoveringWebView;
+            _firstLoadDone = true;
+            _navRetries = 0;
+            _status.Visible = false;
+            _web.Visible = true;
+            _recoveringWebView = false;
+            if (recoveredWebView)
+                AppendDiagnosticLine("[process-recovery] WebView reload completed");
+            return;
+        }
+
+        // Navigation failed at the transport level (IsSuccess == false means the
+        // request never got an HTTP response — typically CannotConnect /
+        // ConnectionAborted because the WebView started a moment before the
+        // HttpListener was accepting). A real server error page would still be a
+        // *successful* navigation. So retry a bounded number of times instead of
+        // leaving the user staring at a permanent "can't reach this page".
+        if (_navRetries < MaxNavRetries && !string.IsNullOrWhiteSpace(_targetUrl))
+        {
+            _navRetries++;
+            _status.Visible = true;
+            _web.Visible = false;
+            _status.Text = $"Connecting to Dune Server Tool… (attempt {_navRetries})";
+            await Task.Delay(600);
+            if (IsDisposed || Disposing)
+            {
+                AppendDiagnosticLine("[navigation] retry cancelled during shell shutdown");
+                return;
+            }
+            try
+            {
+                CoreWebView2 core = _web.CoreWebView2
+                    ?? throw new InvalidOperationException("WebView2 is unavailable for navigation retry.");
+                core.Navigate(_targetUrl);
+            }
+            catch (Exception ex)
+            {
+                AppendDiagnosticLine($"[navigation] retry failed: {ex}");
+                if (_recoveringWebView)
+                    RestartShell();
+            }
+            return;
+        }
+
+        if (_recoveringWebView)
+        {
+            AppendDiagnosticLine("[process-recovery] render reload navigation failed; restarting shell");
+            RestartShell();
+            return;
+        }
+
+        // Out of retries: reveal whatever loaded so the user sees the error page
+        // and can F5 / Reload manually.
+        _firstLoadDone = true;
+        _status.Visible = false;
+        _web.Visible = true;
+    }
+
+    private void OnDownloadStarting(object? sender, CoreWebView2DownloadStartingEventArgs e)
+    {
+        CoreWebView2DownloadOperation operation = e.DownloadOperation;
+
+        async void CloseWhenFinished(object? _, object __)
+        {
+            if (operation.State == CoreWebView2DownloadState.InProgress) return;
+            operation.StateChanged -= CloseWhenFinished;
+            if (operation.State == CoreWebView2DownloadState.Completed)
+                await Task.Delay(TimeSpan.FromSeconds(10));
+            try
+            {
+                BeginInvoke(new Action(() =>
+                {
+                    CoreWebView2? core = _web.CoreWebView2;
+                    if (core?.IsDefaultDownloadDialogOpen == true)
+                        core.CloseDefaultDownloadDialog();
+                }));
+            }
+            catch
+            {
+                // The shell may already be closing; the flyout will close with it.
+            }
+        }
+
+        operation.StateChanged += CloseWhenFinished;
+        if (operation.State != CoreWebView2DownloadState.InProgress)
+            CloseWhenFinished(operation, new object());
+    }
+
+    private async void OnNewWindowRequested(object? sender, CoreWebView2NewWindowRequestedEventArgs e)
+    {
+        // window.open / target=_blank routing:
+        //   * Same-origin as the portal's own URL (loopback + same port) -> keep
+        //     in this shell. Covers in-portal "open in new tab" flows like the
+        //     updater's safe-to-close page or any future window.open from React.
+        //   * Anything else, including OTHER loopback ports (e.g. any
+        //     localhost game-tool URL) -> hand to the OS default browser. Just
+        //     checking `IsLoopback` here is too broad and can navigate the
+        //     shell off the portal instead.
+        e.Handled = true;
+        if (!Uri.TryCreate(e.Uri, UriKind.Absolute, out var u)) return;
+
+        if (Uri.TryCreate(_targetUrl, UriKind.Absolute, out var atlasPortal) &&
+            AtlasPopupPolicy.IsAtlasPopup(atlasPortal, u))
+        {
+            var deferral = e.GetDeferral();
+            AtlasMapForm? popup = null;
+            try
+            {
+                popup = new AtlasMapForm(OpenExternal);
+                _atlasPopouts.Add(popup);
+                popup.FormClosed += (_, _) => _atlasPopouts.Remove(popup);
+                popup.Show();
+                await popup.InitializeAsync(_web.CoreWebView2.Environment);
+                e.NewWindow = popup.Core;
+            }
+            catch (Exception ex)
+            {
+                popup?.Close();
+                AppendDiagnosticLine($"[atlas-popout] {ex.GetType().Name}: {ex.Message}");
+            }
+            finally { deferral.Complete(); }
+            return;
+        }
+
+        bool keepInShell = false;
+        if (u.IsLoopback &&
+            Uri.TryCreate(_targetUrl, UriKind.Absolute, out var portal) &&
+            portal.IsLoopback &&
+            u.Port == portal.Port &&
+            string.Equals(u.Scheme, portal.Scheme, StringComparison.OrdinalIgnoreCase))
+        {
+            keepInShell = true;
+        }
+
+        if (keepInShell)
+            _web.CoreWebView2?.Navigate(e.Uri);
+        else
+            OpenExternal(e.Uri.ToString());
+    }
+
+    /// <summary>
+    /// Bridge for the "Web Portal" sidebar button. The React UI posts a JSON
+    /// message {"action":"open-and-close","url":"http://127.0.0.1:..."} after
+    /// calling /api/portal/open-in-browser (which sets the server-side detach
+    /// flag). We open the URL via Process.Start with UseShellExecute=true so
+    /// the OS default browser handles it as a non-elevated process — important
+    /// because Chrome/Edge refuse to run from an elevated parent — and then
+    /// close ourselves. The elevated DuneServer console keeps running.
+    /// </summary>
+    private void OnWebMessageReceived(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
+    {
+        if (!IsTrustedPortalSource(e.Source) ||
+            !TryReadWebMessage(e, out var message))
+            return;
+
+        string? channel = GetStringProperty(message, "channel");
+        string? messageType = GetStringProperty(message, "type");
+        if (string.Equals(channel, "dune-shell", StringComparison.Ordinal) &&
+            !string.IsNullOrWhiteSpace(messageType))
+        {
+            HandleShellMessage(message, messageType);
+            return;
+        }
+
+        string? action = GetStringProperty(message, "action");
+        string? url = GetStringProperty(message, "url");
+
+        if (string.Equals(action, "open-and-close", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!string.IsNullOrWhiteSpace(url)) OpenExternal(url);
+            // Defer the actual close to the next message loop tick so the
+            // WebMessageReceived handler can return cleanly first.
+            BeginInvoke(CloseFromPortal);
+        }
+        else if (string.Equals(action, "open", StringComparison.OrdinalIgnoreCase))
+        {
+            // Issue #280: open the portal in the default browser but KEEP this
+            // window open. The React UI waits for the browser to check in with
+            // the server before asking us to close (a separate "close" message),
+            // so a browser that can't reach 127.0.0.1 leaves the user with a
+            // working app window + Copy URL fallback instead of a dead window.
+            if (!string.IsNullOrWhiteSpace(url)) OpenExternal(url);
+        }
+        else if (string.Equals(action, "close", StringComparison.OrdinalIgnoreCase))
+        {
+            // Browser confirmed it reached the server — safe to close now.
+            BeginInvoke(CloseFromPortal);
+        }
+        else if (string.Equals(action, "pick-save-file", StringComparison.OrdinalIgnoreCase))
+        {
+            // Show a native Save As dialog and return the chosen path to the frontend.
+            string? id = GetStringProperty(message, "id");
+            string? defaultName = GetStringProperty(message, "defaultName");
+            BeginInvoke(new Action(() => ShowSaveDialog(id, defaultName)));
+        }
+        else if (string.Equals(action, "pick-open-file", StringComparison.OrdinalIgnoreCase))
+        {
+            // Show a native Open File dialog and return the chosen path to the frontend.
+            string? id = GetStringProperty(message, "id");
+            string? filter = GetStringProperty(message, "filter");
+            BeginInvoke(new Action(() => ShowOpenDialog(id, filter)));
+        }
+        else if (string.Equals(action, "pick-folder", StringComparison.OrdinalIgnoreCase))
+        {
+            // Show a native Folder Browser dialog and return the chosen path to
+            // the frontend. Used by the "Local Backup Mirror" card on the
+            // Database page.
+            string? id = GetStringProperty(message, "id");
+            string? initialPath = GetStringProperty(message, "initialPath");
+            string? description = GetStringProperty(message, "description");
+            BeginInvoke(new Action(() => ShowFolderDialog(id, initialPath, description)));
+        }
+    }
+
+    private bool IsTrustedPortalSource(string? source)
+    {
+        if (!Uri.TryCreate(source, UriKind.Absolute, out var sourceUri) ||
+            !Uri.TryCreate(_targetUrl, UriKind.Absolute, out var targetUri))
+            return false;
+
+        return string.Equals(sourceUri.Scheme, targetUri.Scheme, StringComparison.OrdinalIgnoreCase) &&
+               string.Equals(sourceUri.IdnHost, targetUri.IdnHost, StringComparison.OrdinalIgnoreCase) &&
+               sourceUri.Port == targetUri.Port;
+    }
+
+    private static string? GetStringProperty(
+        System.Text.Json.JsonElement message,
+        string propertyName)
+    {
+        return message.ValueKind == System.Text.Json.JsonValueKind.Object &&
+               message.TryGetProperty(propertyName, out var property) &&
+               property.ValueKind == System.Text.Json.JsonValueKind.String
+            ? property.GetString()
+            : null;
+    }
+
+    private static bool TryReadWebMessage(
+        CoreWebView2WebMessageReceivedEventArgs e,
+        out System.Text.Json.JsonElement message)
+    {
+        message = default;
+        try
+        {
+            string? json = e.WebMessageAsJson;
+            if (string.IsNullOrWhiteSpace(json))
+            {
+                try { json = e.TryGetWebMessageAsString(); } catch { return false; }
+            }
+            if (string.IsNullOrWhiteSpace(json)) return false;
+
+            using var doc = System.Text.Json.JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            if (root.ValueKind == System.Text.Json.JsonValueKind.String)
+            {
+                string? inner = root.GetString();
+                if (string.IsNullOrWhiteSpace(inner)) return false;
+                using var innerDoc = System.Text.Json.JsonDocument.Parse(inner);
+                if (innerDoc.RootElement.ValueKind != System.Text.Json.JsonValueKind.Object)
+                    return false;
+                message = innerDoc.RootElement.Clone();
+                return true;
+            }
+
+            if (root.ValueKind != System.Text.Json.JsonValueKind.Object) return false;
+            message = root.Clone();
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private void HandleShellMessage(System.Text.Json.JsonElement message, string? messageType)
+    {
+        string? requestId = GetStringProperty(message, "requestId");
+        if (string.IsNullOrWhiteSpace(requestId)) return;
+
+        if (string.Equals(messageType, "preferences.get", StringComparison.Ordinal))
+        {
+            PostPreferencesResult(requestId, true);
+            return;
+        }
+
+        if (string.Equals(messageType, "widget.set", StringComparison.Ordinal))
+        {
+            try
+            {
+                if (!message.TryGetProperty("enabled", out var enabled) ||
+                    enabled.ValueKind is not (System.Text.Json.JsonValueKind.True or System.Text.Json.JsonValueKind.False))
+                    throw new InvalidDataException("Widget mode requires enabled.");
+                if (enabled.GetBoolean() && _widgetRestoreBounds is null)
+                {
+                    _widgetRestoreState = WindowState;
+                    _widgetRestoreBounds = WindowState == FormWindowState.Normal ? Bounds : RestoreBounds;
+                    _changingWidgetMode = true;
+                    try
+                    {
+                        bool soloMap = message.TryGetProperty("layout", out var layout) && layout.GetString() == "solo-map";
+                        MinimumSize = soloMap ? new Size(740, 780) : new Size(360, 240);
+                        WindowState = FormWindowState.Normal;
+                        // Discard legacy placement inherited from the management frame.
+                        Rectangle target = WidgetWindowPlacement.Resolve(_widgetBounds, _widgetRestoreBounds.Value);
+                        if (soloMap) target.Size = new Size(Math.Max(target.Width, 740), Math.Max(target.Height, 780));
+                        target = ClampToVisible(target, soloMap ? new Size(740, 780) : new Size(740, 285));
+                        Bounds = target;
+                        _widgetBounds = target;
+                        _restoreBounds = target;
+                    }
+                    finally { _changingWidgetMode = false; }
+                    Text = "DST — Widget";
+                }
+                else if (!enabled.GetBoolean() && _widgetRestoreBounds is Rectangle original)
+                {
+                    SaveWidgetBounds();
+                    // End Widget ownership before restoring management geometry.
+                    _widgetRestoreBounds = null;
+                    MinimumSize = new Size(960, 600);
+                    Bounds = original;
+                    WindowState = _widgetRestoreState;
+                    _restoreBounds = original;
+                    _restoreState = _widgetRestoreState;
+                    Text = "Dune Server Tool";
+                    SaveWindowState();
+                }
+                PostShellResponse(requestId, "widget.set.result", true);
+            }
+            catch (Exception ex) { PostShellResponse(requestId, "widget.set.result", false, ex.Message); }
+            return;
+        }
+
+        if (string.Equals(messageType, "preferences.set", StringComparison.Ordinal))
+        {
+            try
+            {
+                if (!message.TryGetProperty("changes", out var changes) ||
+                    changes.ValueKind != System.Text.Json.JsonValueKind.Object)
+                    throw new InvalidDataException("The preferences update is missing its changes object.");
+
+                var next = new ShellPreferences
+                {
+                    SoftwareRendering = _shellPreferences?.SoftwareRendering ?? false,
+                };
+                if (changes.TryGetProperty("softwareRendering", out var softwareRendering))
+                {
+                    if (softwareRendering.ValueKind is not
+                        (System.Text.Json.JsonValueKind.True or System.Text.Json.JsonValueKind.False))
+                        throw new InvalidDataException("softwareRendering must be true or false.");
+                    next.SoftwareRendering = softwareRendering.GetBoolean();
+                }
+
+                ShellPreferencesStore.Save(next);
+                _shellPreferences = next;
+                PostPreferencesResult(requestId, true);
+            }
+            catch (Exception ex)
+            {
+                PostPreferencesResult(requestId, false, ex.Message);
+            }
+            return;
+        }
+
+        if (string.Equals(messageType, "folder.open", StringComparison.Ordinal))
+        {
+            try
+            {
+                if (!Uri.TryCreate(_targetUrl, UriKind.Absolute, out var portal) || !portal.IsLoopback)
+                    throw new InvalidOperationException("Local folders can be opened only from the host portal.");
+                string? path = GetStringProperty(message, "path");
+                if (string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path) || path.StartsWith(@"\\"))
+                    throw new InvalidDataException("Choose an existing local folder.");
+                path = Path.GetFullPath(path);
+                if (!Directory.Exists(path)) throw new DirectoryNotFoundException("The folder does not exist.");
+                var start = new ProcessStartInfo
+                {
+                    FileName = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "explorer.exe"),
+                    UseShellExecute = true,
+                };
+                start.ArgumentList.Add(path);
+                Process.Start(start);
+                PostShellResponse(requestId, "folder.open.result", true);
+            }
+            catch (Exception ex)
+            {
+                PostShellResponse(requestId, "folder.open.result", false, ex.Message);
+            }
+            return;
+        }
+
+        if (string.Equals(messageType, "shell.restart", StringComparison.Ordinal))
+        {
+            PostShellResponse(requestId, "shell.restart.result", true);
+            BeginInvoke(new Action(RestartShell));
+        }
+    }
+
+    private void PostPreferencesResult(string requestId, bool ok, string? error = null)
+    {
+        var preferences = _shellPreferences ?? new ShellPreferences();
+        var payload = new System.Text.Json.Nodes.JsonObject
+        {
+            ["channel"] = "dune-shell",
+            ["type"] = "preferences.result",
+            ["requestId"] = requestId,
+            ["ok"] = ok,
+            ["error"] = error,
+            ["preferences"] = new System.Text.Json.Nodes.JsonObject
+            {
+                ["softwareRendering"] = preferences.SoftwareRendering,
+            },
+            ["active"] = new System.Text.Json.Nodes.JsonObject
+            {
+                ["softwareRendering"] = _softwareRenderingActive,
+            },
+            ["restartRequired"] = preferences.SoftwareRendering != _softwareRenderingActive,
+        };
+        _web.CoreWebView2?.PostWebMessageAsJson(payload.ToJsonString());
+    }
+
+    private void PostShellResponse(string requestId, string type, bool ok, string? error = null)
+    {
+        var payload = new System.Text.Json.Nodes.JsonObject
+        {
+            ["channel"] = "dune-shell",
+            ["type"] = type,
+            ["requestId"] = requestId,
+            ["ok"] = ok,
+            ["error"] = error,
+        };
+        _web.CoreWebView2?.PostWebMessageAsJson(payload.ToJsonString());
+    }
+
+    private void RestartShell()
+    {
+        try
+        {
+            string executable = Environment.ProcessPath
+                ?? throw new InvalidOperationException("Could not locate the shell executable.");
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = executable,
+                UseShellExecute = true,
+            };
+            startInfo.ArgumentList.Add("--restart-after-pid");
+            startInfo.ArgumentList.Add(Environment.ProcessId.ToString());
+            _ = Process.Start(startInfo)
+                ?? throw new InvalidOperationException("Windows did not start the replacement shell.");
+
+            _restartShellOnly = true;
+            Close();
+        }
+        catch (Exception ex)
+        {
+            AppendDiagnosticLine($"[shell-restart] failed: {ex}");
+            MessageBox.Show(
+                "The Dune Server Tool window could not restart.\r\n\r\n" +
+                ex.Message + "\r\n\r\nClose and reopen Dune Server Tool to apply it.",
+                "Shell restart failed",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+        }
+    }
+
+    // ----- Native file dialog bridge ------------------------------------------
+    // The frontend posts "pick-save-file" / "pick-open-file" with an id and
+    // optional filter/defaultName. We show the native WinForms dialog and post
+    // the result back so the React app can call the backend with a local path.
+
+    private void ShowSaveDialog(string? id, string? defaultName)
+    {
+        using var dlg = new SaveFileDialog();
+        dlg.Title = "Save backup as…";
+        dlg.Filter = "Database backups (*.backup)|*.backup|All files (*.*)|*.*";
+        if (!string.IsNullOrWhiteSpace(defaultName)) dlg.FileName = defaultName;
+        string? chosen = dlg.ShowDialog(this) == DialogResult.OK ? dlg.FileName : null;
+        PostFilePickResult(id, chosen);
+    }
+
+    private void ShowOpenDialog(string? id, string? filter)
+    {
+        using var dlg = new OpenFileDialog();
+        dlg.Title = "Select backup to upload";
+        dlg.Filter = filter ?? "Database backups (*.backup)|*.backup|All files (*.*)|*.*";
+        string? chosen = dlg.ShowDialog(this) == DialogResult.OK ? dlg.FileName : null;
+        PostFilePickResult(id, chosen);
+    }
+
+    private void ShowFolderDialog(string? id, string? initialPath, string? description)
+    {
+        using var dlg = new FolderBrowserDialog();
+        dlg.Description = string.IsNullOrWhiteSpace(description)
+            ? "Select a folder for local backup copies"
+            : description;
+        dlg.UseDescriptionForTitle = true;
+        dlg.ShowNewFolderButton = true;
+        if (!string.IsNullOrWhiteSpace(initialPath) && Directory.Exists(initialPath))
+        {
+            dlg.SelectedPath = initialPath;
+        }
+        string? chosen = dlg.ShowDialog(this) == DialogResult.OK ? dlg.SelectedPath : null;
+        PostFilePickResult(id, chosen);
+    }
+
+    private void PostFilePickResult(string? id, string? path)
+    {
+        if (_web.CoreWebView2 == null) return;
+        var payload = new System.Text.Json.Nodes.JsonObject
+        {
+            ["action"] = "file-picked",
+            ["id"] = id,
+            ["path"] = path  // null when cancelled
+        };
+        _web.CoreWebView2.PostWebMessageAsJson(payload.ToJsonString());
+    }
+
+    private static void OpenExternal(string url)
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo { FileName = url, UseShellExecute = true });
+        }
+        catch
+        {
+            // best-effort; ignore launch failures
+        }
+    }
+
+    // Every real launch of this exe passes NO arguments — DuneServer.ps1 always
+    // starts us as `DuneShell.exe` with no --url, relying on last-url.txt polling
+    // (see Start-DuneHttpServer's Start-Process call). That means the "normal"
+    // path (DuneServer.exe just spawned us, moments ahead of its listener
+    // binding) and a taskbar-pinned/Start Menu launch of DuneShell.exe directly
+    // (Windows pins the running window's own exe, not the DuneServer.exe
+    // shortcut that originally launched it) look IDENTICAL from our launch
+    // arguments: _initialUrl is null and _useWaitFile is true in both cases.
+    //
+    // We tell them apart at runtime instead of via arguments:
+    //   * Normal path: a DuneServer.exe process is already alive (it's the one
+    //     that spawned us); we just wait for it to finish binding.
+    //   * Standalone/pinned path: DST was closed cleanly last time, which stops
+    //     the backend but leaves the STALE last-url.txt on disk (only the next
+    //     DuneServer.exe *startup* deletes it, right before writing a fresh
+    //     one). No DuneServer.exe process exists. Trusting the file's mere
+    //     existence here is the ERR_FAILED bug: we'd load a dead URL from a
+    //     backend that was never started.
+    //
+    // The fix: never trust last-url.txt without probing it for an actual HTTP
+    // response first (mirrors DuneServer.ps1's own Test-DuneExistingServerHealthy
+    // zombie-listener probe), and — only when no DuneServer.exe was running to
+    // begin with — start the sibling DuneServer.exe ourselves so a pinned
+    // DuneShell "just works" the same way the Start Menu/Desktop shortcut does.
+    private const int MaxWaitFilePollAttempts = 40;     // 40 * 500ms = 20s
+    private const int MaxBackendStartPollAttempts = 90; // 90 * 500ms = 45s (UAC prompt + startup)
+
+    private static readonly HttpClient _probeHttp = new() { Timeout = TimeSpan.FromMilliseconds(800) };
+
+    private async Task<string?> ResolveUrlAsync()
+    {
+        if (!string.IsNullOrWhiteSpace(_initialUrl))
+            return _initialUrl;
+
+        if (!_useWaitFile)
+            return null;
+
+        string file = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "DuneServer", "last-url.txt");
+
+        bool backendWasRunning = Process.GetProcessesByName("DuneServer").Length > 0;
+        string? candidate;
+
+        if (backendWasRunning)
+        {
+            candidate = await PollForReachableUrlAsync(file, MaxWaitFilePollAttempts);
+            if (candidate != null) return candidate;
+
+            // A DuneServer.exe is already alive but never came up within the
+            // wait window (hung listener, very slow host, etc). Don't pile a
+            // second backend on top of it — hand back whatever is on disk
+            // (possibly stale/absent) and let the existing NavigationCompleted
+            // retry loop / error page take over instead of looping forever.
+            return await TryReadUrlFileAsync(file);
+        }
+
+        // A stale last-url file cannot be reachable without a backend process.
+        // Start immediately instead of spending 20 seconds probing it first.
+        candidate = await TryStartBackendAsync(file);
+        return candidate ?? await TryReadUrlFileAsync(file);
+    }
+
+    private static async Task<string?> TryReadUrlFileAsync(string file)
+    {
+        try
+        {
+            if (!File.Exists(file)) return null;
+            string text = (await File.ReadAllTextAsync(file)).Trim();
+            return string.IsNullOrWhiteSpace(text) ? null : text;
+        }
+        catch
+        {
+            // file may be mid-write; caller retries on the next poll.
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Any HTTP-level response — including an error status — proves the
+    /// listener is actually accepting connections, mirroring the backend's own
+    /// Test-DuneExistingServerHealthy zombie-listener probe. A connection
+    /// failure/timeout means nothing is listening at that URL yet.
+    /// </summary>
+    private static async Task<bool> IsUrlReachableAsync(string url)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var u)) return false;
+        try
+        {
+            using var resp = await _probeHttp.GetAsync(new Uri(u, "/"), HttpCompletionOption.ResponseHeadersRead);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static async Task<string?> PollForReachableUrlAsync(string file, int attempts)
+    {
+        for (int i = 0; i < attempts; i++)
+        {
+            string? candidate = await TryReadUrlFileAsync(file);
+            if (candidate != null && await IsUrlReachableAsync(candidate))
+                return candidate;
+            await Task.Delay(500);
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Starts the sibling DuneServer.exe (the installed layout ships it beside
+    /// DuneShell.exe) so a taskbar-pinned launch can bring the backend up on
+    /// its own instead of showing a dead portal page. DuneServer.exe owns all
+    /// the single-instance / self-elevation / zombie-listener logic already
+    /// (see DuneServer.ps1) — we just launch it once, non-elevated, and poll
+    /// for the fresh, reachable URL it writes. We never attempt to elevate or
+    /// manage it ourselves, and this is only ever called once per ResolveUrlAsync
+    /// (itself called once per window), so a slow/failed start can't loop.
+    ///
+    /// Passes --reattach so DuneServer.ps1 knows a DuneShell window (us) is
+    /// already up and polling for the URL it's about to write: without that
+    /// flag its startup unconditionally kills every running DuneShell process
+    /// before opening a fresh one (to clean up stale windows left over by an
+    /// in-app update), which would tear down the very window that asked it to
+    /// start. --reattach tells it to adopt us for its lifecycle watcher instead
+    /// of killing/replacing us.
+    /// </summary>
+    private async Task<string?> TryStartBackendAsync(string file)
+    {
+        string serverExe = Path.Combine(AppContext.BaseDirectory, "DuneServer.exe");
+        if (!File.Exists(serverExe))
+        {
+            _status.Text = "Could not find DuneServer.exe next to this app.\r\n" +
+                           "Reinstall Dune Server Tool, or start it from its Start Menu shortcut.";
+            return null;
+        }
+
+        _status.Text = "Loading backend after recent update or service restoration… Estimated 10–15 seconds.";
+        try
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = serverExe,
+                Arguments = "--reattach",
+                UseShellExecute = true,
+                WorkingDirectory = AppContext.BaseDirectory
+            });
+        }
+        catch (Exception ex)
+        {
+            _status.Text = "Failed to start the Dune Server Tool backend.\r\n" + ex.Message;
+            return null;
+        }
+
+        // DuneServer.exe self-elevates via a UAC prompt (see DuneServer.ps1) and
+        // only writes last-url.txt once its listener is bound, so give this a
+        // generously longer window than the initial wait above.
+        for (int i = 0; i < MaxBackendStartPollAttempts; i++)
+        {
+            _status.Text = "Loading backend after recent update or service restoration… Estimated 10–15 seconds.";
+            string? candidate = await TryReadUrlFileAsync(file);
+            if (candidate != null && await IsUrlReachableAsync(candidate))
+                return candidate;
+            await Task.Delay(500);
+        }
+
+        _status.Text = "The Dune Server Tool backend did not start in time.\r\n" +
+                       "Reopen this window to try again, or launch it from the Start Menu shortcut.";
+        return null;
+    }
+
+    private void TryLoadIcon()
+    {
+        try
+        {
+            string ico = Path.Combine(AppContext.BaseDirectory, "app.ico");
+            if (File.Exists(ico))
+                Icon = new Icon(ico);
+        }
+        catch
+        {
+            // optional; ignore
+        }
+    }
+
+    // ----- Minimize to tray ---------------------------------------------------
+    //
+    // A single NotifyIcon, visible for the lifetime of the window, lets the user
+    // tuck DST out of the way without stopping the backend. Left-click or
+    // double-click reopens; the right-click menu exposes a persisted
+    // "Minimize to tray" toggle and an explicit "Quit (stops server)".
+
+    private void BuildTrayIcon()
+    {
+        try
+        {
+            var menu = new ContextMenuStrip();
+
+            var open = new ToolStripMenuItem("Open Dune Server Tool", null, (_, _) => RestoreFromTray());
+            open.Font = new Font(open.Font, FontStyle.Bold);
+
+            _trayMinItem = new ToolStripMenuItem("Minimize to tray", null, (_, _) => ToggleMinimizeToTray())
+            {
+                CheckOnClick = true,
+                Checked = _minimizeToTray,
+            };
+
+            var quit = new ToolStripMenuItem("Quit (stops server)", null, (_, _) =>
+            {
+                _quitFromTray = true;
+                Close();
+            });
+
+            menu.Items.Add(open);
+            menu.Items.Add(_trayMinItem);
+            menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add(quit);
+
+            _tray = new NotifyIcon
+            {
+                Text = "Dune Server Tool",
+                Visible = true,
+                ContextMenuStrip = menu,
+                Icon = Icon ?? SystemIcons.Application,
+            };
+            _tray.MouseClick += (_, e) =>
+            {
+                if (e.Button == MouseButtons.Left) RestoreFromTray();
+            };
+            _tray.DoubleClick += (_, _) => RestoreFromTray();
+        }
+        catch
+        {
+            // tray is a convenience; never block startup on it
+        }
+    }
+
+    private void OnResizeToTray(object? sender, EventArgs e)
+    {
+        if (WindowState == FormWindowState.Minimized)
+        {
+            if (_minimizeToTray) HideToTray();
+        }
+        else
+        {
+            // Remember whether to restore to Normal or Maximized later.
+            _restoreState = WindowState;
+            // Capture the visible normal frame before Windows minimizes it.
+            // RestoreBounds can still contain Widget geometry after leaving it.
+            if (WindowState == FormWindowState.Normal && !_changingWidgetMode)
+                _restoreBounds = Bounds;
+        }
+    }
+
+    private void HideToTray()
+    {
+        if (WindowState == FormWindowState.Normal) _restoreBounds = Bounds;
+        ShowInTaskbar = false;
+        Hide();
+
+        if (_tray != null && !_trayBalloonShown)
+        {
+            _trayBalloonShown = true;
+            try
+            {
+                _tray.BalloonTipTitle = "Dune Server Tool";
+                _tray.BalloonTipText =
+                    "Still running in the tray. Click the icon to reopen, or right-click \u2192 Quit to stop the server.";
+                _tray.ShowBalloonTip(4000);
+            }
+            catch
+            {
+                // balloon is optional
+            }
+        }
+    }
+
+    private void RestoreFromTray()
+    {
+        FormWindowState targetState = _restoreState == FormWindowState.Minimized
+            ? FormWindowState.Normal
+            : _restoreState;
+        Rectangle targetBounds = ClampToVisible(_restoreBounds, new Size(2000, 1300));
+
+        // Hidden WinForms windows may retain sentinel coordinates such as
+        // -25600,-25600, so restore real bounds before making the form visible.
+        WindowState = FormWindowState.Normal;
+        Bounds = targetBounds;
+        ShowInTaskbar = true;
+        Show();
+        _ = ShowWindow(Handle, SW_RESTORE);
+        WindowState = FormWindowState.Normal;
+        Bounds = targetBounds;
+        if (targetState == FormWindowState.Maximized)
+            WindowState = FormWindowState.Maximized;
+        BringToFront();
+        Activate();
+        _ = SetForegroundWindow(Handle);
+    }
+
+    private void ToggleMinimizeToTray()
+    {
+        // CheckOnClick has already flipped the menu item before this fires.
+        _minimizeToTray = _trayMinItem?.Checked ?? false;
+        SaveWindowState();
+    }
+
+    private bool ShouldHideToTrayOnClose(CloseReason closeReason)
+    {
+        return closeReason == CloseReason.UserClosing
+            && !_restartShellOnly
+            && !_quitFromTray
+            && !_closeRequestedByPortal
+            && _minimizeToTray
+            && IsShellCloseToTrayActive();
+    }
+
+    private void CloseFromPortal()
+    {
+        _closeRequestedByPortal = true;
+        try
+        {
+            Close();
+        }
+        catch
+        {
+            _closeRequestedByPortal = false;
+        }
+    }
+
+    private void ResetOneShotCloseIntent()
+    {
+        _quitFromTray = false;
+        _closeRequestedByPortal = false;
+    }
+
+    private static bool IsBackendKeepAliveActive()
+    {
+        try
+        {
+            string keepAliveFlag = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "DuneServer", "keep-alive.flag");
+            return File.Exists(keepAliveFlag);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool IsShellCloseToTrayActive()
+    {
+        try
+        {
+            string closeToTrayFlag = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "DuneServer", "shell-close-to-tray.flag");
+            return File.Exists(closeToTrayFlag);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private void DisposeTrayIcon()
+    {
+        try
+        {
+            if (_tray != null)
+            {
+                _tray.Visible = false;
+                _tray.Dispose();
+                _tray = null;
+            }
+        }
+        catch
+        {
+            // best-effort
+        }
+    }
+
+    // ----- Window size/position persistence ----------------------------------
+
+    private sealed class WinState
+    {
+        public int X { get; set; }
+        public int Y { get; set; }
+        public int W { get; set; }
+        public int H { get; set; }
+        public bool Max { get; set; }
+        // Nullable so pre-12.10.1 state files (no field) default to disabled.
+        public bool? MinTray { get; set; }
+    }
+
+    private static string WindowStateFile => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "DuneServer", "shell-window.json");
+
+    private void ApplyStartupBounds()
+    {
+        var def = new Size(2000, 1300);
+        var saved = LoadWindowState();
+
+        _minimizeToTray = saved?.MinTray ?? false;
+
+        Rectangle bounds;
+        if (saved != null && saved.W >= MinimumSize.Width && saved.H >= MinimumSize.Height)
+        {
+            bounds = ClampToVisible(new Rectangle(saved.X, saved.Y, saved.W, saved.H), def);
+        }
+        else
+        {
+            bounds = CenteredDefault(def);
+        }
+
+        Bounds = bounds;
+        _restoreBounds = bounds;
+        if (saved?.Max == true)
+        {
+            WindowState = FormWindowState.Maximized;
+            _restoreState = FormWindowState.Maximized;
+        }
+    }
+
+    /// <summary>
+    /// Guarantee the restored window lands on a currently-connected monitor with
+    /// its title bar reachable. Picks the screen the saved rect overlaps most (or
+    /// the primary if it overlaps none — e.g. a monitor was unplugged), shrinks the
+    /// window to fit that screen's working area, then nudges it fully inside so no
+    /// part — especially the title bar — sits off-screen.
+    /// </summary>
+    private static Rectangle ClampToVisible(Rectangle bounds, Size def)
+    {
+        Screen target = BestScreenFor(bounds);
+        Rectangle wa = target.WorkingArea;
+
+        int w = Math.Min(bounds.Width, wa.Width);
+        int h = Math.Min(bounds.Height, wa.Height);
+        if (w < 1 || h < 1) return CenteredDefault(def);
+
+        int x = Math.Min(Math.Max(bounds.X, wa.X), wa.Right - w);
+        int y = Math.Min(Math.Max(bounds.Y, wa.Y), wa.Bottom - h);
+        return new Rectangle(x, y, w, h);
+    }
+
+    private static Screen BestScreenFor(Rectangle bounds)
+    {
+        Screen best = Screen.PrimaryScreen ?? Screen.AllScreens[0];
+        long bestArea = -1;
+        foreach (var s in Screen.AllScreens)
+        {
+            var inter = Rectangle.Intersect(s.WorkingArea, bounds);
+            long area = (long)inter.Width * inter.Height;
+            if (area > bestArea)
+            {
+                bestArea = area;
+                best = s;
+            }
+        }
+        return best;
+    }
+
+    private static Rectangle CenteredDefault(Size desired)
+    {
+        var wa = Screen.PrimaryScreen?.WorkingArea ?? new Rectangle(0, 0, 1600, 1000);
+        int w = Math.Min(desired.Width, wa.Width);
+        int h = Math.Min(desired.Height, wa.Height);
+        int x = wa.X + (wa.Width - w) / 2;
+        int y = wa.Y + (wa.Height - h) / 2;
+        return new Rectangle(x, y, w, h);
+    }
+
+    private WinState? LoadWindowState()
+    {
+        try
+        {
+            if (!File.Exists(WindowStateFile))
+                return null;
+            string json = File.ReadAllText(WindowStateFile);
+            return System.Text.Json.JsonSerializer.Deserialize<WinState>(json);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static string WidgetStateFile => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "DuneServer", "shell-widget.json");
+
+    private void SaveWidgetBounds()
+    {
+        if (_widgetRestoreBounds is null || _changingWidgetMode || !Visible || WindowState != FormWindowState.Normal) return;
+        Rectangle bounds = Bounds;
+        if (bounds.Width < 360 || bounds.Height < 240) return;
+        _widgetBounds = ClampToVisible(bounds, new Size(740, 245));
+        WidgetWindowPlacement.Save(WidgetStateFile, _widgetBounds.Value);
+    }
+
+    private void SaveWindowState()
+    {
+        SaveWidgetBounds();
+        try
+        {
+            // Persist the *normal* bounds even when maximized/minimized so the
+            // restored size is sensible, plus a flag to reopen maximized.
+            Rectangle b = _widgetRestoreBounds ?? (Visible
+                ? (WindowState == FormWindowState.Normal ? Bounds : RestoreBounds)
+                : _restoreBounds);
+            b = ClampToVisible(b, new Size(2000, 1300));
+            var st = new WinState
+            {
+                X = b.X,
+                Y = b.Y,
+                W = b.Width,
+                H = b.Height,
+                Max = (_widgetRestoreBounds is null ? WindowState : _widgetRestoreState) == FormWindowState.Maximized,
+                MinTray = _minimizeToTray
+            };
+            string dir = Path.GetDirectoryName(WindowStateFile)!;
+            Directory.CreateDirectory(dir);
+            File.WriteAllText(WindowStateFile,
+                System.Text.Json.JsonSerializer.Serialize(st));
+        }
+        catch
+        {
+            // best-effort; ignore
+        }
+    }
+
+    private static bool IsWorldRestartActive()
+    {
+        try
+        {
+            string stateFile = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                "DuneServer", "world-restart-state.json");
+            if (!File.Exists(stateFile)) return false;
+
+            using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(stateFile));
+            var root = doc.RootElement;
+            bool running = root.TryGetProperty("running", out var runningElement) &&
+                           runningElement.ValueKind == System.Text.Json.JsonValueKind.True;
+            bool recoveryRequired = root.TryGetProperty("recoveryRequired", out var recoveryElement) &&
+                                    recoveryElement.ValueKind == System.Text.Json.JsonValueKind.True;
+            return running || recoveryRequired;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static void ShowWorldRestartActiveWarning()
+    {
+        MessageBox.Show(
+            "DST cannot close while World Restart maintenance or recovery is active. " +
+            "Wait for completion or use the rollback control.",
+            "World Restart active",
+            MessageBoxButtons.OK,
+            MessageBoxIcon.Warning);
+    }
+
+    /// <summary>
+    /// When the portal window closes, also stop the helper process the user
+    /// thinks of as "DST": the elevated PowerShell backend (DuneServer.exe).
+    /// Closing the visible window used to leave it running silently in the
+    /// background, which surprised users.
+    ///
+    /// Order matters:
+    ///   1. Ask the backend to shut down gracefully via POST /api/shutdown.
+    ///      That endpoint flushes the response, stops the HttpListener, and
+    ///      lets the script exit cleanly, releasing its mutex and the
+    ///      battlegroup VM is left in a known state.
+    ///   2. Sweep any remaining DuneServer.exe processes in case the HTTP
+    ///      shutdown didn't take (backend hung, port already moved, etc.).
+    ///
+    /// Skipped when the shell was launched standalone (`--no-wait-file`):
+    /// in that mode the shell wasn't started by the backend launcher and we
+    /// must not assume there's a paired DuneServer process to stop.
+    /// </summary>
+    private bool StopCompanionProcesses(bool ignoreKeepAlive = false)
+    {
+        if (!_useWaitFile) return true;
+
+        // Keep-alive opt-out: when the backend wrote keep-alive.flag, the
+        // user has registered DST autostart (or launched --headless), and
+        // closing the viewer must NOT take the backend down with it. They
+        // re-attach to the live backend by
+        // clicking the shortcut again, and stop it explicitly via the
+        // tray's "Quit (stop server)" or the console window. The flag is
+        // refreshed live by the backend on startup AND on every autostart
+        // toggle, so this reflects current intent rather than launch-time
+        // state.
+        if (!ignoreKeepAlive && IsBackendKeepAliveActive()) return true;
+
+        if (IsWorldRestartActive())
+        {
+            ShowWorldRestartActiveWarning();
+            return false;
+        }
+
+        // 1) Graceful backend shutdown via the same loopback URL + token the
+        //    WebView is using. Send synchronously with a tight timeout so we
+        //    don't drag out window close past ~750ms in the worst case.
+        bool shutdownSucceeded = false;
+        bool shutdownBlocked = false;
+        try
+        {
+            string? url = _targetUrl;
+            if (string.IsNullOrWhiteSpace(url))
+            {
+                try
+                {
+                    string file = Path.Combine(
+                        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                        "DuneServer", "last-url.txt");
+                    if (File.Exists(file)) url = File.ReadAllText(file).Trim();
+                }
+                catch { /* fall through to direct kill */ }
+            }
+
+            if (!string.IsNullOrWhiteSpace(url) &&
+                Uri.TryCreate(url, UriKind.Absolute, out var u))
+            {
+                using var http = new HttpClient { Timeout = TimeSpan.FromMilliseconds(750) };
+                var shutdownUri = new Uri(u, "/api/shutdown" + u.Query);
+                var content = new StringContent("{}", Encoding.UTF8, "application/json");
+                try
+                {
+                    using var response = http.PostAsync(shutdownUri, content).GetAwaiter().GetResult();
+                    shutdownSucceeded = response.IsSuccessStatusCode;
+                    shutdownBlocked = (int)response.StatusCode == 423;
+                }
+                catch { /* expected when listener tears down before responding */ }
+            }
+        }
+        catch { /* best-effort */ }
+
+        if (shutdownBlocked || (!shutdownSucceeded && IsWorldRestartActive()))
+        {
+            ShowWorldRestartActiveWarning();
+            return false;
+        }
+
+        // 2) Sweep up any remaining DuneServer.exe. If /api/shutdown succeeded
+        //    above the process is already gone (or has HasExited=true) and
+        //    this is a no-op; if the listener was hung or the token expired,
+        //    this is the safety net that guarantees the user's intent ("close
+        //    the window, stop the service") actually happens. The name
+        //    "DuneServer" is unique to DST so killing by name is safe.
+        //
+        //    This MUST run synchronously inside FormClosing — scheduling it
+        //    on a background Task would not work because our own process
+        //    exits within milliseconds of this method returning, killing the
+        //    scheduled task before its delay elapses. We skip the current
+        //    process defensively in case a future build ever renames our own
+        //    exe to something that overlaps.
+        try
+        {
+            int me = Environment.ProcessId;
+            foreach (var p in Process.GetProcessesByName("DuneServer"))
+            {
+                try
+                {
+                    if (p.Id == me) continue;
+                    // The Solo launch watcher and game can be descendants of
+                    // the backend. Leave them running so play continues and
+                    // the watcher restores launch files after the game exits.
+                    if (!p.HasExited) p.Kill(entireProcessTree: false);
+                }
+                catch { /* best-effort */ }
+            }
+        }
+        catch { /* defensive */ }
+        return true;
+    }
+}

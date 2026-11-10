@@ -1,0 +1,201 @@
+import { reportNetworkError, reportResponse } from './connection'
+
+const API_BASE = ''  // same-origin
+const TOKEN_KEY = 'dune.token'
+
+function getToken(): string {
+  // 1. Explicit handoff from the app/portal via ?t= on the launch URL. Highest
+  //    priority because it's the freshest signal and only present right after a
+  //    navigation; we stash it and strip it from the address bar.
+  const url = new URL(window.location.href)
+  const fromUrl = url.searchParams.get('t')
+  if (fromUrl) {
+    sessionStorage.setItem(TOKEN_KEY, fromUrl)
+    url.searchParams.delete('t')
+    window.history.replaceState({}, '', url.toString())
+    return fromUrl
+  }
+  // 2. The backend injects the CURRENT per-launch token into index.html as
+  //    window.__duneRemoteToken on every page load (HttpServer.ps1). Since the
+  //    token rotates on every server restart, this injected value is
+  //    authoritative — trust it over a possibly-stale sessionStorage copy so a
+  //    plain reload recovers an orphaned browser tab after a restart/update.
+  const injected = (typeof window !== 'undefined' && window.__duneRemoteToken) || ''
+  if (injected) {
+    if (sessionStorage.getItem(TOKEN_KEY) !== injected) {
+      sessionStorage.setItem(TOKEN_KEY, injected)
+    }
+    return injected
+  }
+  // 3. Fall back to whatever we last stored.
+  return sessionStorage.getItem(TOKEN_KEY) ?? ''
+}
+
+// Whether the full (desktop) portal has any usable auth token. Used to detect a
+// remote viewer who reached the full portal "/" over a tunnel with NO token
+// (e.g. a friend who opened the Cloudflare hostname root): every API call would
+// 401 and the dashboard would render an alarming "Invalid or missing token"
+// shell. main.tsx uses this to redirect such viewers to the proper /remote/
+// portal instead. The SSH co-admin pattern carries a ?t= token, so it is
+// unaffected.
+export function hasUsableToken(): boolean {
+  try {
+    if (typeof window === 'undefined') return true
+    const url = new URL(window.location.href)
+    if (url.searchParams.get('t')) return true
+    if ((window as unknown as { __duneRemoteToken?: string }).__duneRemoteToken) return true
+    if (sessionStorage.getItem(TOKEN_KEY)) return true
+  } catch { /* fall through */ }
+  return false
+}
+
+/** Same-origin navigations cannot attach the API header; account cookies also work. */
+export function authenticatedApiNavigation(path: string): string {
+  if (!path.startsWith('/api/') || path.includes('?') || path.includes('#')) throw new Error('Invalid API navigation')
+  const token = getToken()
+  return token ? `${path}?t=${encodeURIComponent(token)}` : path
+}
+
+export class ApiError extends Error {
+  status: number
+  body?: unknown
+  constructor(status: number, message: string, body?: unknown) {
+    super(message)
+    this.status = status
+    this.body = body
+  }
+}
+
+export class PlayerGuardCancelledError extends ApiError {}
+
+export async function api<T = unknown>(
+  path: string,
+  init: RequestInit = {},
+): Promise<T> {
+  const token = getToken()
+  const headers = new Headers(init.headers)
+  headers.set('Accept', 'application/json')
+  if (init.body && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json')
+  }
+  if (token) headers.set('X-Dune-Token', token)
+
+  let res: Response
+  try {
+    res = await fetch(`${API_BASE}${path}`, { ...init, headers, credentials: 'same-origin' })
+  } catch (e) {
+    if (e instanceof DOMException && e.name === 'AbortError') throw e
+    // Network-level failure (server restarting / listener down). Flag it so the
+    // reconnect overlay can take over and recover, then surface the error.
+    reportNetworkError()
+    throw e
+  }
+  // Got an HTTP response — the listener is up. A 401 with a token we sent means
+  // the per-launch token rotated (server restarted): connection.ts turns that
+  // into a recovery too.
+  reportResponse(res.status, !!token)
+  const text = await res.text()
+  let body: unknown = undefined
+  if (text) {
+    try { body = JSON.parse(text) } catch { body = text }
+  }
+  if (!res.ok) {
+    const msg = (typeof body === 'object' && body && 'error' in body)
+      ? String((body as { error: unknown }).error)
+      : `${res.status} ${res.statusText}`
+    throw new ApiError(res.status, msg, body)
+  }
+  return body as T
+}
+
+export function wsUrl(path: string): string {
+  const usingAccountSession = (window as unknown as { __dunePortalAccountSession?: boolean }).__dunePortalAccountSession
+  const token = usingAccountSession ? '' : getToken()
+  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  const host = window.location.host
+  if (!token) return `${proto}//${host}${path}`
+  const sep = path.includes('?') ? '&' : '?'
+  return `${proto}//${host}${path}${sep}t=${encodeURIComponent(token)}`
+}
+
+/**
+ * Server response shape when a mutating endpoint needs confirmation because
+ * players are online or their status could not be verified.
+ */
+export interface PlayersOnlineConflict {
+  ok: false
+  conflict: 'players_online' | 'player_status_unknown'
+  verificationFailure?: 'context_unavailable' | 'no_response' | 'timeout' | 'server_error' | 'invalid_response'
+  playersOnline: number | null
+  playerNames: string[]
+  players: Array<{ id: string; name: string; status: string }>
+  message: string
+}
+
+type OnlinePlayerConfirmationHandler = (
+  conflict: Partial<PlayersOnlineConflict>,
+) => Promise<boolean>
+
+let onlinePlayerConfirmationHandler: OnlinePlayerConfirmationHandler | null = null
+
+export function registerOnlinePlayerConfirmationHandler(
+  handler: OnlinePlayerConfirmationHandler,
+): () => void {
+  const previous = onlinePlayerConfirmationHandler
+  onlinePlayerConfirmationHandler = handler
+  return () => {
+    if (onlinePlayerConfirmationHandler === handler) {
+      onlinePlayerConfirmationHandler = previous
+    }
+  }
+}
+
+async function requestOnlinePlayerConfirmation(
+  conflict: Partial<PlayersOnlineConflict>,
+): Promise<boolean> {
+  if (!onlinePlayerConfirmationHandler) {
+    throw new ApiError(
+      409,
+      'Player safety confirmation is unavailable. The action was not started.',
+      conflict,
+    )
+  }
+  return onlinePlayerConfirmationHandler(conflict)
+}
+
+/**
+ * Wraps a mutation that accepts an optional `force` flag. The first attempt
+ * runs without `force`; if the server returns 409 with the players-online
+ * conflict body, the registered DST confirmation UI is shown, and on explicit
+ * confirmation the call is retried with `force=true`.
+ */
+export async function withOnlinePlayerGuard<T>(
+  fn: (force: boolean) => Promise<T>,
+): Promise<T> {
+  try {
+    return await fn(false)
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 409) {
+      const body = e.body as Partial<PlayersOnlineConflict> | undefined
+      if (body && body.conflict === 'players_online') {
+        const ok = await requestOnlinePlayerConfirmation(body)
+        if (!ok) {
+          throw new PlayerGuardCancelledError(409, 'Action cancelled because players are online.', body)
+        }
+        return await fn(true)
+      }
+      if (body && body.conflict === 'player_status_unknown') {
+        const ok = await requestOnlinePlayerConfirmation(body)
+        if (!ok) {
+          throw new PlayerGuardCancelledError(
+            409,
+            'Action cancelled because player status is unknown.',
+            body,
+          )
+        }
+        return await fn(true)
+      }
+    }
+    throw e
+  }
+}

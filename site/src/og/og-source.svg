@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630">
+  <defs>
+    <radialGradient id="glow" cx="50%" cy="0%" r="70%">
+      <stop offset="0%" stop-color="#d97706" stop-opacity="0.22"/>
+      <stop offset="60%" stop-color="#d97706" stop-opacity="0.04"/>
+      <stop offset="100%" stop-color="#0a0908" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="dunes" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#d97706" stop-opacity="0.55"/>
+      <stop offset="100%" stop-color="#d97706" stop-opacity="0.15"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1200" height="630" fill="#0a0908"/>
+  <rect width="1200" height="630" fill="url(#glow)"/>
+
+  <g opacity="0.85">
+    <path d="M0,510 Q200,440 400,470 T800,455 T1200,475 L1200,630 L0,630 Z" fill="url(#dunes)"/>
+    <path d="M0,560 Q250,510 500,540 T1000,525 T1200,545 L1200,630 L0,630 Z" fill="#d97706" fill-opacity="0.18"/>
+  </g>
+
+  <circle cx="1000" cy="180" r="94" fill="#d97706" opacity="0.85"/>
+  <circle cx="1000" cy="180" r="110" fill="none" stroke="#f59e0b" stroke-opacity="0.35"/>
+  <circle cx="1000" cy="180" r="146" fill="none" stroke="#f59e0b" stroke-opacity="0.18" stroke-dasharray="3 12"/>
+  <path d="M805 180h390M1000 12v336" fill="none" stroke="#f59e0b" stroke-opacity="0.2"/>
+  <path d="M815 382l54-10 36-24-25 28 54 13-63-4-48 21 28-24Z" fill="#b6ab9c"/>
+
+  <text x="80" y="125" font-family="Arial, Helvetica, sans-serif"
+        font-size="24" font-weight="500" fill="#d97706" letter-spacing="5">
+    DUNE SERVER TOOL
+  </text>
+
+  <text x="80" y="285" font-family="Arial, Helvetica, sans-serif"
+        font-size="82" font-weight="700" fill="#e8e2d4" letter-spacing="-2">
+    Your world.
+  </text>
+  <text x="80" y="380" font-family="Arial, Helvetica, sans-serif"
+        font-size="82" font-weight="700" fill="#e8e2d4" letter-spacing="-2">
+    Under your
+  </text>
+  <text x="80" y="475" font-family="Arial, Helvetica, sans-serif"
+        font-size="82" font-weight="700" fill="#d97706" letter-spacing="-2">
+    command.
+  </text>
+
+  <text x="80" y="585" font-family="ui-monospace, 'JetBrains Mono', Consolas, monospace"
+        font-size="20" fill="#d1c3ae">
+    Dune: Awakening administration · Self-Hosted + Solo · Open source
+  </text>
+</svg>

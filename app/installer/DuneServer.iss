@@ -1,0 +1,914 @@
+; ============================================================
+;  Dune Server - Inno Setup installer script
+;  Output: app/installer/output/DuneServerSetup.exe
+; ============================================================
+;
+;  Admin requirements (preserved at every layer):
+;    1. Setup itself requires admin (PrivilegesRequired=admin)
+;       -> needed to write to Program Files
+;    2. DuneServer.exe has UAC manifest embedded (-requireAdmin via ps2exe)
+;       -> launching from Start Menu auto-elevates with UAC prompt
+;    3. dune-server.ps1 has '#Requires -RunAsAdministrator' at line 1
+;       -> child pwsh processes inherit elevation from the parent .exe
+;
+;  Installs to:   {autopf}\Dune Server\         (= Program Files\Dune Server\)
+;  User data:     %APPDATA%\DuneServer\         (config, logs, boot-times.json)
+;                 -> NOT touched by install or uninstall (preserves user config)
+
+#define MyAppName        "Dune Server Tool"
+#define MyAppVersion "16.7.3"
+#ifndef MyAppNumericVersion
+#define MyAppCoreVersion Copy(MyAppVersion, 1, Pos("-", MyAppVersion + "-") - 1)
+#define MyAppNumericVersion MyAppCoreVersion + (Len(MyAppCoreVersion) - Len(StringChange(MyAppCoreVersion, ".", "")) == 2 ? ".0" : "")
+#endif
+#define MyAppPublisher   "Dune Awakening Self-Hosted Tool"
+#define MyAppURL         "https://github.com/coastal-ms/DST-DuneServerTool"
+#define MyAppExeName     "DuneServer.exe"
+#define MyAppId          "{{B3F8A2C1-7E5D-4F9A-8B2C-1D6E3A4F5C7D}"
+
+[Setup]
+AppId={#MyAppId}
+AppName={#MyAppName}
+AppVersion={#MyAppVersion}
+AppVerName={#MyAppName} {#MyAppVersion}
+AppPublisher={#MyAppPublisher}
+AppPublisherURL={#MyAppURL}
+AppSupportURL={#MyAppURL}/issues
+AppUpdatesURL={#MyAppURL}/releases
+VersionInfoVersion={#MyAppNumericVersion}
+DefaultDirName={autopf}\Dune Server Tool
+DefaultGroupName=Dune Server Tool
+DisableProgramGroupPage=no
+DisableDirPage=no
+DisableReadyPage=no
+LicenseFile=
+OutputDir=output
+OutputBaseFilename=DuneServerSetup
+SetupIconFile=..\assets\icon.ico
+UninstallDisplayIcon={app}\{#MyAppExeName}
+UninstallDisplayName={#MyAppName} {#MyAppVersion}
+Compression=lzma2/normal
+SolidCompression=yes
+WizardStyle=modern
+
+; --- Admin requirements (LAYER 1: setup itself) ---
+PrivilegesRequired=admin
+PrivilegesRequiredOverridesAllowed=
+
+; OS targeting (Inno Setup 6 itself already requires Win10 1809+)
+MinVersion=10.0
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
+
+[Languages]
+Name: "english"; MessagesFile: "compiler:Default.isl"
+
+[Tasks]
+Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional shortcuts:"
+
+[Files]
+Source: "..\..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\..\NOTICE"; DestDir: "{app}"; Flags: ignoreversion
+
+; The compiled launcher (with embedded UAC manifest). Starts the local
+; HTTP server, opens the default browser to the React SPA.
+Source: "..\build\output\DuneServer.exe"; DestDir: "{app}"; Flags: ignoreversion
+
+; v10.0.5: Standalone app window (WebView2). Self-contained single-file build;
+; DuneServer.exe launches this instead of a browser tab when OpenInAppWindow is
+; enabled (the default). Lives beside DuneServer.exe so the launcher finds it.
+Source: "..\desktop\DuneShell\bin\Release\net10.0-windows\win-x64\publish\DuneShell.exe"; DestDir: "{app}"; Flags: ignoreversion
+
+; Host-local Solo Mode helper: validates Funcom's wrapped SQLite save format,
+; creates retained backups, and performs verified atomic restores.
+Source: "..\tools\DuneSoloDb\bin\Release\net10.0-windows\win-x64\publish\DuneSoloDb.exe"; DestDir: "{app}\tools\solo"; Flags: ignoreversion
+Source: "..\tools\DuneRegisTanks\bin\Release\net10.0-windows\win-x64\publish\DuneRegisTanks.exe"; DestDir: "{app}\tools\tanks"; Flags: ignoreversion
+Source: "..\resources\regis-tanks\*"; DestDir: "{app}\resources\regis-tanks"; Flags: ignoreversion recursesubdirs
+
+; Bounded one-shot platform derived-cache helper. It owns typed SQLite operations
+; and exits after every startup hydration, generation replace, or health task.
+Source: "..\tools\DunePlatformStore\bin\Release\net10.0-windows\win-x64\publish\DunePlatformStore.exe"; DestDir: "{app}\tools\platform"; Flags: ignoreversion
+
+; The business logic script (called via dune-server.ps1 -Cmd for the
+; "spawn elevated console window" pattern used by the Commands page).
+Source: "..\..\dune-server.ps1"; DestDir: "{app}"; Flags: ignoreversion
+
+; Standalone icon for shortcuts that point at the .ps1 etc.
+Source: "..\assets\icon.ico"; DestDir: "{app}\assets"; Flags: ignoreversion
+Source: "..\assets\solo-mods.ico"; DestDir: "{app}\assets"; Flags: ignoreversion
+
+; v6.1 web portal: HTTP server + WebSocket router + route handlers
+; (dot-sourced by app\DuneServer.ps1 at startup)
+Source: "..\server\*"; DestDir: "{app}\server"; Flags: ignoreversion recursesubdirs
+
+; Backend lib modules (Db-Postgres, Ini-Edit, K8s, Config, Status, etc.)
+; Reused unchanged from v6.0.x.
+Source: "..\lib\*.ps1"; DestDir: "{app}\lib"; Flags: ignoreversion
+
+; Bundled data catalogs (item-catalog, stat-reference, etc.)
+Source: "..\data\*"; DestDir: "{app}\data"; Flags: ignoreversion recursesubdirs
+
+; Read-only Atlas source host; session data stays in the user's local app data.
+Source: "..\tools\DuneAtlas\*"; DestDir: "{app}\tools\DuneAtlas"; Excludes: "__pycache__\*,*.pyc"; Flags: ignoreversion recursesubdirs
+Source: "..\tools\VmMapHelper\*"; DestDir: "{app}\tools\VmMapHelper"; Excludes: "__pycache__\*,*.pyc,test_*.py"; Flags: ignoreversion recursesubdirs
+
+; v6.1 React SPA: Vite-built static assets (HTML, hashed JS/CSS, fonts)
+; Generated by `npm run build` in <repo>/webui/ before the installer runs.
+Source: "..\..\webui\dist\*"; DestDir: "{app}\webui\dist"; Flags: ignoreversion recursesubdirs
+
+; v11.0.1: Versioned copy of the remote partition-clear script.
+; v11.0.3: Script is now staged inline to /tmp on the VM, run once with
+; sudo, then removed — no /etc/local.d install, no /etc/periodic/15min cron.
+; v12.18.12: Staging uses base64-over-ssh (see Maps.ps1 / VmFileTransfer.ps1),
+; not scp — Alpine minimal has no sftp-server and modern OpenSSH scp needs it.
+; (Existing VMs that had the boot script + cron installed by v11.0.1/v11.0.2
+; keep working harmlessly until rebuilt.)
+Source: "..\resources\remote-scripts\*"; DestDir: "{app}\resources\remote-scripts"; Flags: ignoreversion recursesubdirs
+Source: "..\resources\solo-mod-runtime\*"; DestDir: "{app}\resources\solo-mod-runtime"; Flags: ignoreversion
+Source: "..\resources\solo-mods\*"; DestDir: "{app}\resources\solo-mods"; Excludes: "__pycache__\*,*.pyc,dst-live-map-context.txt,dst-native-build.txt"; Flags: ignoreversion recursesubdirs
+; Discovered by Solo Mods as disabled on first install; existing selection is preserved.
+Source: "..\resources\solo-mods\dst-solo-live-map\*"; DestDir: "{app}\Mods\dst-solo-live-map"; Excludes: "__pycache__\*,*.pyc,dst-live-map-context.txt,dst-native-build.txt"; Flags: ignoreversion recursesubdirs
+Source: "..\resources\steam-deck\DST-Deck-Companion.sh"; DestDir: "{app}\resources\steam-deck"; Flags: ignoreversion
+Source: "..\resources\steam-deck\PairingBridge.ps1"; DestDir: "{app}\resources\steam-deck"; Flags: ignoreversion
+
+; v6.1.24: Drop-in preflight checker users can run when something goes wrong.
+; DunePreflight.bat is the entry point (right-click -> Run as administrator),
+; DunePreflight.ps1 is the WinForms results window, README.md explains usage.
+Source: "..\..\tools\preflight\*"; DestDir: "{app}\tools\preflight"; Flags: ignoreversion recursesubdirs
+
+; Mobile/remote app bridge daemon (loopback reverse-proxy)
+Source: "..\..\helper\bridge\*"; DestDir: "{app}\helper\bridge"; Flags: ignoreversion recursesubdirs
+
+[InstallDelete]
+; v15.0.0-phase2-test5: Modern upgrades update in place so scheduled tasks
+; survive. Clear only installer-managed directory trees before copying to
+; prevent removed scripts and hashed web assets from lingering.
+Type: filesandordirs; Name: "{app}\server"
+Type: filesandordirs; Name: "{app}\lib"
+Type: filesandordirs; Name: "{app}\data"
+Type: filesandordirs; Name: "{app}\webui\dist"
+Type: filesandordirs; Name: "{app}\resources\remote-scripts"
+Type: filesandordirs; Name: "{app}\tools\preflight"
+Type: filesandordirs; Name: "{app}\tools\solo"
+Type: filesandordirs; Name: "{app}\tools\platform"
+Type: filesandordirs; Name: "{app}\helper\bridge"
+Type: filesandordirs; Name: "{app}\assets"
+
+[Icons]
+; Start Menu shortcut (always created)
+Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\{#MyAppExeName}"; Comment: "Dune Awakening server management"; Flags: runminimized
+Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
+
+; v6.1.24: Preflight checker shortcut so users can run diagnostics without
+; hunting for the file in C:\Program Files\Dune Server\tools\preflight\.
+Name: "{group}\Dune Preflight (run as admin)"; Filename: "{app}\tools\preflight\DunePreflight.bat"; IconFilename: "{app}\{#MyAppExeName}"; Comment: "Diagnose why the Dune Server Tool won't start"
+
+; Desktop shortcut (only if user ticked the box on the Tasks page)
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\{#MyAppExeName}"; Tasks: desktopicon; Flags: runminimized
+
+[Run]
+; v6.1.24: Strip Mark-of-the-Web from every shipped file BEFORE we try to
+; launch the app. Files unpacked from a downloaded installer inherit the
+; downloaded-from-internet Zone.Identifier, which RemoteSigned (the most
+; common ExecutionPolicy on dev machines) treats as "remote" and refuses
+; to dot-source — the exact failure that caused v6.1.22's "window opens
+; and closes" symptom on machines with CurrentUser=RemoteSigned +
+; LocalMachine=Restricted. Use PowerShell rather than Inno's Pascal API
+; because Unblock-File handles every file kind correctly and is one line.
+;
+; v11.4.4: Skip the recursive Unblock-File pass on silent installs (the
+; in-app updater path). The previously-installed DST is by definition
+; trusted (it's already running elevated and just told us to update),
+; and the new files inherit the trust zone of the downloaded setup.exe
+; only if the user manually downloaded it -- which is the non-silent
+; path that DOES still run this. Saves ~1-2s on every in-app update,
+; on top of the 4s previously lost to hardcoded sleeps in the updater
+; relauncher (also cut in this release).
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -Command ""Get-ChildItem -LiteralPath '{app}' -Recurse -File | Unblock-File"""; Flags: runhidden waituntilterminated; Check: not WizardSilent
+
+; v12.0.0: One-time migration. Clear any per-user "Run at Windows startup"
+; scheduled tasks left behind by earlier builds. Earlier console-host
+; autostart entries could relaunch DuneServer/DuneShell after reboot with
+; stale arguments and confuse the keep-alive lifecycle. The task is per-user
+; (DuneServer-Autostart-<sid>); iterate and remove every match under
+; \Dune Server\ regardless of owner. Users can re-enable autostart from
+; Help -> Run at Windows startup after the v12.0.0 install. Scoped to
+; upgrades from pre-12.0.0 only (see ShouldClearLegacyAutostart in [Code])
+; so a normal v12.0.x -> v12.0.y in-app update never touches the user's
+; autostart preference. Idempotent; never blocks install on failure.
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -Command ""try {{ Get-ScheduledTask -TaskPath '\Dune Server\' -ErrorAction SilentlyContinue | Where-Object {{ $_.TaskName -like 'DuneServer-Autostart-*' }} | Unregister-ScheduledTask -Confirm:$false -ErrorAction SilentlyContinue }} catch {{}}"""; Flags: runhidden waituntilterminated; Check: ShouldClearLegacyAutostart
+
+; A v12-v14 upgrade runs its old uninstaller, which removes these user-managed
+; tasks. Re-import the exact definitions captured immediately before that step.
+Filename: "powershell.exe"; Parameters: "{code:GetLegacyAutostartRestoreParameters|}"; Flags: runhidden waituntilterminated; Check: ShouldRestoreLegacyAutostart
+
+; Install or replace the mobile/remote bridge only when its shipped payload
+; changed. An unchanged bridge process and scheduled task survive modern
+; in-place upgrades.
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\helper\bridge\Install-Bridge.ps1"""; Flags: runhidden waituntilterminated; Check: ShouldInstallBridge
+
+; The backend executable is replaced on every upgrade, so an existing service
+; task must start its fresh process every time even though its registration and
+; stored credentials remain untouched.
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -Command ""Get-ScheduledTask -TaskPath '\Dune Server\' -ErrorAction SilentlyContinue | Where-Object {{ $_.TaskName -like 'DuneServer-Service-*' }} | Start-ScheduledTask -ErrorAction SilentlyContinue"""; Flags: runhidden waituntilterminated
+
+; Launch the shell immediately after install. It starts DuneServer.exe with
+; --reattach when needed, so the user sees startup progress while the backend
+; bootstraps instead of waiting on a blank desktop. Two entries cover both
+; interactive AND silent (auto-update) installs:
+;   * Interactive: postinstall shows the "Launch Dune Server" checkbox on
+;     the Finished page (skipifsilent hides it during silent install).
+;   * Silent: a plain [Run] entry that fires only in silent mode (Check:
+;     WizardSilent). Without this, /VERYSILENT updates would leave the app
+;     uninstalled-but-not-restarted and the portal would go dark forever.
+Filename: "{app}\DuneShell.exe"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall skipifsilent runascurrentuser
+Filename: "{app}\DuneShell.exe"; Flags: nowait runascurrentuser; Check: WizardSilent
+
+[UninstallDelete]
+; Belt-and-suspenders: clear any junk inside install dir that isn't tracked
+Type: filesandordirs; Name: "{app}"
+
+[UninstallRun]
+; v11.4.0: Remove the per-user "Run at Windows startup" scheduled task(s)
+; left behind by the Help → Run at Windows startup toggle. The task name is
+; per-user (DuneServer-Autostart-<sid>) so multi-user machines may have one
+; per user; iterate and remove them all. RunHidden, never block uninstall on
+; failure (the task may already be gone, the folder may not exist, etc.).
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -Command ""try {{ Get-ScheduledTask -TaskPath '\Dune Server\' -ErrorAction SilentlyContinue | Where-Object {{ $_.TaskName -like 'DuneServer-Autostart-*' }} | Unregister-ScheduledTask -Confirm:$false -ErrorAction SilentlyContinue }} catch {{}}"""; Flags: runhidden; RunOnceId: "RemoveDuneAutostartTasks"
+
+; Remove mobile/remote app bridge
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\helper\bridge\Uninstall-Bridge.ps1"""; Flags: runhidden; RunOnceId: "RemoveMobileBridge"
+
+[Code]
+// ============================================================
+//  First-run configuration wizard
+//
+//  Offers Solo-only or Self-Hosted + Solo. Server pages collect everything
+//  the app needs (server folder, SSH key, Windows username,
+//  port-check mode) using native Browse buttons. On install,
+//  writes the values to %APPDATA%\DuneServer\dune-server.config
+//  so the app launches fully configured.
+//
+//  Behaviour:
+//    - If %APPDATA%\DuneServer\dune-server.config already exists,
+//      the current mode is selected. Server pages are skipped unless adding
+//      Self-Hosted management to Solo; silent upgrades preserve the mode.
+//    - If a legacy config is found on the Desktop or in Documents,
+//      the user is asked once whether to import it. If yes, pages are pre-filled
+//      from the legacy values; if no, sensible auto-detected defaults
+//      are used.
+// ============================================================
+
+var
+  InstallationModePage: TInputOptionWizardPage;
+  ServerDirPage:   TInputDirWizardPage;
+  SshKeyPage:      TInputFileWizardPage;
+  UserPage:        TInputQueryWizardPage;
+  PortModePage:    TInputOptionWizardPage;
+  SkipConfigPages: Boolean;
+  PriorBridgeHash: string;
+  PriorBridgeInstallerHash: string;
+  LegacyAutostartBackupDir: string;
+  LegacyAutostartBackupPresent: Boolean;
+
+// ---------- v12.0.0 one-time migration helpers ----------
+
+// Read the DisplayVersion that the previously-installed DST registered with
+// Windows Uninstall. Returns '' when there is no prior install (fresh setup).
+function GetPriorInstalledVersion(): string;
+var
+  ver: string;
+begin
+  Result := '';
+  if RegQueryStringValue(HKEY_LOCAL_MACHINE,
+       'Software\Microsoft\Windows\CurrentVersion\Uninstall\{B3F8A2C1-7E5D-4F9A-8B2C-1D6E3A4F5C7D}_is1',
+       'DisplayVersion', ver) then
+    Result := ver
+  else if RegQueryStringValue(HKEY_LOCAL_MACHINE,
+            'Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\{B3F8A2C1-7E5D-4F9A-8B2C-1D6E3A4F5C7D}_is1',
+            'DisplayVersion', ver) then
+    Result := ver;
+end;
+
+// Extract the leading integer (major version) from a string like '11.5.8'.
+function VersionMajor(ver: string): Integer;
+var
+  dotPos: Integer;
+  head: string;
+begin
+  Result := -1;
+  if ver = '' then Exit;
+  dotPos := Pos('.', ver);
+  if dotPos > 0 then head := Copy(ver, 1, dotPos - 1) else head := ver;
+  Result := StrToIntDef(head, -1);
+end;
+
+// v15+ uses a stable install layout and stable scheduled-task actions. Update
+// installer-managed files in place so upgrades restart the backend without
+// unregistering and recreating those tasks.
+function ShouldUseInPlaceUpgrade(): Boolean;
+begin
+  Result := VersionMajor(GetPriorInstalledVersion()) >= 15;
+end;
+
+// True when upgrading from a build older than 12.0.0 (and so we should run
+// the one-time scheduled-task cleanup). False on fresh installs and on every
+// future v12.x -> v12.y upgrade, so user-toggled autostart survives those.
+function ShouldClearLegacyAutostart(): Boolean;
+var
+  major: Integer;
+begin
+  major := VersionMajor(GetPriorInstalledVersion());
+  Result := (major >= 0) and (major < 12);
+end;
+
+// v12-v14 upgrades still invoke the old uninstaller, which removes user-managed
+// autostart tasks. Export their exact task definitions before that handoff and
+// restore them after the v15 payload is copied. v15+ upgrades stay in place.
+function ShouldPreserveLegacyAutostart(): Boolean;
+var
+  major: Integer;
+begin
+  major := VersionMajor(GetPriorInstalledVersion());
+  Result := (major >= 12) and (major < 15);
+end;
+
+function EscapePowerShellSingleQuoted(Value: string): string;
+begin
+  Result := Value;
+  StringChangeEx(Result, '''', '''''', True);
+end;
+
+function CaptureLegacyAutostartTasks(): Boolean;
+var
+  command, escapedBackupDir: string;
+  resultCode: Integer;
+  findData: TFindRec;
+begin
+  Result := True;
+  LegacyAutostartBackupPresent := False;
+  if not ShouldPreserveLegacyAutostart() then Exit;
+
+  LegacyAutostartBackupDir := AddBackslash(ExpandConstant('{tmp}')) +
+    'DuneServer-autostart-migration';
+  escapedBackupDir := EscapePowerShellSingleQuoted(LegacyAutostartBackupDir);
+  command :=
+    '$ErrorActionPreference = ''Stop''; $backup = ''' + escapedBackupDir + '''; ' +
+    'New-Item -ItemType Directory -Path $backup -Force | Out-Null; ' +
+    'Get-ScheduledTask -ErrorAction Stop | ' +
+    'Where-Object { $_.TaskPath -eq ''\Dune Server\'' -and ' +
+    '$_.TaskName -like ''DuneServer-Autostart-*'' } | ' +
+    'ForEach-Object { Export-ScheduledTask -TaskPath $_.TaskPath -TaskName $_.TaskName | ' +
+    'Set-Content -LiteralPath (Join-Path $backup ($_.TaskName + ''.xml'')) ' +
+    '-NoNewline -Encoding UTF8 }';
+  if not Exec('powershell.exe',
+      '-NoProfile -ExecutionPolicy Bypass -Command "' + command + '"',
+      '', SW_HIDE, ewWaitUntilTerminated, resultCode) then
+  begin
+    Log('Could not start legacy autostart-task capture; blocking upgrade to preserve user tasks.');
+    Result := False;
+    Exit;
+  end;
+  if resultCode <> 0 then
+  begin
+    Log(Format('Legacy autostart-task capture exited with code %d; blocking upgrade to preserve user tasks.', [resultCode]));
+    Result := False;
+    Exit;
+  end;
+  if FindFirst(AddBackslash(LegacyAutostartBackupDir) + 'DuneServer-Autostart-*.xml',
+      findData) then
+  begin
+    LegacyAutostartBackupPresent := True;
+    FindClose(findData);
+    Log('Captured legacy autostart task definitions for v15 restoration.');
+  end;
+end;
+
+function ShouldRestoreLegacyAutostart(): Boolean;
+begin
+  Result := LegacyAutostartBackupPresent;
+end;
+
+function GetLegacyAutostartRestoreParameters(Param: string): string;
+var
+  escapedBackupDir: string;
+begin
+  escapedBackupDir := EscapePowerShellSingleQuoted(LegacyAutostartBackupDir);
+  Result := '-NoProfile -ExecutionPolicy Bypass -Command "$backup = ''' +
+    escapedBackupDir + '''; Get-ChildItem -LiteralPath $backup -Filter ' +
+    '''DuneServer-Autostart-*.xml'' -File | ForEach-Object { ' +
+    'Register-ScheduledTask -TaskPath ''\Dune Server\'' -TaskName $_.BaseName ' +
+    '-Xml (Get-Content -LiteralPath $_.FullName -Raw) -Force -ErrorAction Stop }"';
+end;
+
+// ---------- helpers ----------
+
+function FindLegacyConfig(): string;
+var
+  candidates: TArrayOfString;
+  i: Integer;
+begin
+  Result := '';
+  SetArrayLength(candidates, 5);
+  candidates[0] := ExpandConstant('{userdesktop}\GH Dune Server Tool\dune-server.config');
+  candidates[1] := ExpandConstant('{userdesktop}\Simple-Dune-Server-Management-Tool\dune-server.config');
+  candidates[2] := ExpandConstant('{userdesktop}\dune-server.config');
+  candidates[3] := ExpandConstant('{%USERPROFILE}\Documents\dune-server.config');
+  candidates[4] := ExpandConstant('{%USERPROFILE}\Downloads\Simple-Dune-Server-Management-Tool-main\dune-server.config');
+
+  for i := 0 to GetArrayLength(candidates) - 1 do
+    if FileExists(candidates[i]) then begin Result := candidates[i]; Exit; end;
+end;
+
+// Read one key=value out of a legacy config file (empty string if missing)
+function ReadCfgKey(path, key: string): string;
+var
+  lines: TArrayOfString;
+  i, eq: Integer;
+  k, v, line: string;
+begin
+  Result := '';
+  if not FileExists(path) then Exit;
+  if not LoadStringsFromFile(path, lines) then Exit;
+  for i := 0 to GetArrayLength(lines) - 1 do
+  begin
+    line := Trim(lines[i]);
+    if (line = '') or (Copy(line, 1, 1) = '#') then Continue;
+    eq := Pos('=', line);
+    if eq = 0 then Continue;
+    k := Trim(Copy(line, 1, eq - 1));
+    v := Trim(Copy(line, eq + 1, Length(line)));
+    // Match DST's reader: the last occurrence wins when preserving an older file.
+    if CompareText(k, key) = 0 then Result := v;
+  end;
+end;
+
+// Find the first existing path from a list, else return first non-empty
+function FirstExistingPath(paths: array of string; checkDir: Boolean): string;
+var
+  i: Integer;
+begin
+  Result := '';
+  for i := 0 to GetArrayLength(paths) - 1 do
+  begin
+    if checkDir then
+    begin
+      if DirExists(paths[i]) then begin Result := paths[i]; Exit; end;
+    end
+    else
+    begin
+      if FileExists(paths[i]) then begin Result := paths[i]; Exit; end;
+    end;
+  end;
+  if GetArrayLength(paths) > 0 then Result := paths[0];
+end;
+
+function AutoDetectServerDir(): string;
+var
+  candidates: array of string;
+begin
+  SetArrayLength(candidates, 5);
+  candidates[0] := 'C:\Program Files (x86)\Steam\steamapps\common\Dune Awakening Self-Hosted Server';
+  candidates[1] := 'C:\Program Files\Steam\steamapps\common\Dune Awakening Self-Hosted Server';
+  candidates[2] := 'D:\SteamLibrary\steamapps\common\Dune Awakening Self-Hosted Server';
+  candidates[3] := 'E:\SteamLibrary\steamapps\common\Dune Awakening Self-Hosted Server';
+  candidates[4] := 'X:\SteamLibrary\steamapps\common\Dune Awakening Self-Hosted Server';
+  Result := FirstExistingPath(candidates, True);
+end;
+
+function AutoDetectSshKey(serverDir: string): string;
+var
+  candidates: array of string;
+begin
+  SetArrayLength(candidates, 3);
+  candidates[0] := ExpandConstant('{localappdata}\DuneAwakeningServer\sshKey');
+  candidates[1] := ExpandConstant('{%USERPROFILE}\.ssh\dune');
+  if serverDir <> '' then
+    candidates[2] := serverDir + '\sshKey'
+  else
+    candidates[2] := '';
+  Result := FirstExistingPath(candidates, False);
+end;
+
+// ---------- wizard wiring ----------
+
+procedure InitializeWizard();
+var
+  legacy: string;
+  importLegacy: Boolean;
+  defServer, defSsh, defUser, defMode: string;
+  appdataCfg: string;
+begin
+  // If APPDATA config already exists, skip the whole config-collection flow
+  // (this is an upgrade - don't blow away the user's settings).
+  appdataCfg := ExpandConstant('{userappdata}\DuneServer\dune-server.config');
+  SkipConfigPages := FileExists(appdataCfg);
+
+  // If we found a legacy config but no APPDATA config yet, offer to import.
+  importLegacy := False;
+  legacy := '';
+  if not SkipConfigPages then
+  begin
+    legacy := FindLegacyConfig();
+    if legacy <> '' then
+    begin
+      if MsgBox(
+           'A previous Dune Server config was found at:' + #13#10 + #13#10 +
+           legacy + #13#10 + #13#10 +
+           'Use those values as the defaults on the next few pages?' + #13#10 + #13#10 +
+           '(You can still edit anything before installing.)',
+           mbConfirmation, MB_YESNO) = IDYES then
+        importLegacy := True;
+    end;
+  end;
+
+  // Compute defaults
+  if importLegacy then
+  begin
+    defServer := ReadCfgKey(legacy, 'SteamPath');
+    defSsh    := ReadCfgKey(legacy, 'SshKey');
+    defUser   := ReadCfgKey(legacy, 'WindowsUser');
+    defMode   := ReadCfgKey(legacy, 'PortCheckMode');
+  end
+  else
+  begin
+    defServer := '';
+    defSsh    := '';
+    defUser   := '';
+    defMode   := '';
+  end;
+
+  if defServer = '' then defServer := AutoDetectServerDir();
+  if defSsh    = '' then defSsh    := AutoDetectSshKey(defServer);
+  if defUser   = '' then defUser   := ExpandConstant('{username}');
+  if defMode   = '' then defMode   := 'builtin';
+
+  InstallationModePage := CreateInputOptionPage(wpSelectDir,
+    'Choose your DST setup',
+    'How will you use Dune Server Tool?',
+    'Solo manages local Dune: Awakening saves. Self-Hosted + Solo also includes dedicated-server management.',
+    True, False);
+  InstallationModePage.Add('Self-Hosted + Solo');
+  InstallationModePage.Add('Solo only');
+  InstallationModePage.SelectedValueIndex := 0;
+  if CompareText(ReadCfgKey(appdataCfg, 'InstallationMode'), 'solo') = 0 then
+    InstallationModePage.SelectedValueIndex := 1;
+
+  // Page 1: Server install folder (DirPage with Browse)
+  ServerDirPage := CreateInputDirPage(InstallationModePage.ID,
+    'Dune Awakening Server Folder',
+    'Where is the dedicated server installed?',
+    'Pick the folder that contains the "battlegroup-management" subfolder. ' +
+    'If you don''t have the dedicated server installed yet you can leave this ' +
+    'as-is and re-run setup later.',
+    False, '');
+  ServerDirPage.Add('Server folder:');
+  ServerDirPage.Values[0] := defServer;
+
+  // Page 2: SSH key (FilePage with Browse)
+  SshKeyPage := CreateInputFilePage(ServerDirPage.ID,
+    'SSH Private Key',
+    'Where is the SSH private key for the Hyper-V VM?',
+    'The Dune Awakening dedicated server installer normally puts this at ' +
+    '%LOCALAPPDATA%\DuneAwakeningServer\sshKey - that path is filled in below ' +
+    'if it exists. Click Browse to pick a different one.');
+  SshKeyPage.Add('SSH key file:', 'All files (*.*)|*.*', '');
+  SshKeyPage.Values[0] := defSsh;
+
+  // Page 3: Windows username
+  UserPage := CreateInputQueryPage(SshKeyPage.ID,
+    'Windows Username',
+    'What''s your Windows account name?',
+    'Used by DST for per-user settings.');
+  UserPage.Add('Windows username:', False);
+  UserPage.Values[0] := defUser;
+
+  // Page 4: port check mode (radio buttons)
+  PortModePage := CreateInputOptionPage(UserPage.ID,
+    'Port Verification',
+    'How should the tool check that your forwarded ports are reachable?',
+    'The status header can verify your TCP ports are open from the internet. ' +
+    'UDP ports cannot be reliably checked by any free public service - the ' +
+    'best UDP test is connecting in-game from a different network.' + #13#10 + #13#10 +
+    'You can change this any time by editing %APPDATA%\DuneServer\dune-server.config.',
+    True, False);
+  PortModePage.Add('Built-in (yougetsignal.com, TCP only) - recommended');
+  PortModePage.Add('Custom URL (advanced - you provide a UDP-capable service)');
+  PortModePage.Add('Disabled');
+  if CompareText(defMode, 'custom')   = 0 then PortModePage.SelectedValueIndex := 1
+  else if CompareText(defMode, 'disabled') = 0 then PortModePage.SelectedValueIndex := 2
+  else PortModePage.SelectedValueIndex := 0;
+end;
+
+function ShouldSkipPage(PageID: Integer): Boolean;
+begin
+  Result := False;
+  if (PageID = InstallationModePage.ID) then
+  begin
+    Result := WizardSilent;
+    Exit;
+  end;
+  if (PageID = ServerDirPage.ID) or
+     (PageID = SshKeyPage.ID)    or
+     (PageID = UserPage.ID)      or
+     (PageID = PortModePage.ID) then
+    Result := (InstallationModePage.SelectedValueIndex = 1) or
+      (SkipConfigPages and (CompareText(ReadCfgKey(ExpandConstant('{userappdata}\DuneServer\dune-server.config'), 'InstallationMode'), 'solo') <> 0));
+end;
+
+// ---------- write the config file ----------
+
+procedure WriteDuneConfig();
+var
+  destDir, dest, portMode, content, installationMode: string;
+begin
+  destDir := ExpandConstant('{userappdata}\DuneServer');
+  if not DirExists(destDir) then
+    ForceDirectories(destDir);
+  dest := destDir + '\dune-server.config';
+
+  case PortModePage.SelectedValueIndex of
+    1: portMode := 'custom';
+    2: portMode := 'disabled';
+  else
+    portMode := 'builtin';
+  end;
+
+  installationMode := 'full';
+  if InstallationModePage.SelectedValueIndex = 1 then
+  begin
+    installationMode := 'solo';
+    portMode := 'disabled';
+  end;
+
+  content :=
+    '# Dune Awakening Server Management - Configuration' + #13#10 +
+    '# Generated by installer on ' + GetDateTimeString('yyyy-mm-dd hh:nn', '-', ':') + #13#10 +
+    '# Delete this file to re-run setup from inside the app.' + #13#10 +
+    '' + #13#10 +
+    'InstallationMode='     + installationMode + #13#10 +
+    'SteamPath='            + ServerDirPage.Values[0] + #13#10 +
+    'SshKey='               + SshKeyPage.Values[0]    + #13#10 +
+    'WindowsUser='          + UserPage.Values[0]      + #13#10 +
+    'PortCheckMode='        + portMode                + #13#10 +
+    'PortCheckUrlTemplate=' + #13#10;
+
+  if SaveStringToFile(dest, content, False) then
+    Log('Wrote config: ' + dest)
+  else
+    Log('FAILED to write config: ' + dest);
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  dest, oldMode, newMode, portMode, modsPath, modEditor: string;
+  permissionResult: Integer;
+begin
+  if CurStep = ssPostInstall then
+  begin
+    modsPath := ExpandConstant('{app}\Mods');
+    if not ForceDirectories(modsPath) then
+      RaiseException('Could not create the Mods folder.');
+    modEditor := GetEnv('USERDOMAIN') + '\' + GetUserNameString;
+    if not Exec(ExpandConstant('{sys}\icacls.exe'),
+      '"' + modsPath + '" /grant "' + modEditor + ':(OI)(CI)M" /T',
+      '', SW_HIDE, ewWaitUntilTerminated, permissionResult) then
+      RaiseException('Could not make the Mods folder editable.');
+    if permissionResult <> 0 then
+      RaiseException('Could not set Mods folder permissions.');
+
+    if not SkipConfigPages then
+      WriteDuneConfig()
+    else
+    begin
+      dest := ExpandConstant('{userappdata}\DuneServer\dune-server.config');
+      oldMode := ReadCfgKey(dest, 'InstallationMode');
+      newMode := 'full';
+      if InstallationModePage.SelectedValueIndex = 1 then newMode := 'solo';
+      if ((CompareText(oldMode, 'solo') = 0) and (newMode <> 'solo')) or
+         ((CompareText(oldMode, 'solo') <> 0) and (newMode = 'solo')) then
+        if not SaveStringToFile(dest, #13#10 + 'InstallationMode=' + newMode + #13#10, True) then
+          RaiseException('Could not save the selected DST setup.');
+      if (CompareText(oldMode, 'solo') = 0) and (newMode = 'full') then
+      begin
+        portMode := 'builtin';
+        if PortModePage.SelectedValueIndex = 1 then portMode := 'custom';
+        if PortModePage.SelectedValueIndex = 2 then portMode := 'disabled';
+        if not SaveStringToFile(dest,
+          'SteamPath=' + ServerDirPage.Values[0] + #13#10 +
+          'SshKey=' + SshKeyPage.Values[0] + #13#10 +
+          'WindowsUser=' + UserPage.Values[0] + #13#10 +
+          'PortCheckMode=' + portMode + #13#10, True) then
+          RaiseException('Could not save the dedicated-server setup.');
+      end;
+    end;
+  end;
+end;
+
+// ============================================================
+//  Upgrade path: silently uninstall any prior install (v4-v6.0
+//  WPF desktop app, or earlier v6.1 builds) before laying down
+//  the new web-portal files. Without this, files that the old
+//  version shipped but the new one doesn't (WebView2 DLLs,
+//  WPF XAML pages, old `web\` static assets) would linger in
+//  {app} and could be dot-sourced by mistake.
+//
+//  Preserves %APPDATA%\DuneServer\ - the existing [UninstallDelete]
+//  only clears {app}, not user config.
+// ============================================================
+
+function GetUninstallerCommand(): string;
+var
+  regKey: string;
+  cmd: string;
+begin
+  Result := '';
+  // Inno Setup writes per-AppId uninstall info under "{AppId}_is1".
+  // 64-bit installer always writes to the 64-bit view of HKLM.
+  regKey := 'Software\Microsoft\Windows\CurrentVersion\Uninstall\' +
+            '{B3F8A2C1-7E5D-4F9A-8B2C-1D6E3A4F5C7D}_is1';
+  if RegQueryStringValue(HKLM64, regKey, 'QuietUninstallString', cmd) then
+    Result := cmd
+  else if RegQueryStringValue(HKLM64, regKey, 'UninstallString', cmd) then
+    Result := cmd
+  else if RegQueryStringValue(HKLM,   regKey, 'QuietUninstallString', cmd) then
+    Result := cmd
+  else if RegQueryStringValue(HKLM,   regKey, 'UninstallString', cmd) then
+    Result := cmd;
+end;
+
+// Try to stop a running DuneServer.exe so the old uninstaller can
+// delete its files cleanly. Best-effort - failure is non-fatal.
+procedure StopRunningDuneServer();
+var
+  resultCode: Integer;
+begin
+  Exec('taskkill.exe', '/F /IM DuneServer.exe',
+       '', SW_HIDE, ewWaitUntilTerminated, resultCode);
+  // Do not kill descendants: Dune and its mod cleanup watcher must survive upgrades.
+end;
+
+function UninstallPreviousVersion(): Boolean;
+var
+  uninstCmd, exePath, args: string;
+  spacePos, resultCode: Integer;
+  ok: Boolean;
+begin
+  Result := True;
+  uninstCmd := GetUninstallerCommand();
+  if uninstCmd = '' then Exit;  // nothing installed - first-time install
+
+  // UninstallString format is typically:
+  //   "C:\Program Files\Dune Server\unins000.exe" [/PARAMS...]
+  // Split into exe + args. The exe path is quoted in modern Inno Setup
+  // installers, so look for the closing quote.
+  if Copy(uninstCmd, 1, 1) = '"' then
+  begin
+    spacePos := Pos('"', Copy(uninstCmd, 2, Length(uninstCmd)));
+    if spacePos > 0 then
+    begin
+      exePath := Copy(uninstCmd, 2, spacePos - 1);
+      args    := Trim(Copy(uninstCmd, spacePos + 2, Length(uninstCmd)));
+    end
+    else
+    begin
+      exePath := uninstCmd;
+      args    := '';
+    end;
+  end
+  else
+  begin
+    spacePos := Pos(' ', uninstCmd);
+    if spacePos > 0 then
+    begin
+      exePath := Copy(uninstCmd, 1, spacePos - 1);
+      args    := Trim(Copy(uninstCmd, spacePos + 1, Length(uninstCmd)));
+    end
+    else
+    begin
+      exePath := uninstCmd;
+      args    := '';
+    end;
+  end;
+
+  if not FileExists(exePath) then Exit;  // stale registry entry
+
+  // Make sure no DuneServer.exe is holding files open.
+  StopRunningDuneServer();
+  Sleep(500);
+
+  // Append silent flags. /SP- skips the "are you sure?" prompt,
+  // /VERYSILENT runs without any UI, /SUPPRESSMSGBOXES squashes
+  // any error popups, /NORESTART blocks an auto-reboot request.
+  args := args + ' /SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART';
+
+  ok := Exec(exePath, Trim(args), '', SW_HIDE, ewWaitUntilTerminated, resultCode);
+  if not ok then
+  begin
+    Log('Previous-version uninstall failed to launch: ' + exePath);
+    Result := False;
+    Exit;
+  end;
+
+  if resultCode <> 0 then
+    Log(Format('Previous-version uninstaller exited with code %d (continuing).', [resultCode]));
+
+  // Give Windows a moment to release file handles on the now-deleted EXE
+  Sleep(1000);
+end;
+
+// PrepareToInstall fires right before the file-copy phase. Returning
+// an empty string lets setup proceed; a non-empty string aborts with
+// that message. Prerequisite failures stop before any upgrade changes; an
+// upgrade-uninstall failure is logged but not fatal - ignoreversion overwrites
+// active files; only orphans will linger).
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  probe, probeArgs: string;
+  probeExitCode: Integer;
+begin
+  NeedsRestart := False;
+
+  // Required by both installation modes. Check before stopping or removing
+  // the existing installation; silent setup returns the same actionable error.
+  probe := '$p = (Get-Command pwsh.exe -ErrorAction SilentlyContinue).Source; ' +
+    'if (-not $p) { foreach ($candidate in @(' +
+    '''' + EscapePowerShellSingleQuoted(ExpandConstant('{pf64}')) + '\PowerShell\7\pwsh.exe'', ' +
+    '''' + EscapePowerShellSingleQuoted(ExpandConstant('{pf32}')) + '\PowerShell\7\pwsh.exe'', ' +
+    '''' + EscapePowerShellSingleQuoted(ExpandConstant('{localappdata}')) + '\Microsoft\PowerShell\7\pwsh.exe'')) ' +
+    '{ if (Test-Path -LiteralPath $candidate) { $p = $candidate; break } } }; ' +
+    'if ($p) { exit 0 }; exit 1';
+  probeArgs := '-NoLogo -NoProfile -NonInteractive -Command "' + probe + '"';
+  if not Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+    probeArgs, '', SW_HIDE, ewWaitUntilTerminated, probeExitCode) then
+  begin
+    Result := 'Setup could not check for PowerShell 7. No installation changes were made. Please retry setup.';
+    Exit;
+  end;
+  if probeExitCode <> 0 then
+  begin
+    Result := 'PowerShell 7 is required for both Solo and Self-Hosted installations. ' +
+      'Install PowerShell from the Microsoft Store, then retry setup: ' +
+      'https://apps.microsoft.com/detail/9MZ1SNWT0N5D';
+    Exit;
+  end;
+
+  PriorBridgeHash := '';
+  PriorBridgeInstallerHash := '';
+  if FileExists(ExpandConstant('{app}\helper\bridge\DstHelperBridge.ps1')) then
+    PriorBridgeHash :=
+      GetSHA256OfFile(ExpandConstant('{app}\helper\bridge\DstHelperBridge.ps1'));
+  if FileExists(ExpandConstant('{app}\helper\bridge\Install-Bridge.ps1')) then
+    PriorBridgeInstallerHash :=
+      GetSHA256OfFile(ExpandConstant('{app}\helper\bridge\Install-Bridge.ps1'));
+
+  if ShouldUseInPlaceUpgrade() then
+  begin
+    StopRunningDuneServer();
+    Sleep(500);
+    Log('Using v15+ in-place upgrade; scheduled tasks remain registered.');
+  end
+  else
+  begin
+    PriorBridgeHash := '';
+    PriorBridgeInstallerHash := '';
+    if not CaptureLegacyAutostartTasks() then
+    begin
+      Result := 'The upgrade could not safely preserve existing Windows startup tasks. No changes were made.';
+      Exit;
+    end;
+    UninstallPreviousVersion();
+  end;
+
+  Result := '';
+end;
+
+function ShouldInstallBridge(): Boolean;
+var
+  newBridgePath, newInstallerPath, newBridgeHash, newInstallerHash: string;
+begin
+  if InstallationModePage.SelectedValueIndex = 1 then
+  begin
+    Result := False;
+    Exit;
+  end;
+  newBridgePath := ExpandConstant('{app}\helper\bridge\DstHelperBridge.ps1');
+  newInstallerPath := ExpandConstant('{app}\helper\bridge\Install-Bridge.ps1');
+  if (PriorBridgeHash = '') or
+     (PriorBridgeInstallerHash = '') or
+     (not FileExists(newBridgePath)) or
+     (not FileExists(newInstallerPath)) then
+  begin
+    Result := True;
+    Exit;
+  end;
+
+  newBridgeHash := GetSHA256OfFile(newBridgePath);
+  newInstallerHash := GetSHA256OfFile(newInstallerPath);
+  Result := (PriorBridgeHash <> newBridgeHash) or
+            (PriorBridgeInstallerHash <> newInstallerHash);
+  if Result then
+    Log('Bridge payload changed; reinstalling and restarting bridge task.')
+  else
+    Log('Bridge payload unchanged; preserving running bridge and scheduled task.');
+end;

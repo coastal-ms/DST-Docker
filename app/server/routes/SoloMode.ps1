@@ -1,0 +1,815 @@
+﻿Register-DuneRoute -Method POST -Path '/api/solo/grant-unlocks' -LocalOnly -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $kind = [string](Get-DuneSoloBodyField -Body $body -Name 'kind' -Default '')
+        $token = [string](Get-DuneSoloBodyField -Body $body -Name 'expectedProfileToken' -Default '')
+        $result = Invoke-WithDuneLock -Name 'solo-profile-data' -Script {
+            Assert-DuneSoloExpectedProfile -ExpectedProfileToken $token
+            Invoke-DuneSoloGrantUnlocks -Kind $kind
+        }
+        Write-DuneJson -Response $res -Body $result
+    } catch {
+        $status = if ($_.Exception.Message -like '*still running*' -or $_.Exception.Message -like '*active Solo save changed*') { 409 } else { 400 }
+        Write-DuneError -Response $res -Status $status -Message $_.Exception.Message
+    }
+}
+
+Register-DuneRoute -Method GET -Path '/api/solo/blueprint-settings' -LocalOnly -Handler {
+    param($req, $res, $routeParams, $body)
+    try { Write-DuneJson -Response $res -Body (Read-DuneSoloBlueprintSettings) }
+    catch { Write-DuneError -Response $res -Status 500 -Message $_.Exception.Message }
+}
+
+Register-DuneRoute -Method PUT -Path '/api/solo/blueprint-settings' -LocalOnly -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $enabled = Get-DuneSoloBodyField -Body $body -Name 'enabled'
+        if ($enabled -isnot [bool]) { throw 'Choose whether to enable instant blueprint building.' }
+        $token = [string](Get-DuneSoloBodyField -Body $body -Name 'expectedProfileToken' -Default '')
+        $confirm = [string](Get-DuneSoloBodyField -Body $body -Name 'confirm' -Default '')
+        $result = Invoke-WithDuneLock -Name 'solo-profile-data' -Script {
+            Assert-DuneSoloExpectedProfile -ExpectedProfileToken $token
+            Complete-DuneSoloSettingsBackup -Result (Set-DuneSoloBlueprintSettings -Enabled $enabled -Confirm $confirm)
+        }
+        Write-DuneJson -Response $res -Body $result
+    } catch {
+        $status = if ($_.Exception.Message -like '*still running*' -or $_.Exception.Message -like '*changed*') { 409 } else { 400 }
+        Write-DuneError -Response $res -Status $status -Message $_.Exception.Message
+    }
+}
+
+function Get-DuneSoloBodyField {
+    param($Body, [Parameter(Mandatory)][string]$Name, $Default = $null)
+    if ($Body -is [hashtable] -and $Body.ContainsKey($Name)) { return $Body[$Name] }
+    if ($Body -and $Body.PSObject.Properties.Name -contains $Name) { return $Body.$Name }
+    return $Default
+}
+
+Register-DuneRoute -Method GET -Path '/api/solo/codex' -LocalOnly -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $result = Invoke-WithDuneLock -Name 'solo-profile-data' -Script { Get-DuneSoloCodex }
+        Write-DuneJson -Response $res -Body $result
+    } catch {
+        Write-DuneError -Response $res -Status 400 -Message $_.Exception.Message
+    }
+}
+
+Register-DuneRoute -Method GET -Path '/api/solo/activity' -LocalOnly -Handler {
+    param($req,$res,$routeParams,$body)
+    try {
+        $result=Invoke-WithDuneLock -Name 'solo-profile-data' -Script { Get-DuneSoloActivity }
+        Write-DuneJson -Response $res -Body $result
+    } catch { Write-DuneError -Response $res -Status 400 -Message $_.Exception.Message }
+}
+
+Register-DuneRoute -Method POST -Path '/api/solo/codex/grant' -LocalOnly -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $ids = @(Get-DuneSoloBodyField -Body $body -Name 'ids')
+        $token = [string](Get-DuneSoloBodyField -Body $body -Name 'expectedProfileToken')
+        $confirm = [string](Get-DuneSoloBodyField -Body $body -Name 'confirm')
+        $result = Invoke-WithDuneLock -Name 'solo-profile-data' -Script {
+            Assert-DuneSoloExpectedProfile -ExpectedProfileToken $token
+            Invoke-DuneSoloCodexGrant -Ids $ids -Confirm $confirm
+        }
+        Write-DuneJson -Response $res -Body $result
+    } catch {
+        Write-DuneError -Response $res -Status 400 -Message $_.Exception.Message
+    }
+}
+
+Register-DuneRoute -Method GET -Path '/api/solo/status' -LocalOnly -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        Write-DuneJson -Response $res -Body (Get-DuneSoloStatus)
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message $_.Exception.Message
+    }
+}
+
+Register-DuneRoute -Method GET -Path '/api/solo/runtime' -LocalOnly -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        Write-DuneJson -Response $res -Body (Get-DuneSoloRuntime)
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message $_.Exception.Message
+    }
+}
+
+Register-DuneRoute -Method POST -Path '/api/solo/discover' -LocalOnly -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $path = [string](Get-DuneSoloBodyField -Body $body -Name 'path' -Default '')
+        $platform = [string](Get-DuneSoloBodyField -Body $body -Name 'platform' -Default 'auto')
+        Write-DuneJson -Response $res -Body (Get-DuneSoloDiscovery -SelectedPath $path.Trim() -Platform $platform)
+    } catch {
+        Write-DuneError -Response $res -Status 400 -Message $_.Exception.Message
+    }
+}
+
+Register-DuneRoute -Method POST -Path '/api/solo/connect' -LocalOnly -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $path = [string](Get-DuneSoloBodyField -Body $body -Name 'path' -Default '')
+        $dbPath = [string](Get-DuneSoloBodyField -Body $body -Name 'dbPath' -Default '')
+        if (-not $path.Trim()) {
+            Write-DuneError -Response $res -Status 400 -Message 'Select a Solo data folder.'
+            return
+        }
+        $result = Invoke-WithDuneLock -Name 'solo-profile-data' -Script {
+            Connect-DuneSoloProfile -SelectedPath $path.Trim() -DbPath $dbPath.Trim()
+        }
+        Write-DuneJson -Response $res -Body $result
+    } catch {
+        Write-DuneError -Response $res -Status 400 -Message $_.Exception.Message
+    }
+}
+
+Register-DuneRoute -Method GET -Path '/api/solo/settings' -LocalOnly -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        Write-DuneJson -Response $res -Body (Read-DuneSoloSettings)
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message $_.Exception.Message
+    }
+}
+
+Register-DuneRoute -Method PUT -Path '/api/solo/settings' -LocalOnly -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $rawSettings = Get-DuneSoloBodyField -Body $body -Name 'settings'
+        $confirm = [string](Get-DuneSoloBodyField -Body $body -Name 'confirm' -Default '')
+        $expectedProfileToken = [string](Get-DuneSoloBodyField -Body $body -Name 'expectedProfileToken' -Default '')
+        if (-not $rawSettings) {
+            Write-DuneError -Response $res -Status 400 -Message 'Missing Solo settings.'
+            return
+        }
+        $settings = @{}
+        if ($rawSettings -is [hashtable]) {
+            foreach ($key in $rawSettings.Keys) { $settings[[string]$key] = [string]$rawSettings[$key] }
+        } else {
+            foreach ($property in $rawSettings.PSObject.Properties) {
+                $settings[$property.Name] = [string]$property.Value
+            }
+        }
+        $result = Invoke-WithDuneLock -Name 'solo-profile-data' -Script {
+            Assert-DuneSoloExpectedProfile -ExpectedProfileToken $expectedProfileToken
+            Complete-DuneSoloSettingsBackup -Result (Set-DuneSoloSettings -Settings $settings -Confirm $confirm)
+        }
+        Write-DuneJson -Response $res -Body $result
+    } catch {
+        $status = if ($_.Exception.Message -like '*still running*') { 409 } else { 400 }
+        Write-DuneError -Response $res -Status $status -Message $_.Exception.Message
+    }
+}
+
+Register-DuneRoute -Method GET -Path '/api/solo/console-settings' -LocalOnly -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        Write-DuneJson -Response $res -Body (Read-DuneSoloConsoleSettings)
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message $_.Exception.Message
+    }
+}
+
+Register-DuneRoute -Method PUT -Path '/api/solo/console-settings' -LocalOnly -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $rawSettings = Get-DuneSoloBodyField -Body $body -Name 'settings'
+        $confirm = [string](Get-DuneSoloBodyField -Body $body -Name 'confirm' -Default '')
+        $expectedProfileToken = [string](Get-DuneSoloBodyField -Body $body -Name 'expectedProfileToken' -Default '')
+        if (-not $rawSettings) {
+            Write-DuneError -Response $res -Status 400 -Message 'Missing Retail Solo console settings.'
+            return
+        }
+        $settings = @{}
+        if ($rawSettings -is [hashtable]) {
+            foreach ($key in $rawSettings.Keys) { $settings[[string]$key] = [string]$rawSettings[$key] }
+        } else {
+            foreach ($property in $rawSettings.PSObject.Properties) {
+                $settings[$property.Name] = [string]$property.Value
+            }
+        }
+        $result = Invoke-WithDuneLock -Name 'solo-profile-data' -Script {
+            Assert-DuneSoloExpectedProfile -ExpectedProfileToken $expectedProfileToken
+            Complete-DuneSoloSettingsBackup -Result (Set-DuneSoloConsoleSettings -Settings $settings -Confirm $confirm)
+        }
+        Write-DuneJson -Response $res -Body $result
+    } catch {
+        $status = if ($_.Exception.Message -like '*still running*') { 409 } else { 400 }
+        Write-DuneError -Response $res -Status $status -Message $_.Exception.Message
+    }
+}
+
+Register-DuneRoute -Method GET -Path '/api/solo/backups' -LocalOnly -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $policy = Get-DuneSoloBackupPolicy
+        $unavailable = @($policy.archiveRoots | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Container) }).Count -gt 0
+        Write-DuneJson -Response $res -Body @{ ok = $true; backups = @(Get-DuneSoloBackups); root = Get-DuneSoloBackupRoot; archiveRoot=$policy.archiveRoot; archiveUnavailable=$unavailable }
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message $_.Exception.Message
+    }
+}
+
+Register-DuneRoute -Method GET -Path '/api/solo/backup-policy' -LocalOnly -Handler {
+    param($req, $res, $routeParams, $body)
+    try { Write-DuneJson -Response $res -Body @{ok=$true;root=(Get-DuneSoloBackupRoot);policy=(Get-DuneSoloBackupPolicy)} }
+    catch { Write-DuneError -Response $res -Status 500 -Message $_.Exception.Message }
+}
+
+Register-DuneRoute -Method PUT -Path '/api/solo/backup-policy' -LocalOnly -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $token = [string](Get-DuneSoloBodyField -Body $body -Name 'expectedProfileToken' -Default '')
+        $directory = [string](Get-DuneSoloBodyField -Body $body -Name 'directory' -Default '')
+        $managed = Get-DuneSoloBodyField -Body $body -Name 'managed' -Default $false
+        if ($managed -isnot [bool]) { throw 'Choose whether DST should manage backups.' }
+        $result = Invoke-WithDuneLock -Name 'solo-profile-data' -Script {
+            Assert-DuneSoloExpectedProfile -ExpectedProfileToken $token
+            Set-DuneSoloBackupDirectory -Directory $directory -Managed $managed
+        }
+        Write-DuneJson -Response $res -Body $result
+    } catch { Write-DuneError -Response $res -Status 400 -Message $_.Exception.Message }
+}
+
+Register-DuneRoute -Method POST -Path '/api/solo/restore-file' -LocalOnly -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $token=[string](Get-DuneSoloBodyField -Body $body -Name 'expectedProfileToken' -Default '')
+        $path=[string](Get-DuneSoloBodyField -Body $body -Name 'path' -Default '')
+        $confirm=[string](Get-DuneSoloBodyField -Body $body -Name 'confirm' -Default '')
+        $result=Invoke-WithDuneLock -Name 'solo-profile-data' -Script {
+            Assert-DuneSoloExpectedProfile -ExpectedProfileToken $token
+            Restore-DuneSoloBackupFile -Path $path -Confirm $confirm
+        }
+        Write-DuneJson -Response $res -Body $result
+    } catch { Write-DuneError -Response $res -Status 400 -Message $_.Exception.Message }
+}
+
+Register-DuneRoute -Method POST -Path '/api/solo/backups' -LocalOnly -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $expectedProfileToken = [string](Get-DuneSoloBodyField -Body $body -Name 'expectedProfileToken' -Default '')
+        $result = Invoke-WithDuneLock -Name 'solo-profile-data' -Script {
+            Assert-DuneSoloExpectedProfile -ExpectedProfileToken $expectedProfileToken
+            New-DuneSoloSaveBackup
+        }
+        Write-DuneJson -Response $res -Body $result
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message $_.Exception.Message
+    }
+}
+
+Register-DuneRoute -Method DELETE -Path '/api/solo/backups' -LocalOnly -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $relativePath = [string](Get-DuneSoloBodyField -Body $body -Name 'relativePath' -Default '')
+        $rawRelativePaths = Get-DuneSoloBodyField -Body $body -Name 'relativePaths'
+        $confirm = [string](Get-DuneSoloBodyField -Body $body -Name 'confirm' -Default '')
+        $expectedProfileToken = [string](Get-DuneSoloBodyField -Body $body -Name 'expectedProfileToken' -Default '')
+        $result = Invoke-WithDuneLock -Name 'solo-profile-data' -Script {
+            Assert-DuneSoloExpectedProfile -ExpectedProfileToken $expectedProfileToken
+            if ($null -ne $rawRelativePaths) {
+                $relativePaths = @($rawRelativePaths | ForEach-Object { [string]$_ })
+                Remove-DuneSoloBackups -RelativePaths $relativePaths -Confirm $confirm
+            } else {
+                Remove-DuneSoloBackup -RelativePath $relativePath -Confirm $confirm
+            }
+        }
+        Write-DuneJson -Response $res -Body $result
+    } catch {
+        $status = if ($_.Exception.Message -like '*active Solo save changed*') { 409 } else { 400 }
+        Write-DuneError -Response $res -Status $status -Message $_.Exception.Message
+    }
+}
+
+Register-DuneRoute -Method POST -Path '/api/solo/restore' -LocalOnly -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $relativePath = [string](Get-DuneSoloBodyField -Body $body -Name 'relativePath' -Default '')
+        $confirm = [string](Get-DuneSoloBodyField -Body $body -Name 'confirm' -Default '')
+        $expectedProfileToken = [string](Get-DuneSoloBodyField -Body $body -Name 'expectedProfileToken' -Default '')
+        if (-not $relativePath.Trim()) {
+            Write-DuneError -Response $res -Status 400 -Message 'Choose a Solo backup to restore.'
+            return
+        }
+        $result = Invoke-WithDuneLock -Name 'solo-profile-data' -Script {
+            Assert-DuneSoloExpectedProfile -ExpectedProfileToken $expectedProfileToken
+            Restore-DuneSoloBackup -RelativePath $relativePath.Trim() -Confirm $confirm
+        }
+        Write-DuneJson -Response $res -Body $result
+    } catch {
+        $status = if ($_.Exception.Message -like '*still running*') { 409 } else { 400 }
+        Write-DuneError -Response $res -Status $status -Message $_.Exception.Message
+    }
+}
+
+Register-DuneRoute -Method POST -Path '/api/solo/items/grant' -LocalOnly -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $destination = [string](Get-DuneSoloBodyField -Body $body -Name 'destination' -Default '')
+        $confirm = [string](Get-DuneSoloBodyField -Body $body -Name 'confirm' -Default '')
+        $expectedProfileToken = [string](Get-DuneSoloBodyField -Body $body -Name 'expectedProfileToken' -Default '')
+        $moddedStorageCapacity = (Get-DuneSoloBodyField -Body $body -Name 'moddedStorageCapacity' -Default $false) -eq $true
+        $rawItems = Get-DuneSoloBodyField -Body $body -Name 'items'
+        $items = if ($null -eq $rawItems) { @() } else { @($rawItems) }
+        $result = Invoke-WithDuneLock -Name 'solo-profile-data' -Script {
+            Assert-DuneSoloExpectedProfile -ExpectedProfileToken $expectedProfileToken
+            Invoke-DuneSoloGiveItems -Destination $destination -Items $items -Confirm $confirm -ModdedStorageCapacity $moddedStorageCapacity
+        }
+        Write-DuneJson -Response $res -Body $result
+    } catch {
+        $status = if ($_.Exception.Message -like '*still running*' -or $_.Exception.Message -like '*active Solo save changed*') { 409 } else { 400 }
+        Write-DuneError -Response $res -Status $status -Message $_.Exception.Message
+    }
+}
+
+Register-DuneRoute -Method POST -Path '/api/solo/items/delete-group' -LocalOnly -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $result = Invoke-WithDuneLock -Name 'solo-profile-data' -Script {
+            Assert-DuneSoloExpectedProfile -ExpectedProfileToken ([string](Get-DuneSoloBodyField $body 'expectedProfileToken' ''))
+            Remove-DuneSoloInventoryGroup -TemplateId ([string](Get-DuneSoloBodyField $body 'templateId' '')) `
+                -Destination ([string](Get-DuneSoloBodyField $body 'destination' '')) `
+                -ExpectedCount ([long](Get-DuneSoloBodyField $body 'expectedCount' 0)) `
+                -ExpectedTotal ([long](Get-DuneSoloBodyField $body 'expectedTotal' -1)) `
+                -Confirm ([string](Get-DuneSoloBodyField $body 'confirm' ''))
+        }
+        Write-DuneJson -Response $res -Body $result
+    } catch {
+        $status = if ($_.Exception.Message -like '*still running*' -or $_.Exception.Message -like '*active Solo save changed*') { 409 } else { 400 }
+        Write-DuneError -Response $res -Status $status -Message $_.Exception.Message
+    }
+}
+
+Register-DuneRoute -Method POST -Path '/api/solo/items/edit' -LocalOnly -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $result = Invoke-WithDuneLock -Name 'solo-profile-data' -Script {
+            Assert-DuneSoloExpectedProfile -ExpectedProfileToken ([string](Get-DuneSoloBodyField -Body $body -Name 'expectedProfileToken' -Default ''))
+            Set-DuneSoloInventoryItem -ItemId ([long](Get-DuneSoloBodyField -Body $body -Name 'itemId' -Default 0)) `
+                -Revision ([string](Get-DuneSoloBodyField -Body $body -Name 'revision' -Default '')) `
+                -Field ([string](Get-DuneSoloBodyField -Body $body -Name 'field' -Default '')) `
+                -Values (ConvertTo-Json -InputObject (Get-DuneSoloBodyField -Body $body -Name 'values') -Compress -Depth 5) `
+                -Confirm ([string](Get-DuneSoloBodyField -Body $body -Name 'confirm' -Default ''))
+        }
+        Write-DuneJson -Response $res -Body $result
+    } catch {
+        $status = if ($_.Exception.Message -like '*still running*' -or $_.Exception.Message -like '*active Solo save changed*') { 409 } else { 400 }
+        Write-DuneError -Response $res -Status $status -Message $_.Exception.Message
+    }
+}
+
+Register-DuneRoute -Method POST -Path '/api/solo/items/delete' -LocalOnly -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $itemId = [long](Get-DuneSoloBodyField -Body $body -Name 'itemId' -Default 0)
+        $expectedStackSize = [long](Get-DuneSoloBodyField -Body $body -Name 'expectedStackSize' -Default 0)
+        $quantity = [long](Get-DuneSoloBodyField -Body $body -Name 'quantity' -Default 0)
+        $confirm = [string](Get-DuneSoloBodyField -Body $body -Name 'confirm' -Default '')
+        $expectedProfileToken = [string](Get-DuneSoloBodyField -Body $body -Name 'expectedProfileToken' -Default '')
+        $result = Invoke-WithDuneLock -Name 'solo-profile-data' -Script {
+            Assert-DuneSoloExpectedProfile -ExpectedProfileToken $expectedProfileToken
+            Remove-DuneSoloInventoryItem -ItemId $itemId `
+                -ExpectedStackSize $expectedStackSize -Quantity $quantity -Confirm $confirm
+        }
+        Write-DuneJson -Response $res -Body $result
+    } catch {
+        $status = if ($_.Exception.Message -like '*still running*' -or $_.Exception.Message -like '*active Solo save changed*') { 409 } else { 400 }
+        Write-DuneError -Response $res -Status $status -Message $_.Exception.Message
+    }
+}
+
+Register-DuneRoute -Method GET -Path '/api/solo/blueprints' -LocalOnly -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $expectedProfileToken = [string]$req.QueryString['expectedProfileToken']
+        $result = Invoke-WithDuneLock -Name 'solo-profile-data' -Script {
+            Assert-DuneSoloExpectedProfile -ExpectedProfileToken $expectedProfileToken
+            $profile = Get-DuneSoloProfile
+            $blueprints = Get-DuneSoloBlueprints
+            Add-Member -InputObject $blueprints -NotePropertyName profileToken `
+                -NotePropertyValue (Get-DuneSoloProfileToken -DbPath $profile.dbPath) -Force
+            return $blueprints
+        }
+        Write-DuneJson -Response $res -Body $result
+    } catch {
+        $status = if ($_.Exception.Message -like '*active Solo save changed*') { 409 } elseif ($_.Exception.Message -like '*Connect a valid Solo save*') { 400 } else { 500 }
+        Write-DuneError -Response $res -Status $status -Message $_.Exception.Message
+    }
+}
+
+Register-DuneRoute -Method GET -Path '/api/solo/blueprints/export' -LocalOnly -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $idRaw = [string]$req.QueryString['id']
+        $id = 0L
+        if (-not [long]::TryParse($idRaw, [ref]$id) -or $id -le 0) {
+            Write-DuneError -Response $res -Status 400 -Message 'Choose a saved Solo blueprint to export.'
+            return
+        }
+        $expectedProfileToken = [string]$req.QueryString['expectedProfileToken']
+        $result = Invoke-WithDuneLock -Name 'solo-profile-data' -Script {
+            Assert-DuneSoloExpectedProfile -ExpectedProfileToken $expectedProfileToken
+            Export-DuneSoloBlueprint -Id $id
+        }
+        Write-DuneJson -Response $res -Body $result
+    } catch {
+        $status = if ($_.Exception.Message -like '*active Solo save changed*') { 409 } elseif ($_.Exception.Message -like '*still running*' -or $_.Exception.Message -like '*Connect a valid Solo save*') { 400 } else { 500 }
+        Write-DuneError -Response $res -Status $status -Message $_.Exception.Message
+    }
+}
+
+Register-DuneRoute -Method POST -Path '/api/solo/blueprints/import' -LocalOnly -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $blueprint = Get-DuneSoloBodyField -Body $body -Name 'blueprint'
+        $confirm = [string](Get-DuneSoloBodyField -Body $body -Name 'confirm' -Default '')
+        $expectedProfileToken = [string](Get-DuneSoloBodyField -Body $body -Name 'expectedProfileToken' -Default '')
+        if ($null -eq $blueprint) {
+            Write-DuneError -Response $res -Status 400 -Message 'Choose a portable blueprint file to import.'
+            return
+        }
+        $result = Invoke-WithDuneLock -Name 'solo-profile-data' -Script {
+            Assert-DuneSoloExpectedProfile -ExpectedProfileToken $expectedProfileToken
+            Import-DuneSoloBlueprint -Blueprint $blueprint -Confirm $confirm
+        }
+        Write-DuneJson -Response $res -Body $result
+    } catch {
+        $status = if ($_.Exception.Message -like '*still running*' -or $_.Exception.Message -like '*active Solo save changed*') { 409 } else { 400 }
+        Write-DuneError -Response $res -Status $status -Message $_.Exception.Message
+    }
+}
+
+Register-DuneRoute -Method PUT -Path '/api/solo/currencies' -LocalOnly -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $solari = [long](Get-DuneSoloBodyField -Body $body -Name 'solari' -Default -1)
+        $scrip = [long](Get-DuneSoloBodyField -Body $body -Name 'scrip' -Default -1)
+        $confirm = [string](Get-DuneSoloBodyField -Body $body -Name 'confirm' -Default '')
+        $expectedProfileToken = [string](Get-DuneSoloBodyField -Body $body -Name 'expectedProfileToken' -Default '')
+        $result = Invoke-WithDuneLock -Name 'solo-profile-data' -Script {
+            Assert-DuneSoloExpectedProfile -ExpectedProfileToken $expectedProfileToken
+            Set-DuneSoloCurrencies -Solari $solari -Scrip $scrip -Confirm $confirm
+        }
+        Write-DuneJson -Response $res -Body $result
+    } catch {
+        $status = if ($_.Exception.Message -like '*still running*' -or $_.Exception.Message -like '*active Solo save changed*') { 409 } else { 400 }
+        Write-DuneError -Response $res -Status $status -Message $_.Exception.Message
+    }
+}
+
+Register-DuneRoute -Method POST -Path '/api/solo/fillables/water' -LocalOnly -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $itemId = [long](Get-DuneSoloBodyField -Body $body -Name 'itemId' -Default 0)
+        $confirm = [string](Get-DuneSoloBodyField -Body $body -Name 'confirm' -Default '')
+        $expectedProfileToken = [string](Get-DuneSoloBodyField -Body $body -Name 'expectedProfileToken' -Default '')
+        $result = Invoke-WithDuneLock -Name 'solo-profile-data' -Script {
+            Assert-DuneSoloExpectedProfile -ExpectedProfileToken $expectedProfileToken
+            Fill-DuneSoloWaterContainer -ItemId $itemId -Confirm $confirm
+        }
+        Write-DuneJson -Response $res -Body $result
+    } catch {
+        $status = if ($_.Exception.Message -like '*still running*' -or $_.Exception.Message -like '*active Solo save changed*') { 409 } else { 400 }
+        Write-DuneError -Response $res -Status $status -Message $_.Exception.Message
+    }
+}
+
+Register-DuneRoute -Method POST -Path '/api/solo/items/augments/max' -LocalOnly -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $confirm = [string](Get-DuneSoloBodyField -Body $body -Name 'confirm' -Default '')
+        $expectedProfileToken = [string](Get-DuneSoloBodyField -Body $body -Name 'expectedProfileToken' -Default '')
+        $result = Invoke-WithDuneLock -Name 'solo-profile-data' -Script {
+            Assert-DuneSoloExpectedProfile -ExpectedProfileToken $expectedProfileToken
+            Invoke-DuneSoloMaxAugmentAttributes -Confirm $confirm
+        }
+
+        Write-DuneJson -Response $res -Body $result
+    } catch {
+        $status = if ($_.Exception.Message -like '*still running*' -or $_.Exception.Message -like '*active Solo save changed*') { 409 } else { 400 }
+        Write-DuneError -Response $res -Status $status -Message $_.Exception.Message
+    }
+}
+
+Register-DuneRoute -Method PUT -Path '/api/solo/items/weapon-ammo' -LocalOnly -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $itemId = [long](Get-DuneSoloBodyField -Body $body -Name 'itemId' -Default 0)
+        $ammo = [long](Get-DuneSoloBodyField -Body $body -Name 'ammo' -Default -1)
+        $confirm = [string](Get-DuneSoloBodyField -Body $body -Name 'confirm' -Default '')
+        $expectedProfileToken = [string](Get-DuneSoloBodyField -Body $body -Name 'expectedProfileToken' -Default '')
+        $result = Invoke-WithDuneLock -Name 'solo-profile-data' -Script {
+            Assert-DuneSoloExpectedProfile -ExpectedProfileToken $expectedProfileToken
+            Set-DuneSoloWeaponAmmo -ItemId $itemId -Ammo $ammo -Confirm $confirm
+        }
+        Write-DuneJson -Response $res -Body $result
+    } catch {
+        $status = if ($_.Exception.Message -like '*still running*' -or $_.Exception.Message -like '*active Solo save changed*') { 409 } else { 400 }
+        Write-DuneError -Response $res -Status $status -Message $_.Exception.Message
+    }
+}
+
+Register-DuneRoute -Method POST -Path '/api/solo/progression/main-quest/unlock' -LocalOnly -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $quest = [string](Get-DuneSoloBodyField -Body $body -Name 'quest' -Default '')
+        $confirm = [string](Get-DuneSoloBodyField -Body $body -Name 'confirm' -Default '')
+        $token = [string](Get-DuneSoloBodyField -Body $body -Name 'expectedProfileToken' -Default '')
+        $result = Invoke-WithDuneLock -Name 'solo-profile-data' -Script {
+            Assert-DuneSoloExpectedProfile -ExpectedProfileToken $token
+            Unlock-DuneSoloMainQuest -Quest $quest -Confirm $confirm
+        }
+        Write-DuneJson -Response $res -Body $result
+    } catch {
+        $status = if ($_.Exception.Message -like '*still running*' -or $_.Exception.Message -like '*active Solo save changed*') { 409 } else { 400 }
+        Write-DuneError -Response $res -Status $status -Message $_.Exception.Message
+    }
+}
+
+Register-DuneRoute -Method POST -Path '/api/solo/progression/testing-stations/unlock' -LocalOnly -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $station = [string](Get-DuneSoloBodyField -Body $body -Name 'station' -Default '')
+        $confirm = [string](Get-DuneSoloBodyField -Body $body -Name 'confirm' -Default '')
+        $token = [string](Get-DuneSoloBodyField -Body $body -Name 'expectedProfileToken' -Default '')
+        $result = Invoke-WithDuneLock -Name 'solo-profile-data' -Script {
+            Assert-DuneSoloExpectedProfile -ExpectedProfileToken $token
+            Unlock-DuneSoloTestingStations -Station $station -Confirm $confirm
+        }
+        Write-DuneJson -Response $res -Body $result
+    } catch {
+        $status = if ($_.Exception.Message -like '*still running*' -or $_.Exception.Message -like '*active Solo save changed*') { 409 } else { 400 }
+        Write-DuneError -Response $res -Status $status -Message $_.Exception.Message
+    }
+}
+
+Register-DuneRoute -Method POST -Path '/api/solo/progression/trainer/unlock' -LocalOnly -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $job = [string](Get-DuneSoloBodyField -Body $body -Name 'job' -Default '')
+        $confirm = [string](Get-DuneSoloBodyField -Body $body -Name 'confirm' -Default '')
+        $token = [string](Get-DuneSoloBodyField -Body $body -Name 'expectedProfileToken' -Default '')
+        $result = Invoke-WithDuneLock -Name 'solo-profile-data' -Script {
+            Assert-DuneSoloExpectedProfile -ExpectedProfileToken $token
+            Unlock-DuneSoloTrainer -Job $job -Confirm $confirm
+        }
+        Write-DuneJson -Response $res -Body $result
+    } catch {
+        $status = if ($_.Exception.Message -like '*still running*' -or $_.Exception.Message -like '*active Solo save changed*') { 409 } else { 400 }
+        Write-DuneError -Response $res -Status $status -Message $_.Exception.Message
+    }
+}
+
+Register-DuneRoute -Method POST -Path '/api/solo/progression/specializations/max' -LocalOnly -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $confirm = [string](Get-DuneSoloBodyField -Body $body -Name 'confirm' -Default '')
+        $expectedProfileToken = [string](Get-DuneSoloBodyField -Body $body -Name 'expectedProfileToken' -Default '')
+        $result = Invoke-WithDuneLock -Name 'solo-profile-data' -Script {
+            Assert-DuneSoloExpectedProfile -ExpectedProfileToken $expectedProfileToken
+            Invoke-DuneSoloProgressionAction -Action 'max-specializations' `
+                -Confirm $confirm -ExpectedConfirm 'MAX SOLO SPECIALIZATIONS'
+        }
+        Write-DuneJson -Response $res -Body $result
+    } catch {
+        $status = if ($_.Exception.Message -like '*still running*' -or $_.Exception.Message -like '*active Solo save changed*') { 409 } else { 400 }
+        Write-DuneError -Response $res -Status $status -Message $_.Exception.Message
+    }
+}
+
+Register-DuneRoute -Method POST -Path '/api/solo/progression/find-the-fremen' -LocalOnly -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $confirm = [string](Get-DuneSoloBodyField -Body $body -Name 'confirm' -Default '')
+        $expectedProfileToken = [string](Get-DuneSoloBodyField -Body $body -Name 'expectedProfileToken' -Default '')
+        $result = Invoke-WithDuneLock -Name 'solo-profile-data' -Script {
+            Assert-DuneSoloExpectedProfile -ExpectedProfileToken $expectedProfileToken
+            Invoke-DuneSoloProgressionAction -Action 'complete-fremen' `
+                -Confirm $confirm -ExpectedConfirm 'COMPLETE FIND THE FREMEN'
+        }
+        Write-DuneJson -Response $res -Body $result
+    } catch {
+        $status = if ($_.Exception.Message -like '*still running*' -or $_.Exception.Message -like '*active Solo save changed*') { 409 } else { 400 }
+        Write-DuneError -Response $res -Status $status -Message $_.Exception.Message
+    }
+}
+
+Register-DuneRoute -Method POST -Path '/api/solo/progression/npe/complete' -LocalOnly -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $confirm = [string](Get-DuneSoloBodyField -Body $body -Name 'confirm' -Default '')
+        $expectedProfileToken = [string](Get-DuneSoloBodyField -Body $body -Name 'expectedProfileToken' -Default '')
+        $result = Invoke-WithDuneLock -Name 'solo-profile-data' -Script {
+            Assert-DuneSoloExpectedProfile -ExpectedProfileToken $expectedProfileToken
+            Invoke-DuneSoloProgressionAction -Action 'complete-npe' `
+                -Confirm $confirm -ExpectedConfirm 'COMPLETE SOLO NPE'
+        }
+        Write-DuneJson -Response $res -Body $result
+    } catch {
+        $status = if ($_.Exception.Message -like '*still running*' -or $_.Exception.Message -like '*active Solo save changed*') { 409 } else { 400 }
+        Write-DuneError -Response $res -Status $status -Message $_.Exception.Message
+    }
+}
+
+Register-DuneRoute -Method POST -Path '/api/solo/progression/reset-post-npe' -LocalOnly -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $confirm = [string](Get-DuneSoloBodyField -Body $body -Name 'confirm' -Default '')
+        $expectedProfileToken = [string](Get-DuneSoloBodyField -Body $body -Name 'expectedProfileToken' -Default '')
+        $result = Invoke-WithDuneLock -Name 'solo-profile-data' -Script {
+            Assert-DuneSoloExpectedProfile -ExpectedProfileToken $expectedProfileToken
+            Invoke-DuneSoloProgressionAction -Action 'reset-post-npe' `
+                -Confirm $confirm -ExpectedConfirm 'RESET SOLO POST NPE'
+        }
+        Write-DuneJson -Response $res -Body $result
+    } catch {
+        $status = if ($_.Exception.Message -like '*still running*' -or $_.Exception.Message -like '*active Solo save changed*') { 409 } else { 400 }
+        Write-DuneError -Response $res -Status $status -Message $_.Exception.Message
+    }
+}
+
+Register-DuneRoute -Method POST -Path '/api/solo/progression/skills/enable-all' -LocalOnly -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $confirm = [string](Get-DuneSoloBodyField -Body $body -Name 'confirm' -Default '')
+        $expectedProfileToken = [string](Get-DuneSoloBodyField -Body $body -Name 'expectedProfileToken' -Default '')
+        $result = Invoke-WithDuneLock -Name 'solo-profile-data' -Script {
+            Assert-DuneSoloExpectedProfile -ExpectedProfileToken $expectedProfileToken
+            Invoke-DuneSoloProgressionAction -Action 'enable-skills' `
+                -Confirm $confirm -ExpectedConfirm 'ENABLE SOLO SKILLS'
+        }
+        Write-DuneJson -Response $res -Body $result
+    } catch {
+        $status = if ($_.Exception.Message -like '*still running*' -or $_.Exception.Message -like '*active Solo save changed*') { 409 } else { 400 }
+        Write-DuneError -Response $res -Status $status -Message $_.Exception.Message
+    }
+}
+
+Register-DuneRoute -Method PUT -Path '/api/solo/progression/points' -LocalOnly -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $skillPoints = 0L
+        $rawSkillPoints = Get-DuneSoloBodyField -Body $body -Name 'skillPoints' -Default -1
+        $skillPointsText = [Convert]::ToString($rawSkillPoints, [Globalization.CultureInfo]::InvariantCulture)
+        if (-not [long]::TryParse(
+                $skillPointsText,
+                [Globalization.NumberStyles]::Integer,
+                [Globalization.CultureInfo]::InvariantCulture,
+                [ref]$skillPoints
+            )) {
+            throw 'Skill points must be a whole number.'
+        }
+
+        $intel = 0L
+        $rawIntel = Get-DuneSoloBodyField -Body $body -Name 'intel' -Default -1
+        $intelText = [Convert]::ToString($rawIntel, [Globalization.CultureInfo]::InvariantCulture)
+        if (-not [long]::TryParse(
+                $intelText,
+                [Globalization.NumberStyles]::Integer,
+                [Globalization.CultureInfo]::InvariantCulture,
+                [ref]$intel
+            )) {
+            throw 'Intel points must be a whole number.'
+        }
+
+        $confirm = [string](Get-DuneSoloBodyField -Body $body -Name 'confirm' -Default '')
+        $expectedProfileToken = [string](Get-DuneSoloBodyField -Body $body -Name 'expectedProfileToken' -Default '')
+        $result = Invoke-WithDuneLock -Name 'solo-profile-data' -Script {
+            Assert-DuneSoloExpectedProfile -ExpectedProfileToken $expectedProfileToken
+            Set-DuneSoloProgressionPoints -SkillPoints $skillPoints -Intel $intel -Confirm $confirm
+        }
+        Write-DuneJson -Response $res -Body $result
+    } catch {
+        $status = if ($_.Exception.Message -like '*still running*' -or $_.Exception.Message -like '*active Solo save changed*') { 409 } else { 400 }
+        Write-DuneError -Response $res -Status $status -Message $_.Exception.Message
+    }
+}
+
+Register-DuneRoute -Method GET -Path '/api/solo/diagnostics' -LocalOnly -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $expectedProfileToken = [string]$req.QueryString['expectedProfileToken']
+        $result = Invoke-WithDuneLock -Name 'solo-profile-data' -Script {
+            Assert-DuneSoloExpectedProfile -ExpectedProfileToken $expectedProfileToken
+            Export-DuneSoloDiagnostics
+        }
+        Write-DuneJson -Response $res -Body $result
+    } catch {
+        $status = if ($_.Exception.Message -like '*still running*' -or $_.Exception.Message -like '*active Solo save changed*') { 409 } else { 400 }
+        Write-DuneError -Response $res -Status $status -Message $_.Exception.Message
+    }
+}
+
+Register-DuneRoute -Method POST -Path '/api/solo/progression/faction' -LocalOnly -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $faction = [string](Get-DuneSoloBodyField -Body $body -Name 'faction' -Default '')
+        $action = [string](Get-DuneSoloBodyField -Body $body -Name 'action' -Default '')
+        $rawAmount = Get-DuneSoloBodyField -Body $body -Name 'amount' -Default 0
+        $amount = 0L
+        if (-not [long]::TryParse([Convert]::ToString($rawAmount, [Globalization.CultureInfo]::InvariantCulture), [Globalization.NumberStyles]::Integer, [Globalization.CultureInfo]::InvariantCulture, [ref]$amount)) { throw 'Reputation must be a whole number.' }
+        $confirm = [string](Get-DuneSoloBodyField -Body $body -Name 'confirm' -Default '')
+        $token = [string](Get-DuneSoloBodyField -Body $body -Name 'expectedProfileToken' -Default '')
+        $result = Invoke-WithDuneLock -Name 'solo-profile-data' -Script {
+            Assert-DuneSoloExpectedProfile -ExpectedProfileToken $token
+            Set-DuneSoloFactionProgression -Faction $faction -Action $action -Amount $amount -Confirm $confirm
+        }
+        Write-DuneJson -Response $res -Body $result
+    } catch {
+        $status = if ($_.Exception.Message -like '*still running*' -or $_.Exception.Message -like '*active Solo save changed*') { 409 } else { 400 }
+        Write-DuneError -Response $res -Status $status -Message $_.Exception.Message
+    }
+}
+
+Register-DuneRoute -Method PUT -Path '/api/solo/progression/specializations' -LocalOnly -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $track = [string](Get-DuneSoloBodyField -Body $body -Name 'track' -Default '')
+        $rawLevel = Get-DuneSoloBodyField -Body $body -Name 'level' -Default -1
+        $level = 0L
+        if (-not [long]::TryParse([Convert]::ToString($rawLevel, [Globalization.CultureInfo]::InvariantCulture), [Globalization.NumberStyles]::Integer, [Globalization.CultureInfo]::InvariantCulture, [ref]$level)) { throw 'Specialization level must be a whole number.' }
+        $confirm = [string](Get-DuneSoloBodyField -Body $body -Name 'confirm' -Default '')
+        $expectedProfileToken = [string](Get-DuneSoloBodyField -Body $body -Name 'expectedProfileToken' -Default '')
+        $result = Invoke-WithDuneLock -Name 'solo-profile-data' -Script {
+            Assert-DuneSoloExpectedProfile -ExpectedProfileToken $expectedProfileToken
+            Set-DuneSoloSpecialization -Track $track -Level $level -Confirm $confirm
+        }
+        Write-DuneJson -Response $res -Body $result
+    } catch {
+        $status = if ($_.Exception.Message -like '*still running*' -or $_.Exception.Message -like '*active Solo save changed*') { 409 } else { 400 }
+        Write-DuneError -Response $res -Status $status -Message $_.Exception.Message
+    }
+}
+
+Register-DuneRoute -Method PUT -Path '/api/solo/progression/character-xp' -LocalOnly -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $action = [string](Get-DuneSoloBodyField -Body $body -Name 'action' -Default '')
+        $amount = 0L
+        $rawAmount = Get-DuneSoloBodyField -Body $body -Name 'amount' -Default -1
+        if (-not [long]::TryParse([Convert]::ToString($rawAmount, [Globalization.CultureInfo]::InvariantCulture), [Globalization.NumberStyles]::Integer, [Globalization.CultureInfo]::InvariantCulture, [ref]$amount)) { throw 'Character XP must be a whole number.' }
+        $confirm = [string](Get-DuneSoloBodyField -Body $body -Name 'confirm' -Default '')
+        $token = [string](Get-DuneSoloBodyField -Body $body -Name 'expectedProfileToken' -Default '')
+        $result = Invoke-WithDuneLock -Name 'solo-profile-data' -Script {
+            Assert-DuneSoloExpectedProfile -ExpectedProfileToken $token
+            Set-DuneSoloCharacterXp -Action $action -Amount $amount -Confirm $confirm
+        }
+        Write-DuneJson -Response $res -Body $result
+    } catch {
+        $status = if ($_.Exception.Message -like '*still running*' -or $_.Exception.Message -like '*active Solo save changed*') { 409 } else { 400 }
+        Write-DuneError -Response $res -Status $status -Message $_.Exception.Message
+    }
+}
+
+Register-DuneRoute -Method POST -Path '/api/solo/progression/specializations/reset-rewards' -LocalOnly -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $track = [string](Get-DuneSoloBodyField -Body $body -Name 'track' -Default '')
+        $confirm = [string](Get-DuneSoloBodyField -Body $body -Name 'confirm' -Default '')
+        $expectedProfileToken = [string](Get-DuneSoloBodyField -Body $body -Name 'expectedProfileToken' -Default '')
+        $result = Invoke-WithDuneLock -Name 'solo-profile-data' -Script {
+            Assert-DuneSoloExpectedProfile -ExpectedProfileToken $expectedProfileToken
+            Reset-DuneSoloSpecializationRewards -Track $track -Confirm $confirm
+        }
+        Write-DuneJson -Response $res -Body $result
+    } catch {
+        $status = if ($_.Exception.Message -like '*still running*' -or $_.Exception.Message -like '*active Solo save changed*') { 409 } else { 400 }
+        Write-DuneError -Response $res -Status $status -Message $_.Exception.Message
+    }
+}
+
+Register-DuneRoute -Method POST -Path '/api/solo/items/repair-equipment' -LocalOnly -Handler {
+    param($req,$res,$routeParams,$body)
+    try {
+        $token = [string](Get-DuneSoloBodyField -Body $body -Name 'expectedProfileToken' -Default '')
+        $confirm = [string](Get-DuneSoloBodyField -Body $body -Name 'confirm' -Default '')
+        $result = Invoke-WithDuneLock -Name 'solo-profile-data' -Script {
+            Assert-DuneSoloExpectedProfile -ExpectedProfileToken $token
+            Repair-DuneSoloEquipment -Confirm $confirm -Destination ([string](Get-DuneSoloBodyField -Body $body -Name 'destination' -Default 'carried'))
+        }
+        Write-DuneJson -Response $res -Body $result
+    } catch {
+        $status = if ($_.Exception.Message -like '*still running*' -or $_.Exception.Message -like '*active Solo save changed*') {409} else {400}
+        Write-DuneError -Response $res -Status $status -Message $_.Exception.Message
+    }
+}
+Register-DuneRoute -Method POST -Path '/api/solo/reviewed-customization' -LocalOnly -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $id = [string](Get-DuneSoloBodyField -Body $body -Name 'customizationId' -Default '')
+        $token = [string](Get-DuneSoloBodyField -Body $body -Name 'expectedProfileToken' -Default '')
+        if ([string](Get-DuneSoloBodyField -Body $body -Name 'confirm' -Default '') -cne 'GRANT REVIEWED CUSTOMIZATION') { throw 'Confirm the selected customization.' }
+        $result = Invoke-WithDuneLock -Name 'solo-profile-data' -Script {
+            Assert-DuneSoloExpectedProfile -ExpectedProfileToken $token
+            Invoke-DuneSoloReviewedCustomization -CustomizationId $id
+        }
+        Write-DuneJson -Response $res -Body $result
+    } catch {
+        $status = if ($_.Exception.Message -like '*still running*' -or $_.Exception.Message -like '*active Solo save changed*') {409} else {400}
+        Write-DuneError -Response $res -Status $status -Message $_.Exception.Message
+    }
+}

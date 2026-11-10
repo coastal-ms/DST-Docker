@@ -1,0 +1,690 @@
+﻿# K8s.ps1
+# Wrappers for kubectl operations against the in-VM K8s cluster, used by the
+# Multi-Sietch (Experimental) page. Patch payloads cribbed from the MIT
+# dune-awakening-server-manager reference (server.js lines 1514-1659) and
+# translated to PowerShell + SSH.
+
+function Get-V6Battlegroup {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Ip)
+
+    # One cluster read keeps metadata and the resource in the same snapshot.
+    # Retry an interrupted read once; never use partial transport output.
+    for ($attempt=0; $attempt -lt 2; $attempt++) {
+        try {
+            $raw=Invoke-V6Ssh -Ip $Ip -Cmd 'sudo kubectl get battlegroups -A -o json' -TimeoutSec 30
+            $list=($raw -join "`n") | ConvertFrom-Json -ErrorAction Stop
+            $items=@($list.items)
+            if($items.Count -eq 0){throw 'No battlegroup CRD found on the VM.'}
+            $bg=$items[0]
+            $ns=[string]$bg.metadata.namespace
+            $name=[string]$bg.metadata.name
+            if(-not $ns -or -not $name){throw 'Missing battlegroup metadata.'}
+            return @{Ns=$ns;Name=$name;Bg=$bg}
+        } catch {
+            if($attempt -eq 1){
+                if($_.Exception.Message -eq 'No battlegroup CRD found on the VM.'){throw}
+                throw 'Could not read battlegroup data from the VM after two attempts. No settings were changed.'
+            }
+        }
+    }
+}
+
+function Get-V6SietchList {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Ip)
+
+    $info = Get-V6Battlegroup -Ip $Ip
+    $bg   = $info.Bg
+    $sets = $bg.spec.serverGroup.template.spec.sets
+    $worldPartitions = $bg.spec.database.template.spec.deployment.spec.worldPartitions
+
+    # A sietch is a PARTITION on the (single) non-dedicated Survival_1 set, NOT a
+    # separate set. Funcom's CRD enforces a unique `map` across server sets, so
+    # multiple Hagga shards live as multiple partition ids on the one Survival_1
+    # set (replicas == partition count). Enumerate one entry per partition.
+    $list = @()
+    $idx = 0
+    $sietchNum = 0
+    foreach ($s in $sets) {
+        $isSurvival = ($s.map -eq 'Survival_1')
+        $isDedicated = $false
+        if ($s.PSObject.Properties['dedicatedScaling']) { $isDedicated = [bool]$s.dedicatedScaling }
+        if ($isSurvival -and -not $isDedicated) {
+            $mem = '?'
+            if ($s.PSObject.Properties['resources'] -and $s.resources.PSObject.Properties['limits']) {
+                $mem = $s.resources.limits.memory
+            }
+            foreach ($partId in @($s.partitions)) {
+                $sietchNum++
+                $list += @{
+                    SetIndex     = $idx
+                    SietchNumber = $sietchNum
+                    Map          = $s.map
+                    PartitionId  = [int]$partId
+                    Partitions   = @([int]$partId)
+                    Replicas     = $s.replicas
+                    Memory       = $mem
+                }
+            }
+        }
+        $idx++
+    }
+
+    $maxPartitionId = 0
+    foreach ($wp in $worldPartitions) {
+        foreach ($p in $wp.partitions) {
+            if ($p.id -gt $maxPartitionId) { $maxPartitionId = [int]$p.id }
+        }
+    }
+
+    return @{
+        Ns                = $info.Ns
+        Name              = $info.Name
+        Sietches          = $list
+        SietchCount       = $list.Count
+        MaxPartitionId    = $maxPartitionId
+        TotalSets         = $sets.Count
+        WorldPartitions   = $worldPartitions.Count
+    }
+}
+
+# Apply a JSON-patch to the battlegroup CR over SSH and REPORT whether it
+# actually applied. The old sietch add/remove returned Success=$true regardless
+# of the kubectl result, so a rejected patch (e.g. Funcom's newer CRD refusing a
+# duplicate map across sets) looked like a success while nothing changed. This
+# captures the remote exit code so callers surface the real error.
+function _Invoke-V6BgJsonPatch {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Ip, [Parameter(Mandatory)]$Info, [Parameter(Mandatory)][array]$Patches)
+
+    $patchJson = $Patches | ConvertTo-Json -Depth 30 -Compress
+    if ($patchJson -notmatch '^\s*\[') { $patchJson = "[$patchJson]" }
+    $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($patchJson))
+    $cmd = "sudo kubectl patch battlegroup $($Info.Name) -n $($Info.Ns) --type=json -p `"`$(echo $b64 | base64 -d)`" 2>&1; echo __DST_RC=`$?"
+    $out  = Invoke-V6Ssh -Ip $Ip -Cmd $cmd -TimeoutSec 60
+    $text = (($out -join "`n")).Trim()
+    $rc   = $null
+    if ($text -match '__DST_RC=(\d+)') { $rc = [int]$Matches[1] }
+    $clean = ($text -replace '__DST_RC=\d+\s*$', '').Trim()
+    # Definitive signal is the remote exit code; fall back to text if unparsed.
+    $ok = if ($null -ne $rc) { $rc -eq 0 } else { $clean -match '(?im)\bpatched\b' -and $clean -notmatch '(?im)\b(error|invalid|Duplicate value)\b' }
+    $errText = if ($ok) { $null } else { $clean }
+    return @{ Success = [bool]$ok; Error = $errText; Raw = $clean; Rc = $rc }
+}
+
+# Split Unreal's comma-delimited ExecCmds payload without splitting commas that
+# appear inside quoted command values.
+function _Split-V6ExecCommands {
+    param([AllowEmptyString()][string]$Payload)
+
+    $commands = New-Object 'System.Collections.Generic.List[string]'
+    $current = New-Object System.Text.StringBuilder
+    $singleQuoted = $false
+    $doubleQuoted = $false
+    foreach ($ch in "$Payload".ToCharArray()) {
+        if ($ch -eq "'" -and -not $doubleQuoted) {
+            $singleQuoted = -not $singleQuoted
+            [void]$current.Append($ch)
+            continue
+        }
+        if ($ch -eq '"' -and -not $singleQuoted) {
+            $doubleQuoted = -not $doubleQuoted
+            [void]$current.Append($ch)
+            continue
+        }
+        if ($ch -eq ',' -and -not $singleQuoted -and -not $doubleQuoted) {
+            $command = $current.ToString().Trim()
+            if ($command) { $commands.Add($command) }
+            [void]$current.Clear()
+            continue
+        }
+        [void]$current.Append($ch)
+    }
+    $last = $current.ToString().Trim()
+    if ($last) { $commands.Add($last) }
+    return $commands.ToArray()
+}
+
+# Merge one command into the single ExecCmds argument Unreal reads. Repeating
+# -execcmds flags is ambiguous, so consolidate existing payloads while preserving
+# unrelated pod arguments and commands such as per-sietch display names.
+function _Set-V6ExecCommand {
+    param(
+        [object[]]$Arguments,
+        [Parameter(Mandatory)][string]$CommandName,
+        [AllowNull()][string]$Command
+    )
+
+    $plain = New-Object 'System.Collections.Generic.List[string]'
+    $commands = New-Object 'System.Collections.Generic.List[string]'
+    $namePattern = '^(?i)' + [regex]::Escape($CommandName) + '(?:\s|$)'
+    foreach ($raw in @($Arguments)) {
+        if ($null -eq $raw -or "$raw" -eq '') { continue }
+        $arg = "$raw"
+        $payload = $null
+        if ($arg -match '^(?i)-execcmds="(.*)"$') { $payload = $Matches[1] }
+        elseif ($arg -match '^(?i)-execcmds=(.*)$') { $payload = $Matches[1] }
+        else {
+            $plain.Add($arg)
+            continue
+        }
+        foreach ($existing in @(_Split-V6ExecCommands -Payload $payload)) {
+            if ($existing -notmatch $namePattern) { $commands.Add($existing) }
+        }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($Command)) { $commands.Add($Command.Trim()) }
+    if ($commands.Count -gt 0) {
+        $plain.Add('-execcmds="' + ($commands.ToArray() -join ',') + '"')
+    }
+    return $plain.ToArray()
+}
+
+function _Copy-V6PodSpec {
+    param([Parameter(Mandatory)]$PodSpec)
+    $copy = @{}
+    if ($PodSpec -is [hashtable]) {
+        foreach ($key in $PodSpec.Keys) { $copy[$key] = $PodSpec[$key] }
+    } else {
+        foreach ($prop in $PodSpec.PSObject.Properties) { $copy[$prop.Name] = $prop.Value }
+    }
+    return $copy
+}
+
+function _Test-V6PodSpecHasOverrides {
+    param([Parameter(Mandatory)][hashtable]$PodSpec)
+    foreach ($key in $PodSpec.Keys) {
+        if ($key -eq 'index') { continue }
+        if ($key -eq 'arguments' -and @($PodSpec[$key]).Count -eq 0) { continue }
+        return $true
+    }
+    return $false
+}
+
+# Sanitize a per-sietch display name for the -execcmds arg. The name is wrapped
+# in single quotes inside "-execcmds=\"Bgd.ServerDisplayName '<name>'\"", and
+# Funcom disallows ' and | in the value; strip control chars too. Empty -> $null.
+function Format-V6SietchName {
+    param([string]$Name)
+    $n = (([string]$Name) -replace "[\x00-\x1F\x7F'|]", '').Trim()
+    if ($n.Length -gt 40) { $n = $n.Substring(0, 40) }
+    if ([string]::IsNullOrWhiteSpace($n)) { return $null }
+    return $n
+}
+
+# Read the current per-partition display names from the Survival_1 set's podSpecs.
+# Returns @{ <partitionId:int> = <name:string> }.
+function Get-V6SietchNames {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Ip)
+    $info = Get-V6Battlegroup -Ip $Ip
+    $names = @{}
+    foreach ($s in $info.Bg.spec.serverGroup.template.spec.sets) {
+        $isDedicated = $false
+        if ($s.PSObject.Properties['dedicatedScaling']) { $isDedicated = [bool]$s.dedicatedScaling }
+        if ($s.map -eq 'Survival_1' -and -not $isDedicated -and $s.PSObject.Properties['podSpecs'] -and $s.podSpecs) {
+            foreach ($ps in @($s.podSpecs)) {
+                if (-not $ps.PSObject.Properties['arguments']) { continue }
+                foreach ($a in @($ps.arguments)) {
+                    if ("$a" -match "Bgd\.ServerDisplayName\s+'([^']*)'") { $names[[int]$ps.index] = $Matches[1]; break }
+                }
+            }
+        }
+    }
+    return $names
+}
+
+# Return only live DeepDesert_1 instances reported by battlegroup status.servers.
+# Static worldPartitions and set replicas are intentionally ignored: Director-
+# driven Deep Desert can be running while its template set still says replicas=0.
+function Get-V6DeepDesertInstancesFromBg {
+    param([Parameter(Mandatory)]$Bg)
+
+    $configured = @{}
+    foreach ($wp in @($Bg.spec.database.template.spec.deployment.spec.worldPartitions)) {
+        if ("$($wp.map)" -ne 'DeepDesert_1') { continue }
+        foreach ($p in @($wp.partitions)) {
+            if ($p.PSObject.Properties['id'] -and [int]$p.id -gt 0) { $configured[[int]$p.id] = $true }
+        }
+    }
+
+    $names = @{}
+    foreach ($set in @($Bg.spec.serverGroup.template.spec.sets)) {
+        if ("$($set.map)" -ne 'DeepDesert_1') { continue }
+        if ($set.PSObject.Properties['podSpecs'] -and $set.podSpecs) {
+            foreach ($ps in @($set.podSpecs)) {
+                if (-not $ps.PSObject.Properties['index'] -or -not $ps.PSObject.Properties['arguments']) { continue }
+                foreach ($arg in @($ps.arguments)) {
+                    if ("$arg" -match "Bgd\.ServerDisplayName\s+'([^']*)'") {
+                        $names[[int]$ps.index] = $Matches[1]
+                        break
+                    }
+                }
+            }
+        }
+    }
+
+    $servers = @()
+    try { $servers = @($Bg.status.servers) } catch {}
+    if (-not $servers -or $servers.Count -eq 0) {
+        try { $servers = @($Bg.status.serverGroupStatus.pods) } catch {}
+    }
+
+    $instances = New-Object 'System.Collections.Generic.List[object]'
+    $seen = New-Object 'System.Collections.Generic.HashSet[int]'
+    foreach ($server in $servers) {
+        $map = if ($server.PSObject.Properties['partitionMap']) { "$($server.partitionMap)" } else { '' }
+        if ($map -ne 'DeepDesert_1' -or -not $server.PSObject.Properties['partitionIndex']) { continue }
+        $id = [int]$server.partitionIndex
+        if ($id -le 0 -or -not $configured.ContainsKey($id) -or -not $seen.Add($id)) { continue }
+        $instances.Add([pscustomobject]@{
+            Map               = $map
+            PartitionId       = $id
+            Dimension         = if ($server.PSObject.Properties['dimensionIndex']) { [int]$server.dimensionIndex } else { 0 }
+            Phase             = if ($server.PSObject.Properties['phase']) { "$($server.phase)" } else { 'Unknown' }
+            Ready             = if ($server.PSObject.Properties['ready']) { [bool]$server.ready } else { $false }
+            GamePort          = if ($server.PSObject.Properties['gamePort']) { [int]$server.gamePort } else { 0 }
+            ServerDisplayName = if ($names.ContainsKey($id)) { [string]$names[$id] } else { $null }
+        })
+    }
+    return @($instances.ToArray() | Sort-Object PartitionId -Unique)
+}
+
+function Get-V6DeepDesertInstances {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Ip)
+    if($env:DST_HOSTING_BACKEND -eq 'docker'){return Get-DuneDockerDeepDesertInstances}
+    $info = Get-V6Battlegroup -Ip $Ip
+    $configured = @{}
+    foreach ($wp in @($info.Bg.spec.database.template.spec.deployment.spec.worldPartitions)) {
+        if ("$($wp.map)" -ne 'DeepDesert_1') { continue }
+        foreach ($p in @($wp.partitions)) {
+            if ($p.PSObject.Properties['id'] -and [int]$p.id -gt 0) { $configured[[int]$p.id] = $true }
+        }
+    }
+    return @{
+        Ns        = $info.Ns
+        Name      = $info.Name
+        Title     = if ($info.Bg.spec.PSObject.Properties['title']) { [string]$info.Bg.spec.title } else { '' }
+        ConfiguredPartitionIds = @($configured.Keys | Sort-Object)
+        Instances = @(Get-V6DeepDesertInstancesFromBg -Bg $info.Bg)
+    }
+}
+
+# Reconfigure the Survival_1 map to run exactly $Count sietches (Hagga shards),
+# optionally naming each. Single source of truth for the multi-sietch feature -
+# it replicates Funcom's own bg-util editor:
+#   * worldPartitions[Survival_1].partitions = N entries, each a UNIQUE dimension
+#     (0..N-1) with a globally-unique id. The UNIQUE DIMENSION IS REQUIRED - two
+#     partitions sharing dimension 0 leaves the 2nd Hagga pod stuck in Startup
+#     (proven live 2026-07-17; this is what an earlier naive add-partition patch
+#     got wrong).
+#   * the Survival_1 set's `partitions` = those ids, `replicas` = N.
+#   * per-partition display name -> set.podSpecs[] = { index:<id>,
+#     arguments:["-execcmds=\"Bgd.ServerDisplayName '<name>'\""] }. $Names = $null
+#     removes podSpecs entirely (revert to the Funcom global-name cascade), so no
+#     stale per-partition name lingers on the primary shard.
+# Idempotent: computes the full desired arrays and REPLACES them in one patch.
+function Set-V6SietchConfig {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Ip,
+        [Parameter(Mandatory)][int]$Count,
+        [string[]]$Names   # $null = clear names; else one per sietch (index 0 = primary)
+    )
+    if ($Count -lt 1) { throw "Sietch count must be at least 1." }
+    if ($Count -gt 6) { throw "Sietch count must be 6 or fewer." }
+
+    $info = Get-V6Battlegroup -Ip $Ip
+    $bg   = $info.Bg
+    $sets = $bg.spec.serverGroup.template.spec.sets
+    $worldPartitions = $bg.spec.database.template.spec.deployment.spec.worldPartitions
+
+    $setIdx = -1; $set = $null; $i = 0
+    foreach ($s in $sets) {
+        $isDedicated = $false
+        if ($s.PSObject.Properties['dedicatedScaling']) { $isDedicated = [bool]$s.dedicatedScaling }
+        if ($s.map -eq 'Survival_1' -and -not $isDedicated) { $setIdx = $i; $set = $s; break }
+        $i++
+    }
+    if ($setIdx -lt 0) { throw "No Survival_1 set found." }
+    $wpIdx = -1; $j = 0
+    foreach ($wp in $worldPartitions) {
+        if ($wp.map -eq 'Survival_1') { $wpIdx = $j; break }
+        $j++
+    }
+    if ($wpIdx -lt 0) { throw "No Survival_1 worldPartitions entry found." }
+
+    # Primary id = the current Survival_1 partition with dimension 0 (keep it
+    # stable so the main world never moves). Fall back to the set's first id, or 1.
+    $primaryId = 0
+    foreach ($p in @($worldPartitions[$wpIdx].partitions)) {
+        if ([int]$p.dimension -eq 0) { $primaryId = [int]$p.id; break }
+    }
+    if ($primaryId -le 0) {
+        $curParts = @($set.partitions)
+        $primaryId = if ($curParts.Count -gt 0) { [int]$curParts[0] } else { 1 }
+    }
+
+    # Existing additional Survival_1 ids (preserved in order so a shrink+grow reuses them).
+    $existingAdditional = @()
+    foreach ($p in @($worldPartitions[$wpIdx].partitions)) {
+        if ([int]$p.id -ne $primaryId) { $existingAdditional += [int]$p.id }
+    }
+    # Max id across ALL maps (new ids allocate above this to stay globally unique).
+    $maxGlobalId = 0
+    foreach ($wp in $worldPartitions) {
+        foreach ($p in $wp.partitions) { if ([int]$p.id -gt $maxGlobalId) { $maxGlobalId = [int]$p.id } }
+    }
+
+    $ids = @($primaryId); $k = 0
+    while ($ids.Count -lt $Count -and $k -lt $existingAdditional.Count) { $ids += $existingAdditional[$k]; $k++ }
+    while ($ids.Count -lt $Count) { $maxGlobalId++; $ids += $maxGlobalId }
+    $ids = @($ids | Select-Object -First $Count)
+
+    $wpParts = @()
+    for ($d = 0; $d -lt $Count; $d++) {
+        $wpParts += @{ dimension = $d; disable = $false; id = $ids[$d]; maxX = 1; maxY = 1; minX = 0; minY = 0 }
+    }
+
+    $existingPodSpecs = @{}
+    if ($set.PSObject.Properties['podSpecs'] -and $set.podSpecs) {
+        foreach ($podSpec in @($set.podSpecs)) {
+            if ($podSpec.PSObject.Properties['index']) {
+                $existingPodSpecs[[int]$podSpec.index] = $podSpec
+            }
+        }
+    }
+    $podSpecs = @()
+    for ($d = 0; $d -lt $Count; $d++) {
+        $id = [int]$ids[$d]
+        $podSpec = if ($existingPodSpecs.ContainsKey($id)) {
+            _Copy-V6PodSpec -PodSpec $existingPodSpecs[$id]
+        } else {
+            @{ index = $id }
+        }
+        $raw = if ($null -ne $Names -and $d -lt $Names.Count) { $Names[$d] } else { '' }
+        $nm = Format-V6SietchName $raw
+        $nameCommand = if ($nm) { "Bgd.ServerDisplayName '$nm'" } else { $null }
+        $podSpec.arguments = @(_Set-V6ExecCommand -Arguments @($podSpec.arguments) `
+            -CommandName 'Bgd.ServerDisplayName' -Command $nameCommand)
+        if (_Test-V6PodSpecHasOverrides -PodSpec $podSpec) { $podSpecs += $podSpec }
+    }
+    if ($podSpecs.Count -eq 0) { $podSpecs = $null }
+
+    $setPath = "/spec/serverGroup/template/spec/sets/$setIdx"
+    $wpPath  = "/spec/database/template/spec/deployment/spec/worldPartitions/$wpIdx"
+    $patches = @()
+    $opParts = if ($set.PSObject.Properties['partitions']) { 'replace' } else { 'add' }
+    $patches += @{ op = $opParts; path = "$setPath/partitions"; value = $ids }
+    $opReps = if ($set.PSObject.Properties['replicas']) { 'replace' } else { 'add' }
+    $patches += @{ op = $opReps; path = "$setPath/replicas"; value = $Count }
+    $hasPodSpecs = ($set.PSObject.Properties['podSpecs'] -and $null -ne $set.podSpecs)
+    if ($null -ne $podSpecs) {
+        $opPod = if ($hasPodSpecs) { 'replace' } else { 'add' }
+        $patches += @{ op = $opPod; path = "$setPath/podSpecs"; value = $podSpecs }
+    } elseif ($hasPodSpecs) {
+        $patches += @{ op = 'remove'; path = "$setPath/podSpecs" }
+    }
+    $opWp = if ($worldPartitions[$wpIdx].PSObject.Properties['partitions']) { 'replace' } else { 'add' }
+    $patches += @{ op = $opWp; path = "$wpPath/partitions"; value = $wpParts }
+
+    $res = _Invoke-V6BgJsonPatch -Ip $Ip -Info $info -Patches $patches
+    if (-not $res.Success) { return @{ Success = $false; Error = $res.Error; Raw = $res.Raw } }
+
+    $applied = @()
+    for ($d = 0; $d -lt $Count; $d++) {
+        $nm = if ($null -ne $Names -and $d -lt $Names.Count) { Format-V6SietchName $Names[$d] } else { $null }
+        $applied += @{ dimension = $d; partitionId = $ids[$d]; name = $nm }
+    }
+    return @{ Success = $true; Count = $Count; Sietches = $applied; Raw = $res.Raw }
+}
+
+# Maps whose startup command line should carry DST's console-variable overrides.
+#
+# Survival_1 is Hagga Basin. DeepDesert_1 was missing until 13.3.0, which meant
+# NO console variable ever applied out there - fuel burn, mining multipliers,
+# sandworm behaviour, vehicle heat, all of it ran at Funcom's defaults in the
+# Deep Desert while working correctly on Hagga. It went unnoticed because DST
+# used to mirror every console variable into the admin's own client Engine.ini,
+# and the client copy covered the gap; when v13.2.4 narrowed that mirror to
+# field-proven keys only, the Deep Desert reverted to stock and looked like a
+# regression.
+#
+# Overmap is deliberately absent: it is the travel/world-map service, not a
+# gameplay map, and patching it would restart it for no behavioural gain.
+$script:V6ConsoleVariableTargetMaps = @('Survival_1', 'DeepDesert_1')
+
+# Apply selected server CVars through each gameplay map's command line as well
+# as UserEngine.ini. One podSpec is required per partition.
+function Set-V6ConsoleVariableOverrides {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Ip,
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Names,
+        [hashtable]$Values = @{},
+        [hashtable]$ManagedNames = @{}
+    )
+
+    $normalized = @{}
+    $namesToApply = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($name in $Names) {
+        if (-not $namesToApply.Contains($name)) { $namesToApply.Add($name) }
+        $raw = if ($Values.ContainsKey($name)) { "$($Values[$name])".Trim() } else { '' }
+        if ([string]::IsNullOrWhiteSpace($raw)) {
+            $normalized[$name] = $null
+            continue
+        }
+        # Preserve numeric normalization and canonical booleans, but allow safe
+        # string-valued CVars too. ExecCmds is comma-delimited, so commas and
+        # quotes cannot be represented safely in one command payload.
+        if ($raw -match '^(?i:true|false)$') {
+            $normalized[$name] = $raw.ToLowerInvariant()
+            continue
+        }
+        $number = 0.0
+        $style = [System.Globalization.NumberStyles]::Float
+        $culture = [System.Globalization.CultureInfo]::InvariantCulture
+        if ([double]::TryParse($raw, $style, $culture, [ref]$number) -and
+            -not [double]::IsNaN($number) -and -not [double]::IsInfinity($number)) {
+            $normalized[$name] = $number.ToString('0.################', $culture)
+            continue
+        }
+        if ($raw.Length -gt 512 -or $raw -match '[,\x00-\x1F\x7F"]') {
+            throw "$name contains a comma, quote, control character, or exceeds 512 characters and cannot be encoded in ExecCmds."
+        }
+        $normalized[$name] = $raw
+    }
+
+    if($env:DST_HOSTING_BACKEND -eq 'docker'){
+        $reply=Invoke-DuneDockerManager -Request @{action='settings.startup';values=$normalized}
+        if(-not $reply.ok){throw $reply.error}
+        return $reply.data
+    }
+
+    $info = Get-V6Battlegroup -Ip $Ip
+    $sets = $info.Bg.spec.serverGroup.template.spec.sets
+
+    # Add only stale DST-managed commands that already exist in pod specs. This
+    # removes cleared overrides without walking every blank catalog key for every
+    # partition. Unrelated ExecCmds entries remain untouched.
+    if ($ManagedNames.Count -gt 0) {
+        foreach ($set in @($sets)) {
+            foreach ($podSpec in @($set.podSpecs)) {
+                foreach ($argument in @($podSpec.arguments)) {
+                    $payload = $null
+                    if ("$argument" -match '^(?i)-execcmds="(.*)"$') { $payload = $Matches[1] }
+                    elseif ("$argument" -match '^(?i)-execcmds=(.*)$') { $payload = $Matches[1] }
+                    if ($null -eq $payload) { continue }
+                    foreach ($command in @(_Split-V6ExecCommands -Payload $payload)) {
+                        if ("$command" -notmatch '^\s*(\S+)') { continue }
+                        $existingName = $Matches[1]
+                        if ($ManagedNames.ContainsKey($existingName) -and -not $normalized.ContainsKey($existingName)) {
+                            $normalized[$existingName] = $null
+                            $namesToApply.Add($existingName)
+                        }
+                    }
+                }
+            }
+        }
+    }
+    # Live instances, used to find partition ids for director-managed sets. A
+    # dedicatedScaling set (the Deep Desert) carries an EMPTY partitions array
+    # and replicas=0 even while its pod is running, so status.servers[] is the
+    # only place its partition index appears.
+    $liveByMap = @{}
+    foreach ($srv in @($info.Bg.status.servers)) {
+        if ($null -eq $srv) { continue }
+        if (-not $srv.PSObject.Properties['partitionMap']) { continue }
+        $m = "$($srv.partitionMap)"
+        if (-not $m) { continue }
+        if (-not $liveByMap.ContainsKey($m)) { $liveByMap[$m] = @() }
+        if ($srv.PSObject.Properties['partitionIndex'] -and $null -ne $srv.partitionIndex) {
+            $liveByMap[$m] += [int]$srv.partitionIndex
+        }
+    }
+
+    $patches = @()
+    $foundTarget = $false
+    for ($setIndex = 0; $setIndex -lt $sets.Count; $setIndex++) {
+        $set = $sets[$setIndex]
+        if ($script:V6ConsoleVariableTargetMaps -notcontains "$($set.map)") { continue }
+        $foundTarget = $true
+
+        $byIndex = @{}
+        foreach ($existing in @($set.podSpecs)) {
+            if ($null -eq $existing) { continue }
+            if ($existing.PSObject.Properties['index']) { $byIndex[[int]$existing.index] = $existing }
+        }
+        # A dedicated set carries no partitions at all. Guard the cast: piping a
+        # null through [int] yields 0, which would invent a podSpec for a
+        # partition that does not exist.
+        $partitionIds = @(@($set.partitions) | Where-Object { $null -ne $_ -and "$_" -ne '' } | ForEach-Object { [int]$_ })
+        $liveIds = @()
+        if ($liveByMap.ContainsKey("$($set.map)")) { $liveIds = @($liveByMap["$($set.map)"]) }
+        $isDedicated = ($set.PSObject.Properties['dedicatedScaling'] -and [bool]$set.dedicatedScaling)
+        # Non-dedicated sets have an authoritative partitions list, so carrying
+        # old podSpec indexes forward leaves duplicate dead templates behind.
+        # Dedicated sets keep dormant podSpecs because their partitions list is
+        # intentionally empty while stopped; live status only supplies an index
+        # while that map is running.
+        $allIds = if ($isDedicated) {
+            @(@($byIndex.Keys) + $liveIds | Sort-Object -Unique)
+        } else {
+            @($partitionIds + $liveIds | Sort-Object -Unique)
+        }
+        $podSpecs = @()
+        $existingIds = @($byIndex.Keys | Sort-Object -Unique)
+        $changed = @(
+            Compare-Object -ReferenceObject $existingIds -DifferenceObject @($allIds)
+        ).Count -gt 0
+        foreach ($id in $allIds) {
+            $podSpec = if ($byIndex.ContainsKey([int]$id)) {
+                _Copy-V6PodSpec -PodSpec $byIndex[[int]$id]
+            } else {
+                @{ index = [int]$id }
+            }
+            $arguments = @($podSpec.arguments)
+            $before = ($arguments -join "`u{1}")
+            foreach ($name in $namesToApply) {
+                $command = if ($null -ne $normalized[$name]) { "$name $($normalized[$name])" } else { $null }
+                $arguments = @(_Set-V6ExecCommand -Arguments $arguments `
+                    -CommandName $name -Command $command)
+            }
+            if (($arguments -join "`u{1}") -ne $before) { $changed = $true }
+            $podSpec.arguments = $arguments
+            if (_Test-V6PodSpecHasOverrides -PodSpec $podSpec) { $podSpecs += $podSpec }
+        }
+
+        # Patch only when a pod's startup arguments actually differ. Every
+        # battlegroup restart rebuilds these from the INI, and most servers set no
+        # console variables at all - rewriting an identical podSpec list would bump
+        # the battlegroup on their behalf for no reason.
+        if (-not $changed) { continue }
+
+        $path = "/spec/serverGroup/template/spec/sets/$setIndex/podSpecs"
+        $hasPodSpecs = ($set.PSObject.Properties['podSpecs'] -and $null -ne $set.podSpecs)
+        if ($podSpecs.Count -gt 0) {
+            $patches += @{
+                op = if ($hasPodSpecs) { 'replace' } else { 'add' }
+                path = $path
+                value = $podSpecs
+            }
+        } elseif ($hasPodSpecs) {
+            $patches += @{ op = 'remove'; path = $path }
+        }
+    }
+    if ($patches.Count -eq 0) {
+        if ($foundTarget) {
+            return @{ Success = $true; NoChange = $true; Raw = ''; Values = $normalized }
+        }
+        return @{ Success = $false; Error = "No server set found for any of: $($script:V6ConsoleVariableTargetMaps -join ', ')."; Values = $normalized }
+    }
+
+    $result = _Invoke-V6BgJsonPatch -Ip $Ip -Info $info -Patches $patches
+    return @{
+        Success = [bool]$result.Success
+        Error   = $result.Error
+        Raw     = $result.Raw
+        Values  = $normalized
+    }
+}
+
+function Set-V6FuelBurningMultiplier {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Ip,
+        [AllowNull()][string]$Value
+    )
+    $result = Set-V6ConsoleVariableOverrides -Ip $Ip `
+        -Names @('dw.FuelBurningMultiplier') `
+        -Values @{ 'dw.FuelBurningMultiplier' = $Value }
+    $result.Value = $result.Values['dw.FuelBurningMultiplier']
+    return $result
+}
+
+function Set-V6BattlegroupTitle {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Ip,
+        [Parameter(Mandatory)][string]$Title
+    )
+
+    # The player-facing server name shown in the in-game server browser and on
+    # status pages (e.g. dunestatus) is the battlegroup CRD's spec.title. It is
+    # owned by the user-side kubectl manager (NOT the operator), so a direct
+    # JSON-patch sticks and is not reverted on reconcile. The title is injected
+    # into pod env (BATTLEGROUP_TITLE / gateway_display_name) and several
+    # configmaps, so the operator must recreate the pods to apply it: renaming
+    # therefore RESTARTS the battlegroup (players disconnect briefly). Identity,
+    # PVC and world data key off the immutable metadata.name, never the title,
+    # so a rename never risks data loss.
+    $clean = ([string]$Title -replace '[\x00-\x1F\x7F]', '').Trim()
+    if ([string]::IsNullOrWhiteSpace($clean)) { throw "Server name cannot be empty." }
+    if ($clean.Length -gt 64) { throw "Server name must be 64 characters or fewer." }
+
+    $info = Get-V6Battlegroup -Ip $Ip
+    $old  = ''
+    if ($info.Bg.PSObject.Properties['spec'] -and $info.Bg.spec.PSObject.Properties['title']) {
+        $old = "$($info.Bg.spec.title)"
+    }
+
+    # 'add' replaces the value when the member already exists (RFC 6902) and
+    # also covers the unlikely case where title is absent. The whole patch is
+    # base64-encoded and decoded on the remote, so the title value never touches
+    # the shell command line - no injection risk regardless of its characters.
+    $patches = @( @{ op = 'add'; path = '/spec/title'; value = $clean } )
+    $patchJson = $patches | ConvertTo-Json -Depth 10 -Compress
+    if ($patchJson -notmatch '^\s*\[') { $patchJson = "[$patchJson]" }
+    $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($patchJson))
+    $cmd = "sudo kubectl patch battlegroup $($info.Name) -n $($info.Ns) --type=json -p `"`$(echo $b64 | base64 -d)`" 2>&1"
+    $out = Invoke-V6Ssh -Ip $Ip -Cmd $cmd -TimeoutSec 60
+    $raw = (($out -join "`n")).Trim()
+    $ok  = ($raw -match 'patched' -or $raw -match 'no change')
+    return @{
+        Success  = [bool]$ok
+        OldTitle = $old
+        NewTitle = $clean
+        Raw      = $raw
+    }
+}

@@ -1,0 +1,107 @@
+import React from 'react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { SoloMods } from '../../src/components/solo/SoloMods'
+const request = vi.hoisted(() => vi.fn())
+const shell = vi.hoisted(() => ({ isShellHost: vi.fn(), openShellFolder: vi.fn() }))
+vi.mock('../../src/api/client', () => ({ api: request }))
+vi.mock('../../src/util/shellBridge', () => shell)
+vi.mock('../../src/components/CollapsibleCard', () => ({ CollapsibleCard: ({ children, headerRight }: { children: React.ReactNode; headerRight: React.ReactNode }) => <div><div data-testid="card-header">{headerRight}</div>{children}</div> }))
+const mods = ['First', 'Second', 'Third'].map(name => ({ folder: name, id: name, name, version: '', enabled: true, errors: [] }))
+afterEach(() => { cleanup(); vi.resetAllMocks(); vi.restoreAllMocks() })
+describe('Solo mod shortcuts and ordering', () => {
+  it('shows actual runtime and fallback separately from the saved runtime choice', async () => {
+    request.mockResolvedValue({mods, gamePath:'C:/Dune', runtimeReady:true, runtimePreferenceVersion:'3.0.1-1164-g5e627997', runtimeVersions:[{version:'3.0.1-1140-gf58e8f84',label:'1140 — default'},{version:'3.0.1-1164-g5e627997',label:'1164 — newer, optional'},{version:'future-test',label:'Future bundled version'}], runtimeVersion:'3.0.1-1140-gf58e8f84', runtimeFallback:true, runtimeWarnings:['First declares UE4SS 1164; selected runtime is 1140.'], session:null})
+    render(<SoloMods />)
+    const choice=await screen.findByRole('combobox', {name:'UE4SS runtime'})
+    expect(choice).toHaveValue('3.0.1-1164-g5e627997')
+    expect(screen.getByRole('option',{name:'Future bundled version'})).toBeInTheDocument()
+    expect(screen.getByText(/Selected for next mod launch:/)).toHaveTextContent('Selected for next mod launch: UE4SS 3.0.1-1140-gf58e8f84')
+    expect(screen.getByText(/newer runtime failed to initialize/)).toBeInTheDocument()
+    expect(screen.getByText(/First declares UE4SS/)).toBeInTheDocument()
+    fireEvent.change(choice, {target:{value:'3.0.1-1140-gf58e8f84'}})
+    await waitFor(()=>expect(request).toHaveBeenCalledWith('/api/solo/mods/selection',expect.objectContaining({body:JSON.stringify({mods,gamePath:'C:/Dune',platform:'steam',runtimeVersion:'3.0.1-1140-gf58e8f84'})})))
+  })
+  it('shows refresh progress, prevents repeat clicks and reports completion', async () => {
+    const state = { mods: [], gamePath: 'C:/Dune', runtimeReady: true, session: null }
+    request.mockResolvedValue(state)
+    render(<SoloMods />)
+    await screen.findByRole('button', { name: 'Repair mod runtime' })
+    let complete!: (value: typeof state) => void
+    request.mockReturnValueOnce(new Promise(resolve => { complete = resolve }))
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }))
+    expect(screen.getByRole('button', { name: 'Refreshing…' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Refreshing…' })).toHaveAttribute('aria-busy', 'true')
+    complete(state)
+    expect(await screen.findByText('Mod list refreshed.')).toBeInTheDocument()
+    request.mockRejectedValueOnce(new Error('Cannot read mod list'))
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Cannot read mod list')
+    expect(screen.getByRole('button', { name: 'Refresh' })).toBeEnabled()
+  })
+  it('opens the backend Mods path through the desktop shell and surfaces shell failure', async () => {
+    const state = { mods: [], gamePath: 'C:/Dune', runtimeReady: true, session: null }
+    request.mockResolvedValue(state)
+    shell.isShellHost.mockReturnValue(true)
+    render(<SoloMods />)
+    await screen.findByRole('button', { name: 'Repair mod runtime' })
+    request.mockResolvedValueOnce({ path: 'C:/DST/Mods' })
+    shell.openShellFolder.mockRejectedValueOnce(new Error('Explorer could not start'))
+    fireEvent.click(screen.getByRole('button', { name: 'Open Mods Folder' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Explorer could not start')
+    expect(request).toHaveBeenCalledWith('/api/solo/mods/open', { method: 'POST', body: JSON.stringify({ desktop: true }) })
+    expect(shell.openShellFolder).toHaveBeenCalledWith('C:/DST/Mods')
+    expect(screen.queryByText('Mods folder opening in File Explorer.')).not.toBeInTheDocument()
+  })
+  it('keeps runtime repair in the card header and reports install errors', async () => {
+    request.mockResolvedValue({ mods: [], gamePath: 'C:/Dune', runtimeReady: true, session: null })
+    render(<SoloMods />)
+    const repair = await screen.findByRole('button', { name: 'Repair mod runtime' })
+    expect(screen.getByTestId('card-header')).toContainElement(repair)
+    request.mockRejectedValueOnce(new Error('Runtime extraction failed'))
+    fireEvent.click(repair)
+    expect(await screen.findByRole('alert')).toHaveTextContent('Runtime extraction failed')
+    expect(repair).toBeEnabled()
+    fireEvent.click(repair)
+    expect(await screen.findByText('Mod runtime installed and verified. Saves, installed mods and mod selections were kept.')).toBeInTheDocument()
+  })
+  it('keeps built-in tank support out of the selectable mod list and uses ordinary Solo launch', async () => {
+    request.mockResolvedValue({ mods: [{ ...mods[0], id: 'dst-regis-tanks', name: 'Regis Tanks' }], gamePath: 'C:/Dune', runtimeReady: true, session: null })
+    render(<SoloMods />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Launch Solo' }))
+    await waitFor(() => expect(request).toHaveBeenCalledWith('/api/solo/mods/launch', expect.objectContaining({ body: JSON.stringify({ withMods: false }) })))
+    expect(screen.queryByText('Regis Tanks')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Install Regis Tanks' })).not.toBeInTheDocument()
+  })
+  it('persists the dropped order with enabled flags intact', async () => {
+    request.mockResolvedValue({ mods, gamePath: 'C:/Dune', soloArguments: '', runtimeReady: true, session: null })
+    render(<SoloMods />)
+    const drag = await screen.findByRole('button', { name: 'Reorder Third' })
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      const label = this.querySelector('button[aria-label^="Reorder"]')?.getAttribute('aria-label')
+      const index = label ? ['Reorder First', 'Reorder Second', 'Reorder Third'].indexOf(label) : 0
+      return { x: 0, y: index * 100, top: index * 100, bottom: index * 100 + 80, left: 0, right: 400, width: 400, height: 80, toJSON: () => ({}) }
+    })
+    drag.focus()
+    fireEvent.keyDown(drag, { code: 'Space' })
+    await new Promise(resolve => setTimeout(resolve, 20))
+    const preview = document.body.querySelector('.shadow-lg')
+    expect(preview).not.toBeNull()
+    expect(preview!.parentElement!.parentElement).toBe(document.body)
+    fireEvent.keyDown(document, { code: 'ArrowUp' })
+    fireEvent.keyDown(document, { code: 'ArrowUp' })
+    fireEvent.keyDown(document, { code: 'Space' })
+    await waitFor(() => expect(request).toHaveBeenCalledWith('/api/solo/mods/selection', expect.anything()))
+    const call = request.mock.calls.find(call => call[0] === '/api/solo/mods/selection')!
+    const saved = JSON.parse(call[1].body).mods
+    expect(saved.map((mod: { folder: string }) => mod.folder)).toEqual(['Third', 'First', 'Second'])
+    expect(saved.every((mod: { enabled: boolean }) => mod.enabled)).toBe(true)
+  })
+  it('creates a shortcut without launching the game', async () => {
+    request.mockResolvedValue({ mods, gamePath: 'C:/Dune', soloArguments: '', runtimeReady: true, session: null })
+    render(<SoloMods />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Create desktop shortcut' }))
+    await waitFor(() => expect(request).toHaveBeenCalledWith('/api/solo/mods/shortcut', expect.objectContaining({ method: 'POST' })))
+    expect(request.mock.calls.some(call => call[0] === '/api/solo/mods/launch')).toBe(false)
+  })
+})

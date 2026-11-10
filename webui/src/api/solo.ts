@@ -1,0 +1,698 @@
+import { api } from './client'
+import type { AugmentSelection, BlueprintFile } from './gameplay'
+
+export interface SoloProcess {
+  name: string
+  pid: number
+}
+
+export interface SoloProfile {
+  platform?: 'steam' | 'xbox'
+  dataRoot?: string
+  id: string
+  channel: string
+  adapter?: string
+  legacy?: boolean
+  dbPath: string
+  modifiedAt: string
+  bytes: number
+}
+
+export interface SoloInspection {
+  ok: boolean
+  sourcePath: string
+  wrappedBytes: number
+  wrappedSha256: string
+  wrapperVersion: number
+  declaredSqliteBytes: number
+  actualSqliteBytes: number
+  integrity: string
+  foreignKeyViolations: number
+  tableCount: number
+  characterCount: number
+  schemaFingerprint: string
+  mapSeed: number | null
+  inventories: SoloInventoryDestination[]
+  inventoryItems: SoloInventoryItemGroup[]
+  rangedWeapons: SoloRangedWeapon[]
+  currencies: {
+    solari: number
+    scrip: number
+  }
+  fillables: SoloFillableItem[]
+  progression: SoloProgressionSummary
+}
+
+export interface SoloProgressionSummary {
+  specializations: Array<{
+    trackType: number
+    level: number
+    xp: number
+  }>
+  purchasedRewards: number
+  fremenNodesTotal: number
+  fremenNodesComplete: number
+  npeNodesTotal: number
+  npeNodesComplete: number
+  npeTagPresent: boolean
+  spiceSystemStatus: string
+  spiceVisionStatus: string
+  skillsAtSeven: number
+  moduleKeyCount: number
+  totalSkillPoints: number
+  unspentSkillPoints: number
+  keystoneBonusSkillPoints: number
+  intel: number
+  characterXp?: number | null
+}
+
+export interface SoloFillableItem {
+  itemId: number
+  templateId: string
+  label: string
+  currentAmount: number
+  capacity: number
+}
+
+export interface SoloInventoryDestination {
+  id: number
+  key: string
+  label: string
+  kind: 'backpack' | 'bank' | 'developer-storage' | 'storage'
+  itemRows: number
+  maxItemCount: number
+  maxItemVolume: number
+  usedVolume: number
+}
+
+export interface SoloInventoryItemGroup {
+  inventoryId: number
+  destinationKey: string
+  destinationLabel: string
+  destinationKind: SoloInventoryDestination['kind'] | 'equipment'
+  templateId: string
+  displayName: string
+  totalQuantity: number
+  occurrenceCount: number
+  minQuality: number
+  maxQuality: number
+  occurrences?: SoloInventoryItemOccurrence[]
+}
+
+export interface SoloInventoryItemOccurrence {
+  itemId: number
+  stackSize: number
+  quality: number
+  templateId: string
+  revision?: string
+  durabilityStats?: { CurrentDurability?: number; MaxDurability?: number; DecayedMaxDurability?: number } | null
+  waterStats?: { CurrentAmount?: number; MaxAmount?: number } | null
+}
+
+export function editSoloInventoryItem(item: SoloInventoryItemOccurrence, field: 'stack' | 'water' | 'durability',
+  values: Record<string, number>, expectedProfileToken: string): Promise<{ ok: boolean; inspection: SoloInspection; safetyBackup: string }> {
+  return api('/api/solo/items/edit', { method: 'POST', body: JSON.stringify({ itemId: item.itemId,
+    revision: item.revision, field, values, expectedProfileToken, confirm: 'EDIT SOLO ITEM' }) })
+}
+
+export interface SoloRangedWeapon {
+  itemId: number
+  inventoryId: number
+  destinationKey: string
+  destinationLabel: string
+  templateId: string
+  displayName: string
+  currentAmmo: number
+}
+
+export type SoloUnlockKind = 'building-sets' | 'armor' | 'weapon' | 'vehicle' | 'dyes' | 'house' | 'placeables'
+export interface SoloCosmeticOwnership {
+  reviewedCounts?: Record<string, {total: number; owned: number; remaining: number}>
+  available: boolean
+  owned: string[]
+  unlocked: string[]
+  pending: string[]
+  error: string
+}
+
+export function grantSoloUnlocks(kind: SoloUnlockKind, expectedProfileToken: string): Promise<{
+  ok: boolean; submitted: number; remaining: number; skipped: number; safetyBackup?: string
+}> {
+  return api('/api/solo/grant-unlocks', {
+    method: 'POST', body: JSON.stringify({ kind, expectedProfileToken }),
+  })
+}
+
+export interface SoloStatus {
+  ok: boolean
+  supported: boolean
+  platform: string
+  connected: boolean
+  dataRoot: string
+  dbPath: string
+  profileToken: string
+  settingsPath: string
+  adapter: string
+  channel: string
+  legacyAdapter: boolean
+  profiles: SoloProfile[]
+  gameRunning: boolean
+  processes: SoloProcess[]
+  helperAvailable: boolean
+  inspection: SoloInspection | null
+  inspectionError: string
+  cosmeticOwnership?: SoloCosmeticOwnership
+  backupRoot: string
+}
+
+export interface SoloRuntime {
+  ok: boolean
+  supported: boolean
+  platform: string
+  gameRunning: boolean
+  processes: SoloProcess[]
+  helperAvailable: boolean
+}
+
+export interface SoloDiscovery {
+  ok: boolean
+  dataRoot: string
+  settingsPath: string
+  profiles: SoloProfile[]
+  suggestedDbPath: string
+}
+
+export interface SoloSetting {
+  key: string
+  value: string
+  present: boolean
+  needsApply?: boolean
+}
+
+export interface SoloSettingsResponse {
+  ok: boolean
+  path: string
+  exists: boolean
+  section: string
+  entries: SoloSetting[]
+}
+
+export interface SoloConsoleSetting extends SoloSetting {
+  type: 'bool01' | 'int' | 'float'
+  default: string
+  min: number | null
+  max: number | null
+  label: string
+  help: string
+  status: 'Confirmed' | 'Unconfirmed'
+}
+
+export interface SoloConsoleSettingsResponse {
+  ok: boolean
+  supported: boolean
+  adapter: string
+  path: string
+  exists: boolean
+  section: string
+  entries: SoloConsoleSetting[]
+}
+
+export interface SoloBackup {
+  characterName?: string | null
+  name: string
+  relativePath: string
+  bytes: number
+  createdAt: string
+  modifiedAt: string
+  source?: 'local' | 'archive'
+}
+
+export interface SoloBackupsResponse {
+  ok: boolean
+  backups: SoloBackup[]
+  root: string
+  archiveRoot?: string
+  archiveUnavailable?: boolean
+}
+
+export function restoreSoloBackupFile(path: string, expectedProfileToken: string): Promise<{ ok: boolean; path: string; safetyBackup: string; inspection: SoloInspection }> {
+  return api('/api/solo/restore-file', { method: 'POST', body: JSON.stringify({ path, expectedProfileToken, confirm: 'RESTORE SOLO SAVE' }) })
+}
+
+export function getSoloStatus(): Promise<SoloStatus> {
+  return api<SoloStatus>('/api/solo/status')
+}
+
+export function getSoloRuntime(): Promise<SoloRuntime> {
+  return api<SoloRuntime>('/api/solo/runtime')
+}
+
+export function discoverSolo(path: string, platform: 'auto' | 'steam' | 'xbox' = 'auto'): Promise<SoloDiscovery> {
+  return api<SoloDiscovery>('/api/solo/discover', {
+    method: 'POST',
+    body: JSON.stringify({ path, ...(platform === 'auto' ? {} : { platform }) }),
+  })
+}
+
+export function connectSolo(path: string, dbPath = ''): Promise<SoloStatus> {
+  return api<SoloStatus>('/api/solo/connect', {
+    method: 'POST',
+    body: JSON.stringify({ path, dbPath }),
+  })
+}
+
+export function getSoloSettings(): Promise<SoloSettingsResponse> {
+  return api<SoloSettingsResponse>('/api/solo/settings')
+}
+
+export function saveSoloSettings(settings: Record<string, string>, expectedProfileToken: string): Promise<{
+  ok: boolean
+  settings: SoloSettingsResponse
+  backupPath: string
+}> {
+  return api('/api/solo/settings', {
+    method: 'PUT',
+    body: JSON.stringify({ settings, expectedProfileToken, confirm: 'APPLY SOLO SETTINGS' }),
+  })
+}
+
+export function saveSoloConsoleSettings(
+  settings: Record<string, string>,
+  expectedProfileToken: string,
+): Promise<{
+  ok: boolean
+  settings: SoloConsoleSettingsResponse
+  backupPath: string
+  backupPaths: string[]
+  paths: string[]
+}> {
+  return api('/api/solo/console-settings', {
+    method: 'PUT',
+    body: JSON.stringify({
+      settings,
+      expectedProfileToken,
+      confirm: 'APPLY SOLO CONSOLE SETTINGS',
+    }),
+  })
+}
+
+export function getSoloBackups(): Promise<SoloBackupsResponse> {
+  return api<SoloBackupsResponse>('/api/solo/backups')
+}
+
+export function createSoloBackup(expectedProfileToken: string): Promise<{ ok: boolean; path: string; inspection: SoloInspection }> {
+  return api('/api/solo/backups', {
+    method: 'POST',
+    body: JSON.stringify({ expectedProfileToken }),
+  })
+}
+
+export function deleteSoloBackup(
+  relativePath: string,
+  expectedProfileToken: string,
+): Promise<{ ok: boolean; deleted: string }> {
+  return api('/api/solo/backups', {
+    method: 'DELETE',
+    body: JSON.stringify({
+      relativePath,
+      expectedProfileToken,
+      confirm: 'DELETE SOLO BACKUP',
+    }),
+  })
+}
+
+export function deleteSoloBackups(
+  relativePaths: string[],
+  expectedProfileToken: string,
+): Promise<{ ok: boolean; deleted: string[]; deletedCount: number }> {
+  return api('/api/solo/backups', {
+    method: 'DELETE',
+    body: JSON.stringify({
+      relativePaths,
+      expectedProfileToken,
+      confirm: 'DELETE SOLO BACKUPS',
+    }),
+  })
+}
+
+export function restoreSoloBackup(relativePath: string, expectedProfileToken: string): Promise<{
+  ok: boolean
+  path: string
+  safetyBackup: string
+  inspection: SoloInspection
+}> {
+  return api('/api/solo/restore', {
+    method: 'POST',
+    body: JSON.stringify({ relativePath, expectedProfileToken, confirm: 'RESTORE SOLO SAVE' }),
+  })
+}
+
+export interface SoloGiveItem {
+  templateId: string
+  quantity: number
+  quality: number
+  augments?: AugmentSelection[]
+}
+
+export function grantSoloItems(
+  destination: string,
+  items: SoloGiveItem[],
+  expectedProfileToken: string,
+  moddedStorageCapacity = false,
+): Promise<{
+  ok: boolean
+  destination: string
+  granted: Array<SoloGiveItem & { insertedRows: number; updatedRows: number }>
+  safetyBackup: string
+  inspection: SoloInspection
+}> {
+  return api('/api/solo/items/grant', {
+    method: 'POST',
+    body: JSON.stringify({
+      destination,
+      moddedStorageCapacity,
+      items,
+      expectedProfileToken,
+      confirm: 'GIVE SOLO ITEMS',
+    }),
+  })
+}
+
+export function deleteSoloInventoryGroup(
+  templateId: string, destination: string, expectedCount: number,
+  expectedTotal: number, expectedProfileToken: string,
+): Promise<{ ok: boolean; removed: number; deletedStacks: number; safetyBackup: string }> {
+  return api('/api/solo/items/delete-group', {
+    method: 'POST',
+    body: JSON.stringify({ templateId, destination, expectedCount, expectedTotal,
+      expectedProfileToken, confirm: 'DELETE SOLO ITEM GROUP' }),
+  })
+}
+
+export function deleteSoloInventoryItem(
+  itemId: number,
+  expectedStackSize: number,
+  quantity: number,
+  expectedProfileToken: string,
+): Promise<{
+  ok: boolean
+  itemId: number
+  templateId: string
+  removed: number
+  remaining: number
+  safetyBackup: string
+  inspection: SoloInspection
+}> {
+  return api('/api/solo/items/delete', {
+    method: 'POST',
+    body: JSON.stringify({
+      itemId,
+      expectedStackSize,
+      quantity,
+      expectedProfileToken,
+      confirm: 'DELETE SOLO ITEM',
+    }),
+  })
+}
+
+export interface SoloSavedBlueprint {
+  id: number
+  itemId: number
+  name: string
+  instances: number
+  placeables: number
+  pentashields: number
+}
+
+export function getSoloBlueprints(
+  expectedProfileToken: string,
+): Promise<{ ok: boolean; profileToken: string; blueprints: SoloSavedBlueprint[] }> {
+  return api(`/api/solo/blueprints?expectedProfileToken=${encodeURIComponent(expectedProfileToken)}`)
+}
+
+export function exportSoloBlueprint(id: number, expectedProfileToken: string): Promise<{
+  ok: boolean
+  filename: string
+  blueprint: BlueprintFile
+}> {
+  return api(
+    `/api/solo/blueprints/export?id=${encodeURIComponent(String(id))}&expectedProfileToken=${encodeURIComponent(expectedProfileToken)}`,
+  )
+}
+
+export function importSoloBlueprint(
+  blueprint: BlueprintFile,
+  expectedProfileToken: string,
+): Promise<{
+  ok: boolean
+  blueprintId: number
+  itemId: number
+  name: string
+  instances: number
+  placeables: number
+  pentashields: number
+  safetyBackup: string
+  inspection: SoloInspection
+}> {
+  return api('/api/solo/blueprints/import', {
+    method: 'POST',
+    body: JSON.stringify({
+      blueprint,
+      expectedProfileToken,
+      confirm: 'IMPORT SOLO BLUEPRINT',
+    }),
+  })
+}
+
+export function setSoloCurrencies(
+  solari: number,
+  scrip: number,
+  expectedProfileToken: string,
+): Promise<{
+  ok: boolean
+  solari: number
+  scrip: number
+  safetyBackup: string
+  inspection: SoloInspection
+}> {
+  return api('/api/solo/currencies', {
+    method: 'PUT',
+    body: JSON.stringify({
+      solari,
+      scrip,
+      expectedProfileToken,
+      confirm: 'SET SOLO CURRENCIES',
+    }),
+  })
+}
+
+export function fillSoloWaterContainer(
+  itemId: number,
+  expectedProfileToken: string,
+): Promise<{
+  ok: boolean
+  itemId: number
+  templateId: string
+  amount: number
+  safetyBackup: string
+  inspection: SoloInspection
+}> {
+  return api('/api/solo/fillables/water', {
+    method: 'POST',
+    body: JSON.stringify({
+      itemId,
+      expectedProfileToken,
+      confirm: 'FILL SOLO WATER',
+    }),
+  })
+}
+
+export function setSoloWeaponAmmo(
+  itemId: number,
+  ammo: number,
+  expectedProfileToken: string,
+): Promise<{
+  ok: boolean
+  itemId: number
+  templateId: string
+  currentAmmo: number
+  safetyBackup: string
+  inspection: SoloInspection
+}> {
+  return api('/api/solo/items/weapon-ammo', {
+    method: 'PUT',
+    body: JSON.stringify({
+      itemId,
+      ammo,
+      expectedProfileToken,
+      confirm: 'SET SOLO WEAPON AMMO',
+    }),
+  })
+}
+
+export function maxSoloAugmentAttributes(expectedProfileToken: string): Promise<{
+  ok: boolean
+  updated: number
+  safetyBackup: string
+  inspection: SoloInspection
+}> {
+  return api('/api/solo/items/augments/max', {
+    method: 'POST',
+    body: JSON.stringify({
+      expectedProfileToken,
+      confirm: 'MAX SOLO AUGMENT ATTRIBUTES',
+    }),
+  })
+}
+
+interface SoloProgressionResult {
+  ok: boolean
+  action: string
+  safetyBackup: string
+  details: Record<string, unknown>
+  inspection: SoloInspection
+}
+
+export function setSoloCharacterXp(action: 'add' | 'set', amount: number, expectedProfileToken: string): Promise<SoloProgressionResult> {
+  return api('/api/solo/progression/character-xp', {
+    method: 'PUT',
+    body: JSON.stringify({ action, amount, expectedProfileToken, confirm: 'SET SOLO CHARACTER XP' }),
+  })
+}
+
+export function unlockSoloMainQuest(quest: string, expectedProfileToken: string): Promise<SoloProgressionResult> {
+  return api('/api/solo/progression/main-quest/unlock', {
+    method: 'POST',
+    body: JSON.stringify({ quest, expectedProfileToken, confirm: 'UNLOCK SOLO MAIN QUEST' }),
+  })
+}
+
+export function unlockSoloTestingStations(station: string, expectedProfileToken: string): Promise<SoloProgressionResult> {
+  return api('/api/solo/progression/testing-stations/unlock', {
+    method: 'POST',
+    body: JSON.stringify({ station, expectedProfileToken, confirm: 'UNLOCK SOLO TESTING STATIONS' }),
+  })
+}
+
+export function unlockSoloTrainer(job: string, expectedProfileToken: string): Promise<SoloProgressionResult> {
+  return api('/api/solo/progression/trainer/unlock', {
+    method: 'POST',
+    body: JSON.stringify({ job, expectedProfileToken, confirm: 'UNLOCK SOLO TRAINER' }),
+  })
+}
+
+export function maxSoloSpecializations(expectedProfileToken: string): Promise<SoloProgressionResult> {
+  return api('/api/solo/progression/specializations/max', {
+    method: 'POST',
+    body: JSON.stringify({
+      expectedProfileToken,
+      confirm: 'MAX SOLO SPECIALIZATIONS',
+    }),
+  })
+}
+
+export function completeSoloFindTheFremen(expectedProfileToken: string): Promise<SoloProgressionResult> {
+  return api('/api/solo/progression/find-the-fremen', {
+    method: 'POST',
+    body: JSON.stringify({
+      expectedProfileToken,
+      confirm: 'COMPLETE FIND THE FREMEN',
+    }),
+  })
+}
+
+export function resetSoloPostNpe(expectedProfileToken: string): Promise<SoloProgressionResult> {
+  return api('/api/solo/progression/reset-post-npe', {
+    method: 'POST',
+    body: JSON.stringify({ expectedProfileToken, confirm: 'RESET SOLO POST NPE' }),
+  })
+}
+
+export function completeSoloNpe(expectedProfileToken: string): Promise<SoloProgressionResult> {
+  return api('/api/solo/progression/npe/complete', {
+    method: 'POST',
+    body: JSON.stringify({
+      expectedProfileToken,
+      confirm: 'COMPLETE SOLO NPE',
+    }),
+  })
+}
+
+export function enableSoloAllSkills(expectedProfileToken: string): Promise<SoloProgressionResult> {
+  return api('/api/solo/progression/skills/enable-all', {
+    method: 'POST',
+    body: JSON.stringify({
+      expectedProfileToken,
+      confirm: 'ENABLE SOLO SKILLS',
+    }),
+  })
+}
+
+export function setSoloFactionProgression(faction: string, action: string, amount: number, expectedProfileToken: string): Promise<SoloProgressionResult> {
+  return api('/api/solo/progression/faction', {
+    method: 'POST',
+    body: JSON.stringify({ faction, action, amount, expectedProfileToken, confirm: 'SET SOLO FACTION PROGRESSION' }),
+  })
+}
+
+export function setSoloProgressionPoints(
+  skillPoints: number,
+  intel: number,
+  expectedProfileToken: string,
+): Promise<SoloProgressionResult> {
+  return api('/api/solo/progression/points', {
+    method: 'PUT',
+    body: JSON.stringify({
+      skillPoints,
+      intel,
+      expectedProfileToken,
+      confirm: 'SET SOLO PROGRESSION POINTS',
+    }),
+  })
+}
+
+export function exportSoloDiagnostics(expectedProfileToken: string): Promise<{
+  ok: boolean; filename: string; report: Record<string, unknown>
+}> {
+  return api(`/api/solo/diagnostics?expectedProfileToken=${encodeURIComponent(expectedProfileToken)}`)
+}
+
+export interface SoloBlueprintSettings {
+  ok: boolean
+  supported: boolean
+  enabled: boolean
+  canRestore: boolean
+  conflict: boolean
+}
+
+export function saveSoloBlueprintSettings(enabled: boolean, expectedProfileToken: string): Promise<{
+  ok: boolean; settings: SoloBlueprintSettings; backupPath: string
+}> {
+  return api('/api/solo/blueprint-settings', {
+    method: 'PUT',
+    body: JSON.stringify({ enabled, expectedProfileToken, confirm: 'APPLY SOLO BLUEPRINT SETTINGS' }),
+  })
+}
+
+export function setSoloSpecialization(track: string, level: number, expectedProfileToken: string): Promise<SoloProgressionResult> {
+  return api('/api/solo/progression/specializations', {
+    method: 'PUT',
+    body: JSON.stringify({ track, level, expectedProfileToken, confirm: 'SET SOLO SPECIALIZATION' }),
+  })
+}
+
+export function resetSoloSpecializationRewards(track: string, expectedProfileToken: string): Promise<SoloProgressionResult> {
+  return api('/api/solo/progression/specializations/reset-rewards', {
+    method: 'POST',
+    body: JSON.stringify({ track, expectedProfileToken, confirm: 'RESET SOLO SPECIALIZATION REWARDS' }),
+  })
+}
+
+export function repairSoloEquipment(expectedProfileToken: string, destination = 'carried'): Promise<{ok: boolean; repaired: number; safetyBackup: string; inspection: SoloInspection}> {
+  return api('/api/solo/items/repair-equipment', {method: 'POST', body: JSON.stringify({expectedProfileToken, destination, confirm: 'REPAIR SOLO EQUIPMENT'})})
+}
+export function grantSoloReviewedCustomization(expectedProfileToken: string, customizationId = 'StillSCharDyepackImota') {
+  return api<SoloProgressionResult>('/api/solo/reviewed-customization', {
+    method: 'POST', body: JSON.stringify({ expectedProfileToken, customizationId, confirm: 'GRANT REVIEWED CUSTOMIZATION' }),
+  })
+}

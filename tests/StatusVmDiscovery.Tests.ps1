@@ -1,0 +1,237 @@
+﻿# LAN status uses one credentialed host request for VM and adapter discovery.
+
+BeforeAll {
+    . (Join-Path $PSScriptRoot '_TestHelpers.ps1')
+    function global:ConvertTo-DuneHyperVCimSplat { param($HyperV) return $HyperV }
+    Import-DstLib 'Config.ps1'
+    Import-DstLib 'HyperVGuestRecovery.ps1'
+    Import-DstLib 'Status.ps1'
+}
+
+Describe 'Get-DuneVmStatus batched LAN discovery' {
+    BeforeEach {
+        function global:Invoke-WithDuneLock { param($Name, $TimeoutSec, $Script) & $Script }
+        $script:DuneLanVmSnapshotCache = $null
+        $script:DuneApiLockTable = $null
+        $script:fakeCred = [System.Management.Automation.PSCredential]::new(
+            'HOST\Administrator', (ConvertTo-SecureString 'x' -AsPlainText -Force))
+        function global:Get-DuneHyperVSplat { @{ ComputerName = '192.168.1.50'; Credential = $script:fakeCred } }
+
+        Mock Invoke-Command { @{ State='Running'; UptimeSeconds=300; IPAddresses=@('10.10.10.42') } }
+        Mock ConvertTo-DuneHyperVCimSplat { $HyperV }
+        Mock Get-VM { throw 'Repeated CIM call' }
+        Mock Get-VMNetworkAdapter { throw 'Repeated CIM call' }
+        Mock -CommandName Set-DuneLastKnownVmIp -MockWith { $true }
+        Mock -CommandName Get-DuneLastKnownVmIp -MockWith { '' }
+        Mock -CommandName Test-DuneKnownVmIp -MockWith { $true }
+        Mock -CommandName Invoke-DuneHyperVGuestRecovery -MockWith { @{ ok = $true } }
+    }
+
+    It 'uses one host request carrying the saved credential' {
+        Get-DuneVmStatus | Out-Null
+        Should -Invoke Invoke-Command -Times 1 -ParameterFilter {
+            $ComputerName -eq '192.168.1.50' -and $Credential -eq $script:fakeCred
+        }
+        Should -Invoke Get-VM -Times 0
+        Should -Invoke Get-VMNetworkAdapter -Times 0
+    }
+
+    It 'reuses the credentialed LAN snapshot for assigned RAM and vCPU facts' {
+        Mock Invoke-Command { @{State='Running';UptimeSeconds=300;IPAddresses=@('10.10.10.42');MemoryAssigned=20GB;MemoryStartup=12GB;ProcessorCount=8} }
+        Get-DuneVmStatus | Out-Null
+        $resources=Get-DuneVmResources
+        $resources.ramGB | Should -Be 20
+        $resources.ramSource | Should -Be assigned
+        $resources.cpuCount | Should -Be 8
+        Should -Invoke Invoke-Command -Times 1
+    }
+
+    It 'reads local allocations and labels startup RAM when no RAM is assigned' {
+        Mock Get-DuneHyperVSplat { @{} }
+        Mock Get-VM { @{MemoryAssigned=0;MemoryStartup=16GB;ProcessorCount=4} }
+        $resources=Get-DuneVmResources
+        $resources.ramGB | Should -Be 16
+        $resources.ramSource | Should -Be startup
+        $resources.cpuCount | Should -Be 4
+        Should -Invoke Invoke-Command -Times 0
+    }
+
+    It 'returns unknown allocations when both LAN discovery paths fail' {
+        Mock Invoke-Command { throw 'host unreachable' }
+        $resources=Get-DuneVmResources
+        $resources.ramGB | Should -BeNullOrEmpty
+        $resources.cpuCount | Should -BeNullOrEmpty
+    }
+
+    It 'includes RAM and CPU facts from the existing credentialed CIM fallback' {
+        Mock Invoke-Command { throw 'no PS session endpoint' }
+        Mock Get-VM { @{State='Running';Uptime=[timespan]::FromMinutes(5);MemoryAssigned=24GB;MemoryStartup=24GB;ProcessorCount=6} }
+        Mock Get-VMNetworkAdapter { @{IPAddresses=@('10.10.10.42')} }
+        $resources=Get-DuneVmResources
+        $resources.ramGB | Should -Be 24
+        $resources.cpuCount | Should -Be 6
+        Should -Invoke Get-VM -Times 1 -ParameterFilter { $Credential -eq $script:fakeCred }
+    }
+
+    It 'shares recent discovery and forces an updated observation on demand' {
+        Get-DuneVmStatus | Out-Null
+        Get-DuneVmStatus | Out-Null
+        Should -Invoke Invoke-Command -Times 1
+        Get-DuneVmStatus -Force | Out-Null
+        Should -Invoke Invoke-Command -Times 2
+    }
+
+    It 'does not reuse a different host snapshot' {
+        Get-DuneVmStatus | Out-Null
+        function global:Get-DuneHyperVSplat { @{ ComputerName = '192.168.1.51'; Credential = $script:fakeCred } }
+        Get-DuneVmStatus | Out-Null
+        Should -Invoke Invoke-Command -Times 2
+    }
+
+    It 'uses separate named lock and cache entries in the shared API table' {
+        $script:DuneApiLockTable = [hashtable]::Synchronized(@{})
+        function global:Invoke-WithDuneLock {
+            param($Name, $TimeoutSec, $Script)
+            if (-not $script:DuneApiLockTable.ContainsKey($Name)) {
+                $script:DuneApiLockTable[$Name] = [Threading.SemaphoreSlim]::new(1, 1)
+            }
+            $lock = $script:DuneApiLockTable[$Name]
+            $lock.Wait(1000) | Should -BeTrue
+            try { & $Script } finally { $lock.Release() | Out-Null }
+        }
+        Get-DuneVmStatus -Force | Out-Null
+            Get-DuneVmStatus -Force | Out-Null
+            Should -Invoke Invoke-Command -Times 2
+            @($script:DuneApiLockTable.Values | Where-Object { $_ -is [Threading.SemaphoreSlim] }).Count | Should -Be 1
+    }
+
+    It 'reports an unavailable host instead of a stale running snapshot' {
+        Mock Invoke-Command { throw 'Host unavailable' }
+        $r = Get-DuneVmStatus
+        $r.running | Should -BeFalse
+        $r.error | Should -Match 'Host unavailable'
+    }
+
+    It 'discovers a workgroup VM when the PowerShell endpoint denies the saved credential' {
+        Mock Invoke-Command { throw 'Access is denied' }
+        Mock Get-VM { [pscustomobject]@{ State='Running'; Uptime=[timespan]::FromSeconds(300) } }
+        Mock Get-VMNetworkAdapter { [pscustomobject]@{ IPAddresses=@('10.10.10.42') } }
+
+        $r = Get-DuneVmStatus
+        $r.exists | Should -BeTrue
+        $r.running | Should -BeTrue
+        $r.ip | Should -Be '10.10.10.42'
+        Should -Invoke Get-VM -Times 1 -ParameterFilter {
+            $ComputerName -eq '192.168.1.50' -and $Credential -eq $script:fakeCred -and $Name -eq 'dune-awakening'
+        }
+        Should -Invoke Get-VMNetworkAdapter -Times 1 -ParameterFilter {
+            $ComputerName -eq '192.168.1.50' -and $Credential -eq $script:fakeCred -and $VMName -eq 'dune-awakening'
+        }
+        Get-DuneVmStatus | Out-Null
+        Should -Invoke Invoke-Command -Times 1
+        Should -Invoke Get-VM -Times 1
+    }
+
+    It 'does not cache a partial fallback when adapter discovery fails' {
+        Mock Invoke-Command { throw 'Access is denied' }
+        Mock Get-VM { [pscustomobject]@{ State='Running'; Uptime=[timespan]::FromSeconds(300) } }
+        Mock Get-VMNetworkAdapter { throw 'Adapter query failed' }
+
+        $r = Get-DuneVmStatus
+        $r.running | Should -BeFalse
+        $r.error | Should -Match 'Access is denied'
+        $r.error | Should -Match 'Adapter query failed'
+        Get-DuneVmStatus | Out-Null
+        Should -Invoke Get-VMNetworkAdapter -Times 2
+    }
+
+    It 'resolves the discovered guest IPv4 into the status result' {
+        $r = Get-DuneVmStatus
+        $r.exists | Should -BeTrue
+        $r.running | Should -BeTrue
+        $r.ip | Should -Be '10.10.10.42'
+        $r.ipSource | Should -Be 'hyperv'
+        Should -Invoke Set-DuneLastKnownVmIp -ParameterFilter { $Ip -eq '10.10.10.42' }
+        Should -Invoke Test-DuneKnownVmIp -ParameterFilter { $Ip -eq '10.10.10.42' }
+        Should -Invoke Invoke-DuneHyperVGuestRecovery -ParameterFilter { $Ip -eq '10.10.10.42' }
+    }
+
+    It 'uses a reachable last-known guest IP when Hyper-V KVP is blank' {
+        Mock Invoke-Command { @{ State='Running'; UptimeSeconds=300; IPAddresses=@() } }
+        Mock Get-DuneLastKnownVmIp { '10.10.10.42' }
+        Mock Test-DuneKnownVmIp { $true }
+
+        $r = Get-DuneVmStatus
+
+        $r.ip | Should -Be '10.10.10.42'
+        $r.ipSource | Should -Be 'last-known'
+        Should -Invoke Invoke-DuneHyperVGuestRecovery -ParameterFilter {
+            $Ip -eq '10.10.10.42' -and $ForceKvp
+        }
+    }
+
+    It 'rejects an unreachable last-known guest IP' {
+        Mock Invoke-Command { @{ State='Running'; UptimeSeconds=300; IPAddresses=@() } }
+        Mock Get-DuneLastKnownVmIp { '10.10.10.99' }
+        Mock Test-DuneKnownVmIp { $false }
+
+        $r = Get-DuneVmStatus
+
+        $r.ip | Should -Be ''
+        $r.ipSource | Should -Be 'none'
+        Should -Invoke Invoke-DuneHyperVGuestRecovery -Times 0
+    }
+}
+
+Describe 'Get-DuneVmStatus local mode (unchanged, credential-free)' {
+    BeforeEach {
+        function global:Get-DuneHyperVSplat { @{} }
+        Mock -CommandName Get-VM -MockWith {
+            [pscustomobject]@{ Name = 'dune-awakening'; State = 'Running'; Uptime = [timespan]::FromMinutes(5) }
+        }
+        Mock -CommandName Get-VMNetworkAdapter -MockWith {
+            [pscustomobject]@{ IPAddresses = @('192.168.100.7') }
+        }
+        Mock -CommandName Set-DuneLastKnownVmIp -MockWith { $true }
+        Mock -CommandName Get-DuneLastKnownVmIp -MockWith { '' }
+        Mock -CommandName Test-DuneKnownVmIp -MockWith { $false }
+        Mock -CommandName Invoke-DuneHyperVGuestRecovery -MockWith { @{ ok = $true } }
+    }
+
+    It 'calls Get-VM and Get-VMNetworkAdapter with no ComputerName/Credential' {
+        Get-DuneVmStatus | Out-Null
+        Should -Invoke Get-VM -ParameterFilter { -not $ComputerName -and -not $Credential }
+        Should -Invoke Get-VMNetworkAdapter -ParameterFilter { -not $ComputerName -and -not $Credential -and $VMName -eq 'dune-awakening' }
+    }
+}
+
+Describe 'Get-DuneBattlegroupSnapshotFresh VM reuse' {
+    It 'uses a supplied VM snapshot instead of repeating Hyper-V discovery' {
+        Mock -CommandName Get-DuneVmStatus -MockWith { throw 'duplicate VM discovery' }
+
+        $r = Get-DuneBattlegroupSnapshotFresh -VmStatus @{
+            exists = $false
+            name = 'dune-awakening'
+            state = 'NotFound'
+            running = $false
+            ip = ''
+        }
+
+        $r.available | Should -BeFalse
+        $r.reason | Should -Match 'does not exist'
+        $r.observedAt | Should -Match '^\d{4}-\d{2}-\d{2}T'
+        Should -Invoke Get-DuneVmStatus -Times 0
+    }
+
+    It 'preserves the original observation timestamp while serving the cached snapshot' {
+        $script:DuneApiLockTable = $null
+        $script:DuneBattlegroupSnapshotCache = $null
+        $script:DuneBattlegroupSnapshotFetched = [datetime]::MinValue
+        $snapshot = @{ available = $true; observedAt = '2026-09-09T04:00:00.0000000Z' }
+
+        Set-DuneBattlegroupSnapshotCacheEntry -Snapshot $snapshot
+        $cached = Get-DuneBattlegroupSnapshotCached
+
+        $cached.observedAt | Should -Be $snapshot.observedAt
+    }
+}

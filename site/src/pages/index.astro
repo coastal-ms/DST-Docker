@@ -1,0 +1,48 @@
+---
+import Base from "../layouts/Base.astro";
+import DownloadButton from "../components/DownloadButton.astro";
+import Screenshot from "../components/Screenshot.astro";
+const base = import.meta.env.BASE_URL;
+---
+<Base title="Dune Server Tool — Self-Hosted servers and Solo saves" description="Manage your Dune: Awakening server or local Solo save from one Windows app. Player tools, backups, updates and a Browser Portal.">
+  <section class="product-hero">
+    <div class="site-width product-hero-layout">
+      <div class="product-hero-copy">
+        <p class="eyebrow">Dune: Awakening · Free and open source</p>
+        <h1>Your server.<br />Your Solo save.<br /><span>One control room.</span></h1>
+        <p>Run your Self-Hosted world, manage a local Solo save, and keep everyday tools within reach.</p>
+        <div class="hero-actions"><DownloadButton destination="releases" /><a href={base + "install"} class="text-link">Choose your setup <span aria-hidden="true">↗</span></a></div>
+        <p class="product-requirements">For Windows 10 and 11 · One installer · No subscription</p>
+      </div>
+      <div class="product-preview">
+        <div class="preview-caption"><span class="preview-dot" aria-hidden="true"></span><span>Server operations</span><span>Inside DST</span></div>
+        <Screenshot src={base + "screenshots/operations.png"} alt="Current DST Operations with searchable server tasks, Backups, Server updates and Live Map" caption="Current interface preview, captured without a connected server." eager />
+        <a href={base + "features"} class="preview-tour">See the tools <span aria-hidden="true">↗</span></a>
+      </div>
+    </div>
+  </section>
+  <section class="site-width setup-paths" aria-labelledby="setup-heading">
+    <div class="section-heading"><div><p class="eyebrow">Start where you play</p><h2 id="setup-heading">Choose your setup.</h2></div><p>Both installation choices include the same Solo tools.</p></div>
+    <div class="setup-grid">
+      <article><span class="path-number" aria-hidden="true">01</span><h3>I host a server</h3><p>Manage Funcom’s Self-Hosted Server on a local or LAN Hyper-V host. Add player administration, backups, maps and remote access.</p><a href={base + "install"} class="action-link">Set up Self-Hosted <span aria-hidden="true">↗</span></a><small>Requires Funcom’s server package and a supported Hyper-V host.</small></article>
+      <article><span class="path-number" aria-hidden="true">02</span><h3>I play Solo</h3><p>Choose Solo only in the installer, connect your supported Retail save, and manage settings, characters, inventories and backups.</p><a href={base + "install#solo"} class="action-link">Set up Solo <span aria-hidden="true">↗</span></a><small>No VM needed. Close the game before editing a save.</small></article>
+    </div>
+  </section>
+  <section class="product-tools" aria-labelledby="tools-heading"><div class="site-width">
+    <div class="section-heading"><div><p class="eyebrow">Everyday management</p><h2 id="tools-heading">Less searching. More playing.</h2></div><a href={base + "features"} class="text-link">Explore all features <span aria-hidden="true">↗</span></a></div>
+    <div class="task-grid">
+      <article><h3>Run your server</h3><p>Check server health, manage maps, schedule restarts and apply game updates.</p><a class="text-link" href={base + "features#health"}>Server operations <span aria-hidden="true">↗</span></a></article>
+      <article><h3>Look after your players</h3><p>Manage inventories, progression, bases, vehicles and the economy from one place.</p><a class="text-link" href={base + "features#gameplay"}>Player and world tools <span aria-hidden="true">↗</span></a></article>
+      <article><h3>Keep a way back</h3><p>Create backups, set a schedule and restore your server when you need to.</p><a class="text-link" href={base + "features#database"}>Backups and data <span aria-hidden="true">↗</span></a></article>
+    </div>
+  </div></section>
+  <section class="site-width product-story" aria-labelledby="solo-heading">
+    <Screenshot src={base + "screenshots/solo-progression.png"} alt="Current Solo character progression controls in Dune Server Tool" caption="Current Solo interface with a fictional example save. No game data is edited." />
+    <div><p class="eyebrow">Your character, your choices</p><h2 id="solo-heading">The tools behind your next session.</h2><p>Inspect items, manage currencies and appearances, adjust progression, and work with base blueprints. Solo and Self-Hosted tools share familiar controls, with requirements suited to each mode.</p><a href={base + "features#solo"} class="text-link">Explore Solo Mode <span aria-hidden="true">↗</span></a></div>
+  </section>
+  <section class="product-tools"><div class="site-width product-story portal-story">
+    <div><p class="eyebrow">Away from the host PC</p><h2>Open your control room in a browser.</h2><p>Use the Browser Portal from a phone, tablet or another PC. The host creates Owner, Admin and linked Player accounts for the access each person needs.</p><a href={base + "remote"} class="text-link">Browser Portal guide <span aria-hidden="true">↗</span></a></div>
+    <Screenshot src={base + "screenshots/browser-portal.png"} alt="Dune Server Tool Browser Portal on a mobile screen" caption="Current phone sign-in screen. Remote access uses DST running on your Windows host." width={390} height={844} />
+  </div></section>
+  <section class="site-width community-strip"><div><p class="eyebrow">Built with the community</p><h2>A place to ask. A place to share.</h2><p>Find release news, setup help and other Dune: Awakening players and server owners.</p></div><a href="https://discord.gg/tj2x7cywSC" rel="noopener" target="_blank" class="action-link">Join the Discord <span aria-hidden="true">↗</span></a></section>
+</Base>

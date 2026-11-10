@@ -1,0 +1,32 @@
+name: Docker bug report
+description: Report a problem in DST Docker.
+title: "[Docker] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For help, contact the community Discord linked below. Remove credentials and private player or server information from attachments.
+  - type: input
+    id: product_version
+    attributes:
+      label: DST Docker version
+      placeholder: "1.0.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Hosting platform
+      options:
+        - Native Linux
+        - Windows WSL
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Include the steps, expected result and actual result.
+    validations:
+      required: true

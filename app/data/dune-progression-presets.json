@@ -1,0 +1,176 @@
+[
+  {
+    "id": "skip_npe",
+    "name": "Skip NPE (New Player Experience)",
+    "node_count": 136,
+    "nodes": [
+      "DA_MQ_NPEAutocompleted"
+    ],
+    "description": "Applies the exact verified 136-node Skip Tutorial state, fully completing A New Beginning without leaving research-gated objectives active."
+  },
+  {
+    "id": "a_new_beginning",
+    "name": "Complete: A New Beginning",
+    "node_count": 136,
+    "nodes": [
+      "DA_MQ_ANewBeginning"
+    ],
+    "description": "Applies the exact verified NPE completion state for the full main-story intro, including every research-gated objective."
+  },
+  {
+    "id": "find_the_fremen",
+    "name": "Complete: Find the Fremen (Trials of Aql)",
+    "node_count": 46,
+    "nodes": [
+      "DA_MQ_FindTheFremen"
+    ],
+    "description": "All 7 trials, the Sietch, and Epilogue. Unlocks the Fremkit (Stillsuit, Thumper, Cryss Knife, etc.), completes Act 1, and now also applies the Find the Fremen reward-unblock that opens the 3rd active-ability slot and prescience. Player must be offline; takes effect on next login."
+  },
+  {
+    "id": "act1_complete",
+    "name": "Complete Act 1",
+    "node_count": 182,
+    "nodes": [
+      "DA_MQ_ANewBeginning",
+      "DA_MQ_FindTheFremen"
+    ],
+    "description": "Exact 136-node NPE completion + Find the Fremen. Player starts ready for Act 2 without partial tutorial research state."
+  },
+  {
+    "id": "act2_complete",
+    "name": "Complete Act 2",
+    "nodes": [
+      "DA_MQ_AssassinsHandbook",
+      "DA_MQ_TheGreatConvention"
+    ],
+    "description": "Complete Assassin’s Handbook and The Great Convention. Takes effect on next login."
+  },
+  {
+    "id": "act3_complete",
+    "name": "Complete Act 3",
+    "nodes": [
+      "DA_MQ_TheGreatConventionPt2"
+    ],
+    "description": "Complete The Great Convention, Part II (Chapter 3). Takes effect on next login."
+  },
+  {
+    "id": "act4_complete",
+    "name": "Complete Act 4 — The Great Convention, Part III",
+    "nodes": [
+      "DA_MQ_TheGreatConventionPt3"
+    ],
+    "description": "Complete The Great Convention, Part III, including Dangerous Allies. Takes effect on next login."
+  },
+  {
+    "id": "lost_harvest_complete",
+    "name": "Complete Lost Harvest",
+    "nodes": [
+      "DA_DLC_LostHarvest"
+    ],
+    "description": "Complete the Lost Harvest journey. Takes effect on next login."
+  },
+  {
+    "id": "scourge_complete",
+    "name": "Complete Scourge",
+    "nodes": [],
+    "contracts": [
+      "DA_CT_Halloween_Week1_01",
+      "DA_CT_Halloween_Week1_02",
+      "DA_CT_Halloween_Week1_03",
+      "DA_CT_Halloween_Week2_01",
+      "DA_CT_Halloween_Week2_01_Funnel",
+      "DA_CT_Halloween_Week2_02",
+      "DA_CT_Halloween_Week3_01",
+      "DA_CT_Halloween_Week3_01_Funnel",
+      "DA_CT_Halloween_Week3_02"
+    ],
+    "description": "Complete the Scourge story contract chain through Patient Zero. Repeatable daily contracts remain separate."
+  },
+  {
+    "id": "vermillius_intro",
+    "name": "Skip: Vermillius Gap Tutorials",
+    "node_count": 101,
+    "nodes": [
+      "DA_SQ_VermiliusGap",
+      "DA_Dunipedia_Landmarks.VermiliusGap"
+    ],
+    "description": "Completes all Vermillius Gap tutorial quests (research, crafting, exploration). No tag side effects - pure tutorial skip."
+  },
+  {
+    "id": "deep_desert_intro",
+    "name": "Skip: Deep Desert Intro",
+    "node_count": 34,
+    "nodes": [
+      "DA_SQ_DeepDesert"
+    ],
+    "description": "Completes the Deep Desert side quest chain."
+  },
+  {
+    "id": "taxation_intro",
+    "name": "Skip: Taxation / Exchange Tutorial",
+    "node_count": 27,
+    "nodes": [
+      "DA_SQ_Taxation"
+    ],
+    "description": "Completes the exchange/travel tutorial chain."
+  },
+  {
+    "id": "overland_intro",
+    "name": "Skip: Overland Map Intro",
+    "node_count": 49,
+    "nodes": [
+      "DA_SQ_OverlandMap"
+    ],
+    "description": "Completes the Overland map side quest chain (Hark Landsraad missions, keystones)."
+  },
+  {
+    "id": "unlock_all_lore",
+    "name": "Unlock All Lore (Dunipedia)",
+    "node_count": 322,
+    "nodes": [
+      "DA_Dunipedia_KnownUniverse",
+      "DA_Dunipedia_Landmarks",
+      "DA_Dunipedia_ManualOfTheFriendlyDesert",
+      "DA_Dunipedia_WarForArrakis"
+    ],
+    "description": "Reveals all Dunipedia entries: Known Universe, Landmarks, Manual of the Friendly Desert, War for Arrakis."
+  },
+  {
+    "id": "faction_atreides_complete",
+    "name": "Complete Atreides faction journeys",
+    "nodes": [
+      "DA_FQ_ClimbTheRanks.ATestOfLoyalty",
+      "DA_FQ_ClimbTheRanks.ClimbTheRanksR2",
+      "DA_FQ_ClimbTheRanks.GatheringIntelligence",
+      "DA_FQ_ClimbTheRanks.HuntingSkorda",
+      "DA_FQ_ClimbTheRanks.InvestigateDelphis_Atreides",
+      "DA_FQ_ClimbTheRanks.InvestigateKytheria_Atreides",
+      "DA_FQ_ClimbTheRanks.JoinAHouse",
+      "DA_FQ_ClimbTheRanks.PoisonedSpice_Atreides",
+      "DA_FQ_ClimbTheRanks.Rank5To20",
+      "DA_FQ_ClimbTheRanks.TransitionToCh3_Atre",
+      "DA_SQ_OverlandMap.AtreLandsraadMission",
+      "DA_FQ_ClimbTheRanks.Rank20_Mission_Atreides"
+    ],
+    "description": "Complete the selected faction’s journey lines, including its Rank 20 mission. Reputation and allegiance are unchanged."
+  },
+  {
+    "id": "faction_harkonnen_complete",
+    "name": "Complete Harkonnen faction journeys",
+    "nodes": [
+      "DA_FQ_ClimbTheRanks.ATestOfTreachery",
+      "DA_FQ_ClimbTheRanks.ClimbTheRanksR2",
+      "DA_FQ_ClimbTheRanks.GatheringIntelligence",
+      "DA_FQ_ClimbTheRanks.HuntingSkorda",
+      "DA_FQ_ClimbTheRanks.InvestigateDelphis_Harkonnen",
+      "DA_FQ_ClimbTheRanks.InvestigateKytheria_Harkonnen",
+      "DA_FQ_ClimbTheRanks.JoinAHouse",
+      "DA_FQ_ClimbTheRanks.PoisonedSpice_Harkonnen",
+      "DA_FQ_ClimbTheRanks.Rank5To20",
+      "DA_FQ_ClimbTheRanks.TransitionToCh3_Hark",
+      "DA_SQ_OverlandMap.HarkLandsraadMission",
+      "DA_FQ_ClimbTheRanks.Rank20_Mission_Harkonnen"
+    ],
+    "description": "Complete the selected faction’s journey lines, including its Rank 20 mission. Reputation and allegiance are unchanged."
+  }
+]

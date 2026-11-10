@@ -1,0 +1,1638 @@
+﻿# Dune Server — HTTP server (PowerShell HttpListener)
+#
+# Serves the built React SPA from <DistRoot> and dispatches /api/* and /ws/*
+# to route handlers registered via Register-DuneRoute.
+#
+# Localhost-only. Per-launch GUID token required on every /api/* and /ws/* call.
+
+$script:DuneRoutes      = [System.Collections.Generic.List[object]]::new()
+$script:DuneWsRoutes    = [System.Collections.Generic.List[object]]::new()
+$script:DuneToken       = [string]::Empty
+$script:DuneListener    = $null
+$script:DunePrefixUrl   = $null
+$script:DuneDistRoot    = $null
+. (Join-Path $PSScriptRoot 'lib/StaticAssets.ps1')
+$script:DuneAssetGenerations = @()
+$script:DuneWsPool      = $null   # RunspacePool — WS handlers run here so they don't block the main HTTP loop
+
+# --- API handler pool (issue #47): HTTP /api handlers run on a runspace pool so
+# a slow handler (SSH/kubectl/backup/install) can't head-of-line-block the
+# single-threaded listener and freeze the whole UI. ----------------------------
+$script:DuneApiPool      = $null   # RunspacePool for /api handlers
+$script:DuneApiGate      = $null   # SemaphoreSlim bounding in-flight handlers (saturation -> 503)
+$script:DunePortalLoginGate = $null # tighter admission for expensive PBKDF2 login handlers
+$script:DuneApiInFlight  = $null   # synchronized list of {Ps;Handle;Release} for cleanup
+$script:DuneApiLockTable = $null   # shared synchronized name -> SemaphoreSlim registry (named locks)
+$script:DuneApiCtx       = $null   # immutable server-context injected into every worker
+$script:DuneApiMax       = 16      # max concurrent handlers == pool max == gate count
+# server/ dir (for the pool's startup dot-sources). Guard the declaration: the
+# entrypoint (DuneServer.ps1 / DuneServer-Linux.ps1) sets this BEFORE dot-sourcing
+# us, so an unconditional `= $null` here would clobber it back to empty and the API
+# handler pool would silently fall back to single-threaded inline dispatch (every
+# slow handler then head-of-line-blocks the whole UI — the bug issue #47 fixed).
+if (-not (Get-Variable -Name DuneServerDir -Scope Script -ErrorAction SilentlyContinue)) {
+    $script:DuneServerDir = $null
+}
+
+# ---------- MIME ---------------------------------------------------------------
+
+$script:DuneMimeMap = @{
+    '.html' = 'text/html; charset=utf-8'
+    '.htm'  = 'text/html; charset=utf-8'
+    '.js'   = 'application/javascript; charset=utf-8'
+    '.mjs'  = 'application/javascript; charset=utf-8'
+    '.css'  = 'text/css; charset=utf-8'
+    '.json' = 'application/json; charset=utf-8'
+    '.map'  = 'application/json; charset=utf-8'
+    '.svg'  = 'image/svg+xml'
+    '.png'  = 'image/png'
+    '.jpg'  = 'image/jpeg'
+    '.jpeg' = 'image/jpeg'
+    '.gif'  = 'image/gif'
+    '.ico'  = 'image/x-icon'
+    '.webp' = 'image/webp'
+    '.woff' = 'font/woff'
+    '.woff2'= 'font/woff2'
+    '.ttf'  = 'font/ttf'
+    '.txt'  = 'text/plain; charset=utf-8'
+    '.webmanifest' = 'application/manifest+json; charset=utf-8'
+}
+
+function Get-DuneMimeType {
+    param([string]$Path)
+    $ext = [System.IO.Path]::GetExtension($Path).ToLowerInvariant()
+    if ($script:DuneMimeMap.ContainsKey($ext)) { return $script:DuneMimeMap[$ext] }
+    return 'application/octet-stream'
+}
+
+# ---------- Routing ------------------------------------------------------------
+
+function Register-DuneRoute {
+    param(
+        [Parameter(Mandatory)][ValidateSet('GET','HEAD','POST','PUT','DELETE','PATCH')] [string]$Method,
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][scriptblock]$Handler,
+        # Inline routes run ON the listener thread instead of the handler pool.
+        # Reserve this for fast handlers that mutate MAIN-runspace lifecycle state
+        # (e.g. the listener / app-detach flag) which a worker runspace can't touch.
+        [switch]$Inline,
+        # Host-filesystem and host-execution surfaces must not be reachable through
+        # LAN, mobile bridge, or tunnel requests, even when a proxy connects from
+        # loopback. Enforcement happens before dispatch to the handler pool.
+        [switch]$LocalOnly,
+        # Binary transfers are consumed by the handler, only in a pooled worker.
+        [switch]$StreamBody
+    )
+    $sourceFile = ''
+    try { $sourceFile = Split-Path -Leaf $MyInvocation.ScriptName } catch {}
+    if ($StreamBody -and $Inline) { throw 'Streaming routes require a pooled worker.' }
+    $escaped = [regex]::Escape($Path)
+    $escaped = $escaped -replace '\\\{([A-Za-z][A-Za-z0-9_]*)\\\*}', '(?<$1>.*)'
+    $pattern = '^' + ($escaped -replace '\\\{([^/}]+)}', '(?<$1>[^/]+)') + '$'
+    $script:DuneRoutes.Add([pscustomobject]@{
+        Method  = $Method
+        Path    = $Path
+        Regex   = [regex]$pattern
+        Handler = $Handler
+        Inline  = [bool]$Inline
+        LocalOnly = [bool]$LocalOnly
+        StreamBody = [bool]$StreamBody
+        SourceFile = $sourceFile
+        Classification = $null
+    }) | Out-Null
+}
+
+function Test-DuneLocalOnlyRequest {
+    param($Request)
+
+    $remote = $null
+    try { $remote = $Request.RemoteEndPoint.Address } catch {}
+    $isLoopback = $false
+    if ($remote) {
+        try { $isLoopback = [System.Net.IPAddress]::IsLoopback($remote) } catch { $isLoopback = $false }
+    }
+
+    if (-not $isLoopback) { return $false }
+
+    foreach ($header in @(
+        'Cf-Access-Authenticated-User-Email',
+        'Cf-Ray',
+        'Cf-Connecting-Ip',
+        'X-Forwarded-For',
+        'X-Forwarded-Proto'
+    )) {
+        try {
+            if ($Request.Headers[$header]) { return $false }
+        } catch {}
+    }
+    return $true
+}
+
+function Test-DunePortalOwnerOnlyPath {
+    param([string]$Path, [string]$Method = 'GET')
+
+    if ($Path -eq '/api/gameconfig/spicefields' -or $Path.StartsWith('/api/gameconfig/spicefields/')) {
+        return $false
+    }
+
+    foreach ($prefix in @(
+        '/api/docker',
+        '/api/gameconfig',
+        '/api/db',
+        '/api/sietches',
+        '/api/config',
+        '/api/remote-access',
+        '/api/public-ip',
+        '/api/system',
+        '/api/mobile',
+        '/api/fls-token',
+        '/api/autostart',
+        '/api/service-mode',
+        '/api/console',
+        '/api/restart-schedule',
+        '/api/dune-admin-cache'
+    )) {
+        if ($Path -eq $prefix -or $Path.StartsWith("$prefix/")) { return $true }
+    }
+
+    return $Path -in @(
+        '/api/server/name',
+        '/api/maps/fix-partitions',
+        '/api/diagnostics/bundle',
+        '/api/diagnostics/cleanup-old-images',
+        '/api/diagnostics/cleanup-failed-database-operations',
+        '/api/gameplay/players/fresh-start/snapshots-path',
+        '/api/gameplay/vehicles/names',
+        '/api/commands/layout',
+        '/api/commands/layout/reset',
+        '/api/update/migration-notice',
+        '/api/update/prereleases',
+        '/api/update/install',
+        '/api/update/migration-notice/ack'
+    )
+}
+
+function Test-DunePortalOwnerOrAdminPath {
+    param([string]$Path, [string]$Method = 'GET')
+    if ($Path.StartsWith('/api/v1/maps/atlas/')) { return $true }
+    return (
+        $Method -eq 'GET' -and
+        (
+            $Path -eq '/api/v1/maps' -or
+            $Path.StartsWith('/api/v1/maps/') -or
+            $Path -eq '/api/v1/inventory/items' -or
+            $Path.StartsWith('/api/v1/inventory/items/')
+        )
+    )
+}
+
+function Test-DunePortalOwnerOrAdminAccess {
+    param(
+        [bool]$AccountMode,
+        [bool]$IsLocalRequest,
+        $PortalSessionAuth
+    )
+    if (-not $AccountMode -or $IsLocalRequest) { return $true }
+    return (
+        $PortalSessionAuth -and
+        [bool]$PortalSessionAuth.ok -and
+        [string]$PortalSessionAuth.account.role -in @('owner','admin')
+    )
+}
+
+function Test-DunePortalOwnerAccess {
+    param(
+        [bool]$AccountMode,
+        [bool]$IsLocalRequest,
+        $PortalSessionAuth
+    )
+    if (-not $AccountMode -or $IsLocalRequest) { return $true }
+    return (
+        $PortalSessionAuth -and
+        [bool]$PortalSessionAuth.ok -and
+        [string]$PortalSessionAuth.account.role -eq 'owner'
+    )
+}
+
+function Test-DuneWorldRestartWriteBlocked {
+    param([string]$Method, [string]$Path)
+    if ($Method -in @('GET', 'HEAD')) { return $false }
+    if ($Path -in @('/api/db/world-restart/rollback', '/api/db/world-restart/research-rollback')) { return $false }
+    return [bool](
+        (Get-Command Test-DuneWorldRestartMaintenanceActive -ErrorAction SilentlyContinue) -and
+        (Test-DuneWorldRestartMaintenanceActive)
+    )
+}
+
+function Invoke-DuneWorldRestartAdmission {
+    param(
+        [Parameter(Mandatory)][string]$Method,
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][scriptblock]$Action
+    )
+    if ($Method -in @('GET', 'HEAD') -or
+        $Path -in @(
+            '/api/db/world-restart',
+            '/api/db/world-restart/rollback',
+            '/api/db/world-restart/research-recover',
+            '/api/db/world-restart/research-rollback'
+        ) -or
+        -not (Get-Command Invoke-WithDuneLock -ErrorAction SilentlyContinue)) {
+        return (& $Action)
+    }
+    $admittedAction = $Action
+    return Invoke-WithDuneLock -Name 'world-restart-admission' -TimeoutSec 300 -Script {
+        if (Test-DuneWorldRestartWriteBlocked -Method $Method -Path $Path) {
+            return @{ blocked=$true }
+        }
+        return @{ blocked=$false; value=(& $admittedAction) }
+    }
+}
+
+function Register-DuneWebSocket {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][scriptblock]$Handler,
+        # When set, this WS endpoint is reachable ONLY from a loopback
+        # connection on the host itself. Any remote viewer (friend reaching
+        # the portal over Tailscale, LAN client, etc.) gets a 403 on upgrade.
+        # Use for endpoints that drive arbitrary host-side execution — the
+        # free-form Terminal is the canonical case.
+        [switch]$LocalOnly
+    )
+    $sourceFile = ''
+    try { $sourceFile = Split-Path -Leaf $MyInvocation.ScriptName } catch {}
+    $pattern = '^' + ([regex]::Escape($Path) -replace '\\\{([^/}]+)}', '(?<$1>[^/]+)') + '$'
+    $script:DuneWsRoutes.Add([pscustomobject]@{
+        Path      = $Path
+        Regex     = [regex]$pattern
+        Handler   = $Handler
+        LocalOnly = [bool]$LocalOnly
+        SourceFile = $sourceFile
+        Classification = $null
+    }) | Out-Null
+}
+
+function New-DuneDispatchPrincipal {
+    param(
+        [Parameter(Mandatory)]$Request,
+        [bool]$IsLocalRequest,
+        [bool]$AccountMode,
+        [bool]$LaunchAccess,
+        $PortalSessionAuth,
+        $LegacyRemoteAuth,
+        [string]$Authentication = ''
+    )
+    if (Get-Command New-DuneRequestPrincipal -ErrorAction SilentlyContinue) {
+        return New-DuneRequestPrincipal `
+            -Request $Request `
+            -IsLocalRequest $IsLocalRequest `
+            -AccountMode $AccountMode `
+            -LaunchAccess $LaunchAccess `
+            -PortalSessionAuth $PortalSessionAuth `
+            -LegacyRemoteAuth $LegacyRemoteAuth `
+            -Authentication $Authentication
+    }
+    return [ordered]@{
+        schemaVersion = 1
+        type = if ($IsLocalRequest) { 'local-host' } else { 'legacy-token' }
+        id = if ($IsLocalRequest) { 'local-host' } else { 'legacy-token' }
+        role = if ($IsLocalRequest) { 'local-host' } else { 'owner' }
+        account = $null
+        session = $null
+        linkedCharacter = $null
+        scopes = @()
+        transport = [ordered]@{ kind = if ($IsLocalRequest) { 'loopback' } else { 'direct-remote' } }
+        context = [ordered]@{ isLocal = $IsLocalRequest; isRemote = -not $IsLocalRequest }
+        authentication = $Authentication
+    }
+}
+
+function Add-DuneRouteContractContext {
+    param(
+        [Parameter(Mandatory)]$Route,
+        [Parameter(Mandatory)][hashtable]$RouteParams,
+        [Parameter(Mandatory)]$Principal,
+        [Parameter(Mandatory)][string]$RequestId
+    )
+    $RouteParams['requestPrincipal'] = $Principal
+    $RouteParams['registeredPath'] = [string]$Route.Path
+    $RouteParams['requestId'] = $RequestId
+    if (Get-Command Get-DuneRouteClassification -ErrorAction SilentlyContinue) {
+        $classification = Get-DuneRouteClassification $Route
+        $RouteParams['routeClassification'] = $classification
+        $RouteParams['routeCapabilityId'] = [string]$classification.capabilityId
+    }
+}
+
+function Test-DuneDispatchPrincipalAccess {
+    param([Parameter(Mandatory)]$Route, [Parameter(Mandatory)]$Principal)
+    if (-not (Get-Command Test-DuneRoutePrincipalAccess -ErrorAction SilentlyContinue)) { return ([string]$Principal.type -ne 'linked-player') }
+    return [bool](Test-DuneRoutePrincipalAccess -Route $Route -Principal $Principal)
+}
+
+# Initialize the WebSocket handler runspace pool. WS sessions can be
+# long-lived (terminal, log streams) and would block the single-threaded
+# HTTP main loop. Min=1 / Max=8 covers multiple terminals + ambient streams.
+function Initialize-DuneWsPool {
+    if ($script:DuneWsPool) { return }
+    $iss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+    $pool = [runspacefactory]::CreateRunspacePool(1, 8, $iss, $Host)
+    $pool.Open()
+    $script:DuneWsPool = $pool
+}
+
+# Fire-and-forget dispatch of a WebSocket handler scriptblock. The handler
+# runs in a runspace from the pool — .NET types loaded into the AppDomain
+# (Pty.Net, DuneServer.PtySink, WebSockets) are visible, but PS functions
+# from main runspace's lib/*.ps1 are NOT. Pass any state via arguments.
+function Invoke-DuneWsHandlerAsync {
+    param(
+        [Parameter(Mandatory)][scriptblock]$Handler,
+        [Parameter(Mandatory)]$WebSocket,
+        [Parameter(Mandatory)][hashtable]$RouteParams
+    )
+    Initialize-DuneWsPool
+    $ps = [powershell]::Create()
+    $ps.RunspacePool = $script:DuneWsPool
+    [void]$ps.AddScript({
+        param($handlerText, $ws, $routeParams)
+        try {
+            $h = [scriptblock]::Create($handlerText)
+            & $h $ws $routeParams
+        } catch {
+            Write-Host "[ws-handler] $($_.Exception.Message)" -ForegroundColor Red
+        } finally {
+            try {
+                if ($ws -and $ws.State -eq [System.Net.WebSockets.WebSocketState]::Open) {
+                    $ws.CloseAsync(
+                        [System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure,
+                        'closing', [System.Threading.CancellationToken]::None
+                    ).GetAwaiter().GetResult()
+                }
+            } catch {}
+            try { $ws.Dispose() } catch {}
+        }
+    }).AddArgument($Handler.ToString()).AddArgument($WebSocket).AddArgument($RouteParams)
+    [void]$ps.BeginInvoke()
+}
+
+# ---------- Named locks (issue #47) --------------------------------------------
+#
+# Once handlers run concurrently, two simultaneous read-modify-write mutations of
+# the same resource (director.ini, config file, backup cron, on-demand CRD scale,
+# installs) can clobber each other. Invoke-WithDuneLock serializes them by name.
+#
+# The registry MUST be a single object shared across every worker runspace, so it
+# is created once in Initialize-DuneApiPool and injected into workers via the
+# server context. Get-DuneLock lazily creates a per-name SemaphoreSlim under a
+# SyncRoot monitor (synchronized hashtables make single ops atomic, but
+# check-then-add is two ops and would otherwise race two locks into existence).
+
+function Get-DuneLock {
+    param([Parameter(Mandatory)][string]$Name)
+    if (-not $script:DuneApiLockTable) {
+        $script:DuneApiLockTable = [System.Collections.Hashtable]::Synchronized(@{})
+    }
+    $table = $script:DuneApiLockTable
+    [System.Threading.Monitor]::Enter($table.SyncRoot)
+    try {
+        if (-not $table.ContainsKey($Name)) {
+            $table[$Name] = [System.Threading.SemaphoreSlim]::new(1, 1)
+        }
+        return $table[$Name]
+    } finally {
+        [System.Threading.Monitor]::Exit($table.SyncRoot)
+    }
+}
+
+function Invoke-WithDuneLock {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][scriptblock]$Script,
+        [int]$TimeoutSec = 30
+    )
+    $sem = Get-DuneLock -Name $Name
+    if (-not $sem.Wait($TimeoutSec * 1000)) {
+        throw "Resource '$Name' is busy (timed out after ${TimeoutSec}s waiting for the lock)."
+    }
+    try { & $Script } finally { [void]$sem.Release() }
+}
+
+# ---------- API handler runspace pool (issue #47) ------------------------------
+
+# Build the pool whose worker runspaces have every lib function + route handler
+# available (same dot-source order as DuneServer.ps1). Each runspace pays the
+# dot-source cost once (pooled, reused across requests). All Add-Type calls in
+# those files are lazy (inside functions) so dot-sourcing has no AppDomain side
+# effects beyond defining functions + harmless route re-registration.
+function Initialize-DuneApiPool {
+    param([string]$ServerDir = $script:DuneServerDir)
+    if ($script:DuneApiPool) { return }
+    if (-not $ServerDir -or -not (Test-Path -LiteralPath $ServerDir)) {
+        throw "Initialize-DuneApiPool: server dir not found ('$ServerDir')."
+    }
+
+    # Shared cross-runspace coordination objects (created ONCE).
+    $script:DuneApiGate      = [System.Threading.SemaphoreSlim]::new($script:DuneApiMax, $script:DuneApiMax)
+    $script:DunePortalLoginGate = [System.Threading.SemaphoreSlim]::new(2, 2)
+    $script:DuneApiInFlight  = [System.Collections.ArrayList]::Synchronized([System.Collections.ArrayList]::new())
+    if (-not $script:DuneApiLockTable) {
+        $script:DuneApiLockTable = [System.Collections.Hashtable]::Synchronized(@{})
+    }
+    # Deferred cache startup must publish into the exact object already shared
+    # with handler workers, including a first launch with no hydrated snapshot.
+    if (Get-Command Get-DunePlatformSnapshotState -ErrorAction SilentlyContinue) {
+        [void](Get-DunePlatformSnapshotState)
+    }
+    $cursorSecret = $null
+    if (Get-Command Get-DuneApiCursorSecret -ErrorAction SilentlyContinue) {
+        $cursorSecret = Get-DuneApiCursorSecret
+    }
+
+    # Immutable snapshot of the main-runspace $script: vars that route handlers
+    # read but that are set by DuneServer.ps1's bootstrap / Start-DuneHttpServer
+    # (i.e. NOT defined by dot-sourcing the lib files). Everything else the
+    # handlers use is defined per-runspace by the startup dot-sources.
+    $script:DuneApiCtx = @{
+        Token         = $script:DuneToken
+        PrefixUrl     = $script:DunePrefixUrl
+        Listener      = $script:DuneListener
+        DistRoot      = $script:DuneDistRoot
+        ToolVersion   = $script:DuneToolVersion
+        BuildMetadataPresent = [bool]$script:DuneBuildMetadataPresent
+        BuildCommit   = [string]$script:DuneBuildCommit
+        BuildPrerelease = [bool]$script:DuneBuildPrerelease
+        BuildTag      = [string]$script:DuneBuildTag
+        PwshExe       = $script:PwshExe
+        MainScript    = $script:MainScript
+        AppDir        = $script:AppDir
+        ServerDir     = $ServerDir
+        LogPath       = $script:DuneLogPath
+        IsCompiledExe = $script:DuneIsCompiledExe
+        LockTable     = $script:DuneApiLockTable
+        CursorSecret  = $cursorSecret
+        PlatformSnapshotState = $script:DunePlatformSnapshotState
+    }
+
+    $iss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+    $duneLog = Join-Path $ServerDir 'lib\DuneLog.ps1'
+    if (Test-Path -LiteralPath $duneLog) { [void]$iss.StartupScripts.Add($duneLog) }
+    # Bootstrap.ps1 must load BEFORE the alphabetical lib loop so the
+    # Read-Config shim + Db-Postgres dot-source are in place by the time
+    # BackupSchedule.ps1, Broadcast.ps1, etc. are sourced (they call into
+    # Invoke-V6Ssh, Get-V6SshKeyPath, and friends at load time).
+    $bootstrap = Join-Path $ServerDir 'lib\Bootstrap.ps1'
+    if (Test-Path -LiteralPath $bootstrap) { [void]$iss.StartupScripts.Add($bootstrap) }
+    [void]$iss.StartupScripts.Add((Join-Path $ServerDir 'HttpServer.ps1'))
+    $libDir = Join-Path $ServerDir 'lib'
+    if (Test-Path -LiteralPath $libDir) {
+        foreach ($f in (Get-ChildItem -Path $libDir -Filter '*.ps1' | Sort-Object Name)) {
+            if ($f.Name -ieq 'DuneLog.ps1')   { continue }
+            if ($f.Name -ieq 'Bootstrap.ps1') { continue }
+            [void]$iss.StartupScripts.Add($f.FullName)
+        }
+    }
+    $routesDir = Join-Path $ServerDir 'routes'
+    if (Test-Path -LiteralPath $routesDir) {
+        foreach ($f in (Get-ChildItem -Path $routesDir -Filter '*.ps1' | Sort-Object Name)) {
+            [void]$iss.StartupScripts.Add($f.FullName)
+        }
+    }
+
+    # One warm worker is enough for the first dashboard request. Additional
+    # workers are created on demand, avoiding a second full startup-script load
+    # before the listener begins accepting requests.
+    $pool = [runspacefactory]::CreateRunspacePool(1, $script:DuneApiMax, $iss, $Host)
+    $pool.Open()
+    $script:DuneApiPool = $pool
+    if (Get-Command Write-DuneLog -ErrorAction SilentlyContinue) {
+        Write-DuneLog "API handler pool ready (1..$($script:DuneApiMax) runspaces)"
+    }
+}
+
+# Reclaim a gate permit exactly once, no matter which thread gets here first
+# (worker finally, or the main-loop sweep). Double-release would over-count the
+# SemaphoreSlim and throw, so guard with a one-shot flag under a monitor.
+function Complete-DuneApiRelease {
+    param([Parameter(Mandatory)]$Release)
+    try {
+        [System.Threading.Monitor]::Enter($Release)
+        if (-not $Release.Done) {
+            $Release.Done = $true
+            if ($Release.LoginGate) { [void]$Release.LoginGate.Release() }
+            if ($Release.Gate) { [void]$Release.Gate.Release() }
+        }
+    } catch {
+    } finally {
+        try { [System.Threading.Monitor]::Exit($Release) } catch {}
+    }
+}
+
+# Fire-and-forget dispatch of one /api handler onto the pool. The listener
+# thread has already done the (fast, CPU-only) token check + route match; the
+# worker reads/parses the body (off the accept loop, so a slow upload can't stall
+# it) and runs the handler. The worker ALWAYS closes the response so a failed or
+# throwing handler never leaves the client hanging.
+function Invoke-DuneApiHandlerAsync {
+    param(
+        [Parameter(Mandatory)][scriptblock]$Handler,
+        [Parameter(Mandatory)]$Request,
+        [Parameter(Mandatory)]$Response,
+        [Parameter(Mandatory)][hashtable]$RouteParams,
+        [bool]$StreamBody = $false
+    )
+
+    $loginGate = $null
+    $requestPath = ''
+    try { $requestPath = [string]$Request.Url.AbsolutePath } catch {}
+    if ($requestPath -eq '/api/portal-auth/login') {
+        $loginGate = $script:DunePortalLoginGate
+        if (-not $loginGate -or -not $loginGate.Wait(0)) {
+            try { Write-DuneError -Response $Response -Status 429 -Message 'Too many login attempts. Try again shortly.' } catch {}
+            return
+        }
+    }
+
+    # Saturation guard: never queue behind a full pool. If every permit is held
+    # (e.g. many hung SSH calls during a VM outage) answer 503 immediately so the
+    # UI gets a fast, honest error instead of an unbounded wait.
+    if (-not $script:DuneApiGate.Wait(0)) {
+        if ($loginGate) { [void]$loginGate.Release() }
+        try { Write-DuneError -Response $Response -Status 503 -Message 'Server busy: handler pool saturated. Try again shortly.' } catch {}
+        # Remote portal audit (issue #74): saturation on a remote write
+        # never reaches the worker's finally block, so log here.
+        try {
+            if ($RouteParams -and $RouteParams.ContainsKey('remoteEmail') -and $RouteParams.remoteEmail) {
+                $m = ''; try { $m = [string]$Request.HttpMethod } catch {}
+                if ($m -and $m -ne 'GET' -and $m -ne 'HEAD') {
+                    $p = ''; try { $p = [string]$Request.Url.AbsolutePath } catch {}
+                    Write-DuneRemoteAudit -Role ([string]$RouteParams.remoteRole) -Email ([string]$RouteParams.remoteEmail) -Method $m -Path $p -Status 503 -Note 'pool-saturated'
+                }
+            }
+        } catch {}
+        return
+    }
+
+    $release = [pscustomobject]@{ Gate = $script:DuneApiGate; LoginGate = $loginGate; Done = $false }
+
+    $ps = [powershell]::Create()
+    $ps.RunspacePool = $script:DuneApiPool
+    [void]$ps.AddScript({
+        param($handlerText, $req, $res, $routeParams, $ctx, $release, $streamBody)
+        try {
+            # Inject main-runspace server context into BOTH scopes. Functions
+            # defined by the startup dot-sources read these as $script:X (which,
+            # for a dot-sourced top-level scope, resolves to global); we set both
+            # to be unambiguous. Done per-invocation AFTER startup scripts ran so
+            # HttpServer.ps1's own `$script:DuneToken = ''` init can't clobber it.
+            foreach ($pair in @(
+                ,@('DuneToken',        $ctx.Token)
+                ,@('DunePrefixUrl',    $ctx.PrefixUrl)
+                ,@('DuneListener',     $ctx.Listener)
+                ,@('DuneDistRoot',     $ctx.DistRoot)
+                ,@('DuneToolVersion',  $ctx.ToolVersion)
+                ,@('DuneBuildMetadataPresent', $ctx.BuildMetadataPresent)
+                ,@('DuneBuildCommit',  $ctx.BuildCommit)
+                ,@('DuneBuildPrerelease', $ctx.BuildPrerelease)
+                ,@('DuneBuildTag',     $ctx.BuildTag)
+                ,@('PwshExe',          $ctx.PwshExe)
+                ,@('MainScript',       $ctx.MainScript)
+                ,@('AppDir',           $ctx.AppDir)
+                ,@('DuneServerDir',    $ctx.ServerDir)
+                ,@('DuneLogPath',      $ctx.LogPath)
+                ,@('DuneIsCompiledExe',$ctx.IsCompiledExe)
+                ,@('DuneApiLockTable', $ctx.LockTable)
+                ,@('DuneApiCursorSecret', $ctx.CursorSecret)
+                ,@('DunePlatformSnapshotState', $ctx.PlatformSnapshotState)
+            )) {
+                Set-Variable -Name $pair[0] -Value $pair[1] -Scope Global -ErrorAction SilentlyContinue
+                Set-Variable -Name $pair[0] -Value $pair[1] -Scope Script -ErrorAction SilentlyContinue
+            }
+
+            # Read + parse the request body here (off the listener thread).
+            $body = $null
+            if ($req.HasEntityBody -and -not $streamBody) {
+                if ($req.ContentLength64 -gt 26214400) {   # 25 MB hard cap
+                    Write-DuneError -Response $res -Status 413 -Message 'Request body too large.'
+                    return
+                }
+                $reader = [System.IO.StreamReader]::new($req.InputStream, $req.ContentEncoding)
+                try { $raw = $reader.ReadToEnd() } finally { $reader.Dispose() }
+                if ($raw -and $req.ContentType -like 'application/json*') {
+                    $body = ConvertFrom-DuneRequestJson -Raw $raw
+                } else {
+                    $body = $raw
+                }
+            }
+
+            $method = [string]$req.HttpMethod
+            $path = [string]$req.Url.AbsolutePath
+            if ($method -notin @('GET', 'HEAD') -and
+                $path -notin @('/api/db/world-restart/rollback', '/api/db/world-restart/research-rollback') -and
+                (Get-Command Test-DuneWorldRestartMaintenanceActive -ErrorAction SilentlyContinue) -and
+                (Test-DuneWorldRestartMaintenanceActive)) {
+                Write-DuneError -Response $res -Status 423 -Message 'World Restart maintenance is active. Wait for completion or use its rollback control.'
+                return
+            }
+
+            $h = [scriptblock]::Create($handlerText)
+            $invoke = {
+                if ([string]$routeParams.requestPrincipal.type -eq 'linked-player' -and
+                    -not (Test-DunePlayerRequestAccess -Request $req -Response $res -RouteParams $routeParams -Body $body)) { return }
+                & $h $req $res $routeParams $body
+            }
+            $admitted = Invoke-DuneWorldRestartAdmission -Method $method -Path $path -Action $invoke
+            if ($admitted -is [System.Collections.IDictionary] -and $admitted.blocked) {
+                Write-DuneError -Response $res -Status 423 -Message 'World Restart maintenance is active. Wait for completion or use its rollback control.'
+            }
+        } catch {
+            # Off-thread failure: best-effort 500. If the handler already started
+            # the response this throws and is swallowed; the finally still closes.
+            try {
+                $res.StatusCode = 500
+                $bytes = [System.Text.Encoding]::UTF8.GetBytes("Server error: $($_.Exception.Message)")
+                $res.OutputStream.Write($bytes, 0, $bytes.Length)
+            } catch {}
+            try {
+                if (Get-Command Write-DuneLog -ErrorAction SilentlyContinue) {
+                    Write-DuneLog "api-handler error: $($_.Exception.Message)" 'ERROR'
+                }
+            } catch {}
+        } finally {
+            try { $res.OutputStream.Close() } catch {}
+            # Remote portal audit log (issue #74): when this worker handled
+            # a write (non-GET) /api/remote/* request, append one line with
+            # the final status code. Reads are NOT audit-logged. Listener-
+            # thread denials (401/403/503) are logged in Invoke-DuneContext
+            # directly because the worker never starts for those.
+            try {
+                if ($routeParams -and $routeParams.ContainsKey('remoteEmail') -and $routeParams.remoteEmail) {
+                    $m = ''
+                    try { $m = [string]$req.HttpMethod } catch {}
+                    if ($m -and $m -ne 'GET' -and $m -ne 'HEAD') {
+                        $p = ''
+                        try { $p = [string]$req.Url.AbsolutePath } catch {}
+                        $sc = 0
+                        try { $sc = [int]$res.StatusCode } catch {}
+                        if (Get-Command Write-DuneRemoteAudit -ErrorAction SilentlyContinue) {
+                            Write-DuneRemoteAudit -Role ([string]$routeParams.remoteRole) -Email ([string]$routeParams.remoteEmail) -Method $m -Path $p -Status $sc
+                        }
+                    }
+                }
+            } catch {}
+            try { $res.Close() } catch {}
+            # Centralized, monitor-guarded release covers both the general API
+            # permit and the login-specific permit exactly once. The main-loop
+            # completion sweep calls the same helper defensively.
+            Complete-DuneApiRelease -Release $release
+        }
+    }).AddArgument($Handler.ToString()).AddArgument($Request).AddArgument($Response).AddArgument($RouteParams).AddArgument($script:DuneApiCtx).AddArgument($release).AddArgument($StreamBody)
+
+    try {
+        $handle = $ps.BeginInvoke()
+        [void]$script:DuneApiInFlight.Add([pscustomobject]@{ Ps = $ps; Handle = $handle; Release = $release })
+    } catch {
+        # Couldn't even start the pipeline — reclaim the permit and answer now so
+        # the client isn't left hanging on a request we never ran.
+        Complete-DuneApiRelease -Release $release
+        try { $ps.Dispose() } catch {}
+        try { Write-DuneError -Response $Response -Status 503 -Message 'Server busy: could not dispatch handler.' } catch {}
+    }
+}
+
+# Reap finished worker pipelines: EndInvoke + Dispose, and defensively reclaim
+# any permit a worker somehow failed to release (e.g. an aborted runspace).
+# Called each iteration of the accept loop and during shutdown. Per-entry
+# try/catch so one faulted EndInvoke can't abort the whole sweep.
+function Clear-DuneApiCompleted {
+    if (-not $script:DuneApiInFlight) { return }
+    $done = @()
+    foreach ($e in @($script:DuneApiInFlight.ToArray())) {
+        if ($e.Handle -and $e.Handle.IsCompleted) { $done += $e }
+    }
+    foreach ($e in $done) {
+        try { [void]$e.Ps.EndInvoke($e.Handle) } catch {}
+        try { $e.Ps.Dispose() } catch {}
+        Complete-DuneApiRelease -Release $e.Release
+        try { [void]$script:DuneApiInFlight.Remove($e) } catch {}
+    }
+}
+
+# ---------- Responses ----------------------------------------------------------
+
+# Parse incoming JSON request body into a [hashtable] that works on both
+# Windows PowerShell 5.1 (no -AsHashtable) and PowerShell 7+. Falls back to
+# the raw string on parse failure so callers can still inspect it.
+function ConvertFrom-DuneRequestJson {
+    param([Parameter(Mandatory)][string]$Raw)
+    if (-not $Raw -or -not $Raw.Trim()) { return $null }
+    # PS 7+: prefer -AsHashtable when available.
+    $hasAsHashtable = (Get-Command ConvertFrom-Json).Parameters.ContainsKey('AsHashtable')
+    if ($hasAsHashtable) {
+        try { return ($Raw | ConvertFrom-Json -AsHashtable) } catch { return $Raw }
+    }
+    # PS 5.1: parse to PSCustomObject, then convert recursively to [hashtable].
+    try {
+        $obj = $Raw | ConvertFrom-Json
+        return (ConvertTo-DuneHashtable -InputObject $obj)
+    } catch {
+        return $Raw
+    }
+}
+
+function ConvertTo-DuneHashtable {
+    param($InputObject)
+    if ($null -eq $InputObject) { return $null }
+    if ($InputObject -is [System.Collections.IDictionary]) {
+        $out = @{}
+        foreach ($k in $InputObject.Keys) { $out[[string]$k] = ConvertTo-DuneHashtable $InputObject[$k] }
+        return $out
+    }
+    if ($InputObject -is [System.Management.Automation.PSCustomObject]) {
+        $out = @{}
+        foreach ($p in $InputObject.PSObject.Properties) { $out[$p.Name] = ConvertTo-DuneHashtable $p.Value }
+        return $out
+    }
+    if ($InputObject -is [System.Collections.IEnumerable] -and -not ($InputObject -is [string])) {
+        return ,@($InputObject | ForEach-Object { ConvertTo-DuneHashtable $_ })
+    }
+    return $InputObject
+}
+
+function Write-DuneJson {
+    param(
+        [Parameter(Mandatory)] $Response,
+        [Parameter(Mandatory)] $Body,
+        [int]$Status = 200
+    )
+    $Response.StatusCode = $Status
+    $Response.ContentType = 'application/json; charset=utf-8'
+    $Response.Headers['Cache-Control'] = 'no-store'
+    $json  = if ($null -eq $Body) { 'null' } else { $Body | ConvertTo-Json -Depth 12 -Compress }
+    if ($Response.PSObject.Properties['DunePlayerResponse'] -and $Response.DunePlayerResponse) {
+        $json = Protect-DunePlayerResponseJson -Json $json
+    }
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
+    $Response.ContentLength64 = $bytes.Length
+    $Response.OutputStream.Write($bytes, 0, $bytes.Length)
+    $Response.OutputStream.Close()
+}
+
+function Write-DuneError {
+    param($Response, [int]$Status, [string]$Message)
+    Write-DuneJson -Response $Response -Status $Status -Body @{ error = $Message }
+}
+
+function Write-DuneFile {
+    param(
+        $Response,
+        [string]$Path,
+        # When set, treat the file as the remote-portal index.html and
+        # string-replace the <!-- DUNE_REMOTE_BOOTSTRAP --> marker with a
+        # tiny <script> tag that exposes the per-launch DuneToken to the
+        # remote SPA. Issue #74: this is how the SPA gets the token without
+        # the user having to paste it on a phone.
+        [switch]$InjectRemoteToken,
+        # Inject this specific token instead of the per-launch DuneToken. Used by
+        # the magic-link path (public Funnel browser portal) to inject the STABLE
+        # remote token so the SPA keeps authenticating across server restarts.
+        [string]$TokenOverride
+    )
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        Write-DuneError -Response $Response -Status 404 -Message 'Not found'
+        return
+    }
+    $Response.StatusCode  = 200
+    $Response.ContentType = Get-DuneMimeType $Path
+
+    # Cache hashed assets aggressively, anything else not at all.
+    if ($Path -match '[\\/][^\\/]+\-[A-Za-z0-9_-]{6,}\.(?:js|css|woff2?|png|jpg|jpeg|svg|webp)$' -or $Path -match '[\\/]item-icons[\\/][a-f0-9]{20}\.webp$') {
+        $Response.Headers['Cache-Control'] = 'public, max-age=31536000, immutable'
+    } else {
+        $Response.Headers['Cache-Control'] = 'no-cache'
+    }
+
+    if ($InjectRemoteToken) {
+        # index.html is small (~1 KB); read it as text, do the replacement,
+        # then emit UTF-8 bytes. Never cached (we already set no-cache above).
+        $html = Get-Content -LiteralPath $Path -Raw -Encoding UTF8
+        $injTok = if ($TokenOverride) { $TokenOverride } else { $script:DuneToken }
+        $tokenLiteral = if ($injTok) { ($injTok -replace '"','\"') } else { '' }
+        $script = '<script>window.__duneRemoteToken="' + $tokenLiteral + '";</script>'
+        $html = $html -replace '<!--\s*DUNE_REMOTE_BOOTSTRAP\s*-->', $script
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($html)
+        $Response.ContentLength64 = $bytes.Length
+        $Response.OutputStream.Write($bytes, 0, $bytes.Length)
+        $Response.OutputStream.Close()
+        return
+    }
+
+    $stream = [System.IO.File]::OpenRead($Path)
+    try {
+        $Response.ContentLength64 = $stream.Length
+        $stream.CopyTo($Response.OutputStream)
+    } finally {
+        $stream.Dispose()
+        $Response.OutputStream.Close()
+    }
+}
+
+# ---------- Static SPA serving -------------------------------------------------
+
+function Resolve-DuneStaticPath {
+    param([string]$UrlPath)
+    if ([string]::IsNullOrEmpty($UrlPath) -or $UrlPath -eq '/') {
+        return (Join-Path $script:DuneDistRoot 'index.html')
+    }
+    $rel = $UrlPath.TrimStart('/')
+    if ($rel.Contains('..')) { return $null }
+    $full = Join-Path $script:DuneDistRoot $rel
+    $normalized = [System.IO.Path]::GetFullPath($full)
+    $rootNorm   = [System.IO.Path]::GetFullPath($script:DuneDistRoot)
+    if (-not $normalized.StartsWith($rootNorm, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $null
+    }
+    if (-not (Test-Path -LiteralPath $normalized -PathType Leaf)) {
+        $retained = Resolve-DuneRetainedAsset -UrlPath $UrlPath
+        if ($retained) { return $retained }
+    }
+    return $normalized
+}
+
+# ---------- Token --------------------------------------------------------------
+
+function Test-DuneLegacyCloudflareLaunchTokenRequest {
+    param($Request)
+
+    # Only the full portal receives the per-launch token after a verified
+    # Cloudflare Access browser request. Do not treat native service-token,
+    # Tailscale bridge, or genuine desktop traffic as this legacy browser path.
+    $email = ''
+    try { $email = [string]$Request.Headers['Cf-Access-Authenticated-User-Email'] } catch {}
+    if (-not $email) { return $false }
+    return -not (Test-DuneLocalOnlyRequest -Request $Request)
+}
+
+function Test-DuneToken {
+    param($Request)
+    $hdr = $Request.Headers['X-Dune-Token']
+    if (-not $hdr) { $hdr = $Request.QueryString['t'] }
+
+    # Per-launch token (desktop portal + local API). Empty == dev-mode escape hatch.
+    if ([string]::IsNullOrEmpty($script:DuneToken)) { return $true }
+    if ($hdr -eq $script:DuneToken) {
+        if (Test-DuneLegacyCloudflareLaunchTokenRequest -Request $Request) {
+            try {
+                if (-not (Test-DuneLegacyCloudflarePortalEnabled)) { return $false }
+            } catch {
+                return $false
+            }
+        }
+        return $true
+    }
+
+    # Permanent remote token (the paired mobile app / friend magic link). The
+    # per-launch token rotates every start, so the phone holds this stable one
+    # instead. Loaded once and cached in this (main-loop) runspace.
+    if ([string]::IsNullOrEmpty($script:DuneRemoteToken)) {
+        try {
+            if (Get-Command Get-DuneRemoteToken -ErrorAction SilentlyContinue) {
+                $script:DuneRemoteToken = [string](Get-DuneRemoteToken)
+            }
+
+        } catch {}
+    }
+    if (-not [string]::IsNullOrEmpty($script:DuneRemoteToken) -and $hdr -eq $script:DuneRemoteToken) {
+        return $true
+    }
+    return $false
+}
+
+function Test-DuneLaunchToken {
+    param($Request)
+    if ([string]::IsNullOrEmpty($script:DuneToken)) { return $true }
+    $provided = ''
+    try { $provided = [string]$Request.Headers['X-Dune-Token'] } catch {}
+    if (-not $provided) {
+        try { $provided = [string]$Request.QueryString['t'] } catch {}
+    }
+    return ($provided -eq $script:DuneToken)
+}
+
+function Test-DuneAccountModeLaunchAccess {
+    param($Request)
+    if($env:DST_HOSTING_BACKEND -eq 'docker'){return $false}
+    if (-not (Test-DuneLaunchToken -Request $Request)) { return $false }
+    if (Test-DuneLocalOnlyRequest -Request $Request) { return $true }
+    try {
+        $cloudflare = Test-DuneRemoteRequest -Request $Request
+        return [bool]$cloudflare.ok
+    } catch {
+        return $false
+    }
+}
+
+# ---------- Main loop ----------------------------------------------------------
+
+function Get-DuneHttpListenerPrefix {
+    param([string]$BindAddress = '127.0.0.1', [int]$Port, [string]$Token = '')
+    $address = $null
+    if (-not [Net.IPAddress]::TryParse($BindAddress, [ref]$address) -or
+        $address.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork) {
+        throw 'The HTTP bind address must be an IPv4 address.'
+    }
+    if (-not [Net.IPAddress]::IsLoopback($address) -and [string]::IsNullOrWhiteSpace($Token)) {
+        throw 'An authenticated launch credential is required for network access.'
+    }
+    $hostName = if ($address.Equals([Net.IPAddress]::Any)) { '+' } else { $address.ToString() }
+    return "http://${hostName}:$Port/"
+}
+
+function Start-DuneHttpServer {
+    param(
+        [Parameter(Mandatory)][string]$DistRoot,
+        [int]$PreferredPort = 47823,
+        [string]$Token = '',
+        [string]$BindAddress = '127.0.0.1',
+        [switch]$StrictPort
+    )
+
+    $script:DuneDistRoot = (Resolve-Path -LiteralPath $DistRoot).Path
+    try {
+        if ($env:LOCALAPPDATA) { Initialize-DuneStaticAssetCache -DistRoot $script:DuneDistRoot -CacheRoot (Join-Path $env:LOCALAPPDATA 'DuneServer/web-assets') }
+    } catch { Write-Warning ('Recent browser assets could not be retained: ' + $_.Exception.Message) }
+    $script:DuneToken    = $Token
+    # Validate once before trying ports; invalid network configuration must not
+    # be mistaken for a busy port. Local-only route checks remain independent.
+    [void](Get-DuneHttpListenerPrefix -BindAddress $BindAddress -Port $PreferredPort -Token $Token)
+
+    # Find a free port starting at $PreferredPort.
+    $port = $PreferredPort
+    $listener = $null
+    $lastPort=if($StrictPort){$PreferredPort}else{$PreferredPort+49}
+    while ($port -le $lastPort) {
+        try {
+            $l = [System.Net.HttpListener]::new()
+            $prefix = Get-DuneHttpListenerPrefix -BindAddress $BindAddress -Port $port -Token $Token
+            $l.Prefixes.Add($prefix)
+            $l.Start()
+            $listener = $l
+            # Health checks and internal workers always use a concrete local URL.
+            $script:DunePrefixUrl = "http://127.0.0.1:$port/"
+            break
+        } catch {
+            try { $l.Close() } catch {}
+            $port++
+        }
+    }
+    if (-not $listener) {
+        if($StrictPort){throw "Console port $PreferredPort is unavailable. Choose another port with: sh bin/dst-docker port <port>"}
+        throw "Could not bind HTTP listener in range $PreferredPort..$lastPort"
+    }
+    $script:DuneListener = $listener
+    if (Get-Command Write-DuneLog -ErrorAction SilentlyContinue) {
+        Write-DuneLog "HTTP listening on $script:DunePrefixUrl"
+    } else {
+        Write-Host "[dune-http] Listening on $script:DunePrefixUrl" -ForegroundColor Cyan
+    }
+
+    # Persist actual URL (with token) for external tools.
+    $actualUrl = if ($Token) { "{0}?t={1}" -f $script:DunePrefixUrl, [Uri]::EscapeDataString($Token) } else { $script:DunePrefixUrl }
+    try {
+        $stateDir = Join-Path $env:LOCALAPPDATA 'DuneServer'
+        if (-not (Test-Path -LiteralPath $stateDir)) { New-Item -ItemType Directory -Path $stateDir -Force | Out-Null }
+        Set-Content -LiteralPath (Join-Path $stateDir 'last-url.txt') -Value $actualUrl -Encoding UTF8 -Force
+    } catch { }
+
+    # Link the app-window + console lifecycle to this listener now that it's
+    # bound: closing the app window stops the server, and apply the user's
+    # chosen console presentation (minimized vs. system tray). No-op in
+    # browser-fallback mode (nothing to watch).
+    if (Get-Command Start-DuneConsoleLifecycle -ErrorAction SilentlyContinue) {
+        try { Start-DuneConsoleLifecycle -Listener $listener } catch {
+            if (Get-Command Write-DuneLog -ErrorAction SilentlyContinue) {
+                Write-DuneLog "Console lifecycle init failed: $($_.Exception.Message)" 'WARN'
+            }
+        }
+    }
+
+    # Build the /api handler pool now that the listener is bound and all the
+    # main-runspace context vars are set. If it fails for any reason, fall back
+    # to the legacy inline dispatch so the server still works (just single
+    # threaded) rather than not starting at all.
+    $script:DuneApiPoolEnabled = $false
+    try {
+        Initialize-DuneApiPool -ServerDir $script:DuneServerDir
+        $script:DuneApiPoolEnabled = $true
+    } catch {
+        if (Get-Command Write-DuneLog -ErrorAction SilentlyContinue) {
+            Write-DuneLog "API handler pool init failed; falling back to inline dispatch: $($_.Exception.Message)" 'WARN'
+        }
+    }
+
+    $httpReady = [Threading.ManualResetEventSlim]::new($false)
+    if (-not ((Get-Command Test-DuneSoloInstallation -ErrorAction SilentlyContinue) -and (Test-DuneSoloInstallation)) -and (Get-Command Start-DunePlatformCacheStartup -ErrorAction SilentlyContinue)) {
+        try {
+            [void](Start-DunePlatformCacheStartup -ServerDir $script:DuneServerDir -HttpReady $httpReady)
+        } catch {
+            Write-DuneLog "Platform cache background startup could not be queued: $($_.Exception.Message)" 'WARN'
+        }
+    }
+
+    # Launch the in-process scheduled-restart loop. It lives in this process, so
+    # it only fires while DST is open and running (the UI states this). Failure
+    # to start must not block the server from accepting requests.
+    if($env:DST_HOSTING_BACKEND -eq 'docker'){
+        try {Start-DuneDockerRestartScheduler -ServerDir $script:DuneServerDir -HttpReady $httpReady}
+        catch {Write-DuneLog ('Docker scheduler launch failed: '+$_.Exception.Message) 'WARN'}
+        try {Start-DuneDockerChatScheduler -ServerDir $script:DuneServerDir -HttpReady $httpReady}
+        catch {Write-DuneLog ('Docker chat scheduler launch failed: '+$_.Exception.Message) 'WARN'}
+    } elseif (-not ((Get-Command Test-DuneSoloInstallation -ErrorAction SilentlyContinue) -and (Test-DuneSoloInstallation)) -and (Get-Command Start-DuneRestartScheduler -ErrorAction SilentlyContinue)) {
+        try { Start-DuneRestartScheduler -ServerDir $script:DuneServerDir -HttpReady $httpReady } catch {
+            if (Get-Command Write-DuneLog -ErrorAction SilentlyContinue) {
+                Write-DuneLog "restart scheduler launch failed: $($_.Exception.Message)" 'WARN'
+            }
+        }
+    }
+
+    try {
+        while ($listener.IsListening) {
+            # Reap finished worker pipelines from the previous wait.
+            try { Clear-DuneApiCompleted } catch {}
+            try {
+                $ctxTask = $listener.GetContextAsync()
+                if (-not $httpReady.IsSet) {
+                    $httpReady.Set()
+                    if (Get-Command Write-DuneStartupLog -ErrorAction SilentlyContinue) {
+                        Write-DuneStartupLog 'HTTP accept loop ready'
+                    }
+                }
+                $ctx = $ctxTask.GetAwaiter().GetResult()
+            } catch [System.Net.HttpListenerException] {
+                break  # Listener was Stop()ed externally (e.g., tray Quit)
+            } catch [System.ObjectDisposedException] {
+                break
+            } catch {
+                if (-not $listener.IsListening) { break }
+                throw
+            }
+            try {
+                Invoke-DuneContext -Ctx $ctx
+            } catch {
+                try {
+                    $ctx.Response.StatusCode = 500
+                    $msg = "Server error: $($_.Exception.Message)"
+                    $bytes = [System.Text.Encoding]::UTF8.GetBytes($msg)
+                    $ctx.Response.OutputStream.Write($bytes, 0, $bytes.Length)
+                    $ctx.Response.OutputStream.Close()
+                } catch {}
+                if (Get-Command Write-DuneLog -ErrorAction SilentlyContinue) {
+                    Write-DuneLog "request handler error: $($_.Exception.Message)" 'ERROR'
+                } else {
+                    Write-Host "[dune-http] $($_.Exception.Message)" -ForegroundColor Red
+                }
+            }
+        }
+    } finally {
+        $backgroundStopped = $true
+        if (Get-Command Stop-DunePlatformCacheStartup -ErrorAction SilentlyContinue) {
+            if ($script:DunePlatformStartupWorker) {
+                try {
+                    $backgroundStopped = (Stop-DunePlatformCacheStartup) -and $backgroundStopped
+                } catch {
+                    $backgroundStopped = $false
+                    Write-DuneLog "Platform cache shutdown failed: $($_.Exception.Message)" 'WARN'
+                }
+            }
+        }
+        if (Get-Command Stop-DuneRestartScheduler -ErrorAction SilentlyContinue) {
+            try {
+                $backgroundStopped = (Stop-DuneRestartScheduler) -and $backgroundStopped
+            } catch {
+                $backgroundStopped = $false
+                Write-DuneLog "Restart scheduler shutdown failed: $($_.Exception.Message)" 'WARN'
+            }
+        }
+        if (Get-Command Stop-DuneDockerChatScheduler -ErrorAction SilentlyContinue) {
+            try { $backgroundStopped = (Stop-DuneDockerChatScheduler) -and $backgroundStopped }
+            catch { $backgroundStopped=$false; Write-DuneLog ('Docker chat scheduler shutdown failed: '+$_.Exception.Message) 'WARN' }
+        }
+        if ($backgroundStopped) { $httpReady.Dispose() }
+        # Wait briefly for in-flight handlers to finish, then reap + tear down.
+        try {
+            $deadline = (Get-Date).AddSeconds(5)
+            while ($script:DuneApiInFlight -and $script:DuneApiInFlight.Count -gt 0 -and (Get-Date) -lt $deadline) {
+                Clear-DuneApiCompleted
+                if ($script:DuneApiInFlight.Count -gt 0) { Start-Sleep -Milliseconds 100 }
+            }
+        } catch {}
+        try { $listener.Stop() } catch { }
+        try { $listener.Close() } catch { }
+    }
+}
+
+function Stop-DuneHttpServer {
+    if ($script:DuneListener) {
+        try { $script:DuneListener.Stop() } catch {}
+        try { $script:DuneListener.Close() } catch {}
+        $script:DuneListener = $null
+    }
+    if ($script:DuneWsPool) {
+        try { $script:DuneWsPool.Close() } catch {}
+        try { $script:DuneWsPool.Dispose() } catch {}
+        $script:DuneWsPool = $null
+    }
+    if ($script:DuneApiPool) {
+        try { Clear-DuneApiCompleted } catch {}
+        try { $script:DuneApiPool.Close() } catch {}
+        try { $script:DuneApiPool.Dispose() } catch {}
+        $script:DuneApiPool = $null
+    }
+}
+
+function Get-DuneServerUrl {
+    if (-not $script:DunePrefixUrl) { return $null }
+    if ([string]::IsNullOrEmpty($script:DuneToken)) { return $script:DunePrefixUrl }
+    return ("{0}?t={1}" -f $script:DunePrefixUrl, [Uri]::EscapeDataString($script:DuneToken))
+}
+
+function Invoke-DuneContext {
+    param($Ctx)
+    $req = $Ctx.Request
+    $res = $Ctx.Response
+    $rawPath = $req.Url.AbsolutePath
+    $method  = $req.HttpMethod
+    $requestId = if (Get-Command New-DuneRequestId -ErrorAction SilentlyContinue) {
+        New-DuneRequestId
+    } else {
+        [guid]::NewGuid().ToString('N')
+    }
+    try { $res.Headers['X-Dune-Request-Id'] = $requestId } catch {}
+
+    # WebSocket upgrades — dispatched onto a runspace pool so the main loop
+    # can keep accepting HTTP requests while the WS session runs.
+    if ($req.IsWebSocketRequest) {
+        if ($env:DST_HOSTING_BACKEND -eq 'docker') {
+            Write-DuneError -Response $res -Status 501 -Message 'WebSocket actions are not available in the Docker preview.'
+            return
+        }
+        $wsAllowed = $false
+        $accountMode = $false
+        $sessionAuth = $null
+        try { $accountMode = [bool](Test-DunePortalAccountModeEnabled) } catch {}
+        if ($accountMode) {
+            $wsAllowed = Test-DuneAccountModeLaunchAccess -Request $req
+            if (-not $wsAllowed) {
+                try { $sessionAuth = Get-DunePortalSessionAuth -Request $req } catch {}
+                $wsAllowed = [bool]($sessionAuth -and $sessionAuth.ok -and -not $sessionAuth.mustChangePassword)
+                if ($wsAllowed -and -not (Test-DunePortalRequestOrigin -Request $req)) { $wsAllowed = $false }
+            }
+        } else {
+            $wsAllowed = Test-DuneToken -Request $req
+        }
+        if (-not $wsAllowed) {
+            $res.StatusCode = 401
+            $res.OutputStream.Close()
+            return
+        }
+        if ((Get-Command Test-DuneSoloInstallation -ErrorAction SilentlyContinue) -and (Test-DuneSoloInstallation)) {
+            Write-DuneError -Response $res -Status 409 -Message 'Dedicated-server connections require the Self-Hosted + Solo installation.'
+            return
+        }
+        foreach ($r in $script:DuneWsRoutes) {
+            $m = $r.Regex.Match($rawPath)
+            if ($m.Success) {
+                if ($r.LocalOnly) {
+                    $remote = $null
+                    try { $remote = $req.RemoteEndPoint.Address } catch {}
+                    $isLoopback = $false
+                    if ($remote) {
+                        try { $isLoopback = [System.Net.IPAddress]::IsLoopback($remote) } catch { $isLoopback = $false }
+                    }
+                    # SECURITY: the mobile/remote bridge and the tunnel transport
+                    # both connect from 127.0.0.1, so RemoteEndPoint alone marks a
+                    # TUNNELED request as loopback and would wrongly allow it.
+                    # Any Cloudflare / proxy edge header means the request arrived
+                    # through the tunnel (never present on a genuine host-local
+                    # request), so treat it as NON-local regardless of the socket
+                    # address. Keeps the free-form Terminal host-only even though
+                    # the full dashboard is now reachable remotely.
+                    $isTunneled = $false
+                    foreach ($h in @('Cf-Access-Authenticated-User-Email','Cf-Ray','Cf-Connecting-Ip','X-Forwarded-For','X-Forwarded-Proto')) {
+                        try { if ($req.Headers[$h]) { $isTunneled = $true; break } } catch {}
+                    }
+                    if ((-not $isLoopback) -or $isTunneled) {
+                        Write-Host "[ws] 403 local-only path '$rawPath' from $remote (tunneled=$isTunneled)" -ForegroundColor Yellow
+                        $res.StatusCode = 403
+                        $res.OutputStream.Close()
+                        return
+                    }
+                }
+                $routeParams = @{}
+                foreach ($g in $r.Regex.GetGroupNames()) {
+                    if ($g -notmatch '^\d+$') { $routeParams[$g] = $m.Groups[$g].Value }
+                }
+                $isLocalRequest = Test-DuneLocalOnlyRequest -Request $req
+                $wsAuthentication = if ($accountMode) { 'portal-session-or-launch-token' } else { 'token' }
+                $wsPrincipal = New-DuneDispatchPrincipal `
+                    -Request $req `
+                    -IsLocalRequest $isLocalRequest `
+                    -AccountMode $accountMode `
+                    -LaunchAccess $wsAllowed `
+                    -PortalSessionAuth $sessionAuth `
+                    -Authentication $wsAuthentication
+                if (-not (Test-DuneDispatchPrincipalAccess -Route $r -Principal $wsPrincipal)) {
+                    $res.StatusCode = 403
+                    $res.OutputStream.Close()
+                    return
+                }
+                Add-DuneRouteContractContext -Route $r -RouteParams $routeParams -Principal $wsPrincipal -RequestId $requestId
+                try {
+                    $wsTask = $Ctx.AcceptWebSocketAsync([NullString]::Value)
+                    $wsCtx  = $wsTask.GetAwaiter().GetResult()
+                } catch {
+                    Write-Host "[ws] accept failed: $($_.Exception.Message)" -ForegroundColor Red
+                    return
+                }
+                Invoke-DuneWsHandlerAsync -Handler $r.Handler -WebSocket $wsCtx.WebSocket -RouteParams $routeParams
+                return
+            }
+        }
+        $res.StatusCode = 404
+        $res.OutputStream.Close()
+        return
+    }
+
+    # ---------- Remote portal (issue #74) ------------------------------------
+    # Two distinct surfaces gated by Cloudflare Access:
+    #   /api/remote/*  — JSON API, requires CF Access header + ACL match
+    #                    AND DuneToken (defense in depth).
+    #   /remote/*      — SPA HTML/assets, requires CF Access header + ACL.
+    #                    Token reaches the SPA via index.html injection.
+    # All other /api/* and /api/remote-access/* fall through to the
+    # standard DuneToken gate below.
+    $isRemoteApi = $rawPath.StartsWith('/api/remote/')
+    $isRemoteSpa = $rawPath.StartsWith('/remote/') -or $rawPath -eq '/remote'
+    if ($isRemoteApi -or $isRemoteSpa) {
+        $legacyRemoteEnabled = $false
+        try { $legacyRemoteEnabled = [bool](Test-DuneLegacyCloudflarePortalEnabled) } catch {}
+        $accountMode = $false
+        try { $accountMode = [bool](Test-DunePortalAccountModeEnabled) } catch {}
+        if (-not $legacyRemoteEnabled -or $accountMode) {
+            Write-DuneError -Response $res -Status 404 -Message 'Not found.'
+            return
+        }
+        $auth = $null
+        try { $auth = Test-DuneRemoteRequest -Request $req } catch {
+            $auth = @{ ok = $false; status = 500; message = "Auth middleware error: $($_.Exception.Message)" }
+        }
+        if (-not $auth.ok) {
+            $note = if ($auth.status -eq 401) { 'auth-required' } elseif ($auth.status -eq 403) { 'not-authorized' } else { 'auth-error' }
+            $emailHdr = ''
+            try { $emailHdr = ($req.Headers['Cf-Access-Authenticated-User-Email']) } catch {}
+            try {
+                Write-DuneRemoteAudit -Role '-' -Email $emailHdr -Method $method -Path $rawPath -Status $auth.status -Note $note
+            } catch {}
+            Write-DuneError -Response $res -Status $auth.status -Message $auth.message
+            return
+        }
+
+        if ($isRemoteApi) {
+            # /api/remote/* — also require the per-launch DuneToken (defense
+            # in depth — a same-Windows-box attacker forging the CF header
+            # still hits this wall because the token only lives in DST's RAM).
+            if (-not (Test-DuneToken -Request $req)) {
+                try { Write-DuneRemoteAudit -Role $auth.role -Email $auth.email -Method $method -Path $rawPath -Status 401 -Note 'token-missing' } catch {}
+                Write-DuneError -Response $res -Status 401 -Message 'Invalid or missing token'
+                return
+            }
+            foreach ($r in $script:DuneRoutes) {
+                if ($r.Method -ne $method) { continue }
+                $m = $r.Regex.Match($rawPath)
+                if ($m.Success) {
+                    if ($r.LocalOnly) {
+                        Write-DuneError -Response $res -Status 403 -Message 'This API is available only from the host machine.'
+                        return
+                    }
+                    $remotePrincipal = New-DuneDispatchPrincipal `
+                        -Request $req `
+                        -IsLocalRequest $false `
+                        -AccountMode $false `
+                        -LegacyRemoteAuth $auth `
+                        -Authentication 'cloudflare-access-token'
+                    if (-not (Test-DuneDispatchPrincipalAccess -Route $r -Principal $remotePrincipal)) {
+                        Write-DuneError -Response $res -Status 403 -Message 'Capability access denied.'
+                        return
+                    }
+                    $routeParams = @{}
+                    foreach ($g in $r.Regex.GetGroupNames()) {
+                        if ($g -notmatch '^\d+$') { $routeParams[$g] = $m.Groups[$g].Value }
+                    }
+                    $routeParams['remoteEmail'] = $auth.email
+                    $routeParams['remoteRole']  = $auth.role
+                    Add-DuneRouteContractContext -Route $r -RouteParams $routeParams -Principal $remotePrincipal -RequestId $requestId
+                    if ((Get-Command Test-DuneSoloInstallation -ErrorAction SilentlyContinue) -and (Test-DuneSoloServerApiPath -Path $rawPath -Method $method) -and (Test-DuneSoloInstallation)) {
+                        Write-DuneError -Response $res -Status 409 -Message 'Dedicated-server tools require the Self-Hosted + Solo installation.'
+                        return
+                    }
+                    if (Test-DuneWorldRestartWriteBlocked -Method $method -Path $rawPath) {
+                        Write-DuneError -Response $res -Status 423 -Message 'World Restart maintenance is active. Wait for completion or use its rollback control.'
+                        return
+                    }
+                    if ($script:DuneApiPoolEnabled -and -not $r.Inline) {
+                        Invoke-DuneApiHandlerAsync -Handler $r.Handler -Request $req -Response $res -RouteParams $routeParams
+                        return
+                    }
+                    $body = $null
+                    if ($req.HasEntityBody) {
+                        $reader = [System.IO.StreamReader]::new($req.InputStream, $req.ContentEncoding)
+                        try { $body = $reader.ReadToEnd() } finally { $reader.Dispose() }
+                        if ($body -and $req.ContentType -like 'application/json*') {
+                            $body = ConvertFrom-DuneRequestJson -Raw $body
+                        }
+                    }
+                    $invoke = { & $r.Handler $req $res $routeParams $body }
+                    $admitted = Invoke-DuneWorldRestartAdmission -Method $method -Path $rawPath -Action $invoke
+                    if ($admitted -is [System.Collections.IDictionary] -and $admitted.blocked) {
+                        Write-DuneError -Response $res -Status 423 -Message 'World Restart maintenance is active. Wait for completion or use its rollback control.'
+                    }
+                    # Inline path also gets audit-logged for writes (the
+                    # worker path is handled in Invoke-DuneApiHandlerAsync).
+                    if ($method -ne 'GET' -and $method -ne 'HEAD') {
+                        try { Write-DuneRemoteAudit -Role $auth.role -Email $auth.email -Method $method -Path $rawPath -Status ([int]$res.StatusCode) } catch {}
+                    }
+                    return
+                }
+            }
+            try { Write-DuneRemoteAudit -Role $auth.role -Email $auth.email -Method $method -Path $rawPath -Status 404 -Note 'no-route' } catch {}
+            Write-DuneError -Response $res -Status 404 -Message "No route for $method $rawPath"
+            return
+        }
+
+        # /remote/* SPA serving (GET/HEAD only). Token injection happens in
+        # Write-DuneFile when the served file is index.html.
+        if ($method -ne 'GET' -and $method -ne 'HEAD') {
+            Write-DuneError -Response $res -Status 405 -Message 'Method not allowed'
+            return
+        }
+        $filePath = Resolve-DuneStaticPath -UrlPath $rawPath
+        $serveIndex = $false
+        if ($filePath -and (Test-Path -LiteralPath $filePath -PathType Leaf)) {
+            $serveIndex = ($filePath -match '\\index\.html$')
+            Write-DuneFile -Response $res -Path $filePath -InjectRemoteToken:$serveIndex
+            return
+        }
+        # SPA fallback (client-side router URLs like /remote/maps) — serve
+        # the SPA's index.html with the token injection.
+        $indexPath = Join-Path $script:DuneDistRoot 'index.html'
+        if (Test-Path -LiteralPath $indexPath -PathType Leaf) {
+            Write-DuneFile -Response $res -Path $indexPath -InjectRemoteToken
+            return
+        }
+        Write-DuneError -Response $res -Status 404 -Message 'Static asset not found'
+        return
+    }
+
+    # API routes
+    if ($rawPath.StartsWith('/api/')) {
+        $accountMode = $false
+        try { $accountMode = [bool](Test-DunePortalAccountModeEnabled) } catch {}
+        $publicPortalAuth = $rawPath -in @('/api/portal-auth/status', '/api/portal-auth/login')
+        $portalSessionAuth = $null
+        $launchAccess = $false
+        $isLocalRequest = $env:DST_HOSTING_BACKEND -ne 'docker' -and (Test-DuneLocalOnlyRequest -Request $req)
+
+        $isPortalAuthBody = $rawPath.StartsWith('/api/portal-auth/') -or $rawPath.StartsWith('/api/remote-access/portal-account') -or $rawPath -eq '/api/docker/owner/setup'
+        if ($isPortalAuthBody -and $req.HasEntityBody -and
+            ($req.ContentLength64 -lt 0 -or $req.ContentLength64 -gt 4096)) {
+            Write-DuneError -Response $res -Status 413 -Message 'Request body too large.'
+            return
+        }
+
+        if (-not $publicPortalAuth) {
+            if ($accountMode) {
+                $launchAccess = Test-DuneAccountModeLaunchAccess -Request $req
+                try { $portalSessionAuth = Get-DunePortalSessionAuth -Request $req } catch { $portalSessionAuth = @{ ok = $false } }
+                if (-not $launchAccess -and -not $portalSessionAuth.ok) {
+                    Clear-DunePortalSessionCookie $res -Request $req
+                    Write-DuneError -Response $res -Status 401 -Message 'Authentication required.'
+                    return
+                }
+                if ($portalSessionAuth.ok -and $portalSessionAuth.mustChangePassword -and $rawPath -notin @('/api/portal-auth/change-password','/api/portal-auth/logout')) {
+                    Write-DuneError -Response $res -Status 403 -Message 'Password change required.'
+                    return
+                }
+                if ($portalSessionAuth.ok -and $method -notin @('GET','HEAD') -and -not (Test-DunePortalRequestOrigin -Request $req)) {
+                    Write-DuneError -Response $res -Status 403 -Message 'Request origin rejected.'
+                    return
+                }
+            } elseif (-not (Test-DuneToken -Request $req)) {
+                Write-DuneError -Response $res -Status 401 -Message 'Invalid or missing token'
+                return
+            }
+        }
+        # The Docker edition exposes only qualified backend surfaces.
+        # Existing VM writes must not become reachable merely by reusing auth.
+        if ($env:DST_HOSTING_BACKEND -eq 'docker' -and -not (Test-DuneDockerRouteQualified -Method $method -Path $rawPath)) {
+            Write-DuneError -Response $res -Status 501 -Message 'This action is not available in the Docker preview.'
+            return
+        }
+        if ((Test-DunePortalOwnerOnlyPath -Path $rawPath -Method $method) -and
+            -not (Test-DunePortalOwnerAccess `
+                -AccountMode $accountMode `
+                -IsLocalRequest $isLocalRequest `
+                -PortalSessionAuth $portalSessionAuth)) {
+            Write-DuneError -Response $res -Status 403 -Message 'Owner access required.'
+            return
+        }
+        if ((Test-DunePortalOwnerOrAdminPath -Path $rawPath -Method $method) -and
+            -not ($portalSessionAuth.ok -and $portalSessionAuth.account.role -eq 'player' -and
+                (($method -eq 'GET' -and ($rawPath.StartsWith('/api/v1/maps/') -or
+                    $rawPath -eq '/api/v1/inventory/items' -or $rawPath.StartsWith('/api/v1/inventory/items/'))) -or
+                 ($method -eq 'POST' -and $rawPath -in @('/api/v1/maps/atlas/session','/api/v1/maps/atlas/resource')))) -and
+            -not (Test-DunePortalOwnerOrAdminAccess `
+                -AccountMode $accountMode `
+                -IsLocalRequest $isLocalRequest `
+                -PortalSessionAuth $portalSessionAuth)) {
+            Write-DuneError -Response $res -Status 403 -Message 'Owner or Admin access required.'
+            return
+        }
+        foreach ($r in $script:DuneRoutes) {
+            if ($r.Method -ne $method) { continue }
+            $m = $r.Regex.Match($rawPath)
+            if ($m.Success) {
+                $nativeHostOwner=$env:DST_HOSTING_BACKEND -eq 'docker' -and
+                    (Test-DuneDockerOwnerHostRoute -Method $method -Path $rawPath) -and
+                    $portalSessionAuth.ok -and $portalSessionAuth.account.role -ceq 'owner'
+                if ($r.LocalOnly -and -not $isLocalRequest -and -not $nativeHostOwner) {
+                    Write-DuneError -Response $res -Status 403 -Message 'This API is available only from the host machine.'
+                    return
+                }
+                $authentication = if ($publicPortalAuth) {
+                    'none'
+                } elseif ($portalSessionAuth -and $portalSessionAuth.ok) {
+                    'portal-session'
+                } elseif ($accountMode) {
+                    'launch-token'
+                } else {
+                    'token'
+                }
+                $principal = New-DuneDispatchPrincipal `
+                    -Request $req `
+                    -IsLocalRequest $isLocalRequest `
+                    -AccountMode $accountMode `
+                    -LaunchAccess $launchAccess `
+                    -PortalSessionAuth $portalSessionAuth `
+                    -Authentication $authentication
+                if (-not (Test-DuneDispatchPrincipalAccess -Route $r -Principal $principal)) {
+                    Write-DuneError -Response $res -Status 403 -Message 'Capability access denied.'
+                    return
+                }
+                $routeParams = @{}
+                foreach ($g in $r.Regex.GetGroupNames()) {
+                    if ($g -notmatch '^\d+$') { $routeParams[$g] = $m.Groups[$g].Value }
+                }
+                if ($portalSessionAuth -and $portalSessionAuth.ok) {
+                    $routeParams['portalAccountRole'] = [string]$portalSessionAuth.account.role
+                }
+                Add-DuneRouteContractContext -Route $r -RouteParams $routeParams -Principal $principal -RequestId $requestId
+                if ((Get-Command Test-DuneSoloInstallation -ErrorAction SilentlyContinue) -and (Test-DuneSoloServerApiPath -Path $rawPath -Method $method) -and (Test-DuneSoloInstallation)) {
+                    Write-DuneError -Response $res -Status 409 -Message 'This feature requires a Self-Hosted + Solo installation.'
+                    return
+                }
+                if (Test-DuneWorldRestartWriteBlocked -Method $method -Path $rawPath) {
+                    Write-DuneError -Response $res -Status 423 -Message 'World Restart maintenance is active. Wait for completion or use its rollback control.'
+                    return
+                }
+
+                # Non-inline routes dispatch to the handler pool so a slow handler
+                # can't block the accept loop. The worker reads the body itself.
+                if ($script:DuneApiPoolEnabled -and -not $r.Inline) {
+                    Invoke-DuneApiHandlerAsync -Handler $r.Handler -Request $req -Response $res -RouteParams $routeParams -StreamBody ([bool]$r.StreamBody)
+                    return
+                }
+                if ($r.StreamBody) {
+                    Write-DuneError -Response $res -Status 503 -Message 'File transfer service is temporarily unavailable.'
+                    return
+                }
+                if ($rawPath -eq '/api/portal-auth/login' -and -not $script:DuneApiPoolEnabled) {
+                    Write-DuneError -Response $res -Status 503 -Message 'Login service is temporarily unavailable.'
+                    return
+                }
+
+                # Inline path (control routes, or pool-disabled fallback): read +
+                # parse the body on the listener thread, then run the handler.
+                $body = $null
+                if ($req.HasEntityBody) {
+                    $reader = [System.IO.StreamReader]::new($req.InputStream, $req.ContentEncoding)
+                    try { $body = $reader.ReadToEnd() } finally { $reader.Dispose() }
+                    if ($body -and $req.ContentType -like 'application/json*') {
+                        $body = ConvertFrom-DuneRequestJson -Raw $body
+                    }
+                }
+                $invoke = {
+                    if ([string]$routeParams.requestPrincipal.type -eq 'linked-player' -and
+                        -not (Test-DunePlayerRequestAccess -Request $req -Response $res -RouteParams $routeParams -Body $body)) { return }
+                    & $r.Handler $req $res $routeParams $body
+                }
+                $admitted = Invoke-DuneWorldRestartAdmission -Method $method -Path $rawPath -Action $invoke
+                if ($admitted -is [System.Collections.IDictionary] -and $admitted.blocked) {
+                    Write-DuneError -Response $res -Status 423 -Message 'World Restart maintenance is active. Wait for completion or use its rollback control.'
+                }
+                return
+            }
+        }
+        Write-DuneError -Response $res -Status 404 -Message "No route for $method $rawPath"
+        return
+    }
+
+    # Static SPA serving (GET only)
+    if ($method -ne 'GET' -and $method -ne 'HEAD') {
+        Write-DuneError -Response $res -Status 405 -Message 'Method not allowed'
+        return
+    }
+
+    # Once account login is enabled, retire any previously shared browser
+    # magic-link credential from the address bar before serving the SPA.
+    try {
+        if ((Test-DunePortalAccountModeEnabled) -and $req.QueryString['key']) {
+            $res.StatusCode = 302
+            $res.Headers['Location'] = $rawPath
+            $res.Headers['Cache-Control'] = 'no-store'
+            $res.OutputStream.Close()
+            return
+        }
+    } catch {}
+
+    # When the full portal is reached through the Cloudflare tunnel by an
+    # authenticated, allow-listed user (CF Access identity verified against the
+    # remote ACL), inject the per-launch token into index.html so the portal's
+    # API calls authenticate -- the same mechanism the /remote/ portal uses.
+    # This makes the FULL dashboard usable remotely. A genuine local request
+    # (the desktop app, which carries no CF Access header) is unaffected and
+    # keeps its existing token path. The free-form Terminal stays host-only via
+    # the LocalOnly tunnel guard above.
+    $injectForRemote = $false
+    $injectTokenOverride = ''
+
+    # Magic-link auth for the PUBLIC browser portal (e.g. over Tailscale Funnel,
+    # which is public and adds no identity header). A request carrying
+    # ?key=<remoteToken> -- or the dune_key cookie set from a prior one -- gets the
+    # STABLE remote token injected so the SPA authenticates, and we set the cookie
+    # so navigation/reloads without ?key stay authed. Same trust as the phone QR:
+    # whoever has the link has access. The token rotates only on demand, not per
+    # launch, so the portal keeps working across restarts.
+    try {
+        $accountMode = $false
+        try { $accountMode = [bool](Test-DunePortalAccountModeEnabled) } catch {}
+        $rt = ''
+        if (Get-Command Get-DuneRemoteToken -ErrorAction SilentlyContinue) { $rt = [string](Get-DuneRemoteToken) }
+        if ($rt -and -not $accountMode) {
+            $providedKey = ''
+            try { $providedKey = [string]$req.QueryString['key'] } catch {}
+            if (-not $providedKey) {
+                try { $ck = $req.Cookies['dune_key']; if ($ck) { $providedKey = [string]$ck.Value } } catch {}
+            }
+            if ($providedKey -and $providedKey -eq $rt) {
+                $injectForRemote = $true
+                $injectTokenOverride = $rt
+                try { $res.Headers['Set-Cookie'] = "dune_key=$rt; Path=/; HttpOnly; SameSite=Lax" } catch {}
+            }
+        } elseif ($accountMode) {
+            try { $res.Headers['Set-Cookie'] = 'dune_key=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Secure; HttpOnly; SameSite=Strict' } catch {}
+        }
+    } catch {}
+
+    # When the full portal is reached through the Cloudflare tunnel by an
+    # authenticated, allow-listed user (CF Access identity verified against the
+    # remote ACL), inject the per-launch token into index.html so the portal's
+    # API calls authenticate -- the same mechanism the /remote/ portal uses.
+    try {
+        if (-not $injectForRemote -and $req.Headers['Cf-Access-Authenticated-User-Email']) {
+            $auth = Test-DuneRemoteRequest -Request $req
+            $injectForRemote = [bool]$auth.ok
+        }
+    } catch {}
+
+    $filePath = Resolve-DuneStaticPath -UrlPath $rawPath
+    if ($filePath -and (Test-Path -LiteralPath $filePath -PathType Leaf)) {
+        $isIndex = ($filePath -match '\\index\.html$')
+        Write-DuneFile -Response $res -Path $filePath -InjectRemoteToken:($injectForRemote -and $isIndex) -TokenOverride $injectTokenOverride
+        return
+    }
+
+    # A missing bundle is not an HTML page. Never disguise it as a successful SPA response.
+    if ($rawPath.StartsWith('/assets/', [StringComparison]::Ordinal)) {
+        Write-DuneError -Response $res -Status 404 -Message 'Static asset not found'
+        return
+    }
+    # SPA fallback — serve index.html for client-side routes
+    $indexPath = Join-Path $script:DuneDistRoot 'index.html'
+    if (Test-Path -LiteralPath $indexPath -PathType Leaf) {
+        Write-DuneFile -Response $res -Path $indexPath -InjectRemoteToken:$injectForRemote -TokenOverride $injectTokenOverride
+        return
+    }
+
+    Write-DuneError -Response $res -Status 404 -Message 'Static asset not found'
+}

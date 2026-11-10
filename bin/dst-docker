@@ -1,0 +1,209 @@
+#!/bin/sh
+set -eu
+task_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+cd "$task_root"
+
+# Installer releases share this optional override and their persistent CA.
+# Checkouts keep it outside Git-tracked configuration in their own root.
+task_https_state=$task_root
+if [ -f "$task_root/../../installation.json" ]; then task_https_state=$(CDPATH= cd -- "$task_root/../.." && pwd); fi
+task_https_override=${DST_HTTPS_OVERRIDE:-$task_https_state/https.compose.json}
+task_mirror_override=${DST_MIRROR_OVERRIDE:-$task_https_state/mirror.compose.json}
+task_host_override=$task_https_state/host.compose.json
+compose() {
+  if [ -f "$task_host_override" ]; then set -- -f "$task_host_override" "$@"; fi
+  if [ -f "$task_mirror_override" ]; then set -- -f "$task_mirror_override" "$@"; fi
+  if [ -f "$task_https_override" ]; then set -- -f "$task_https_override" "$@"; fi
+  docker compose -f "$task_root/compose.yaml" "$@"
+}
+prepare_mirror() {
+  if [ -f "$task_mirror_override" ] && [ -z "${1:-}" ]; then return; fi
+  task_mirror_project=$(compose config --format json | python3 -c 'import json,sys;print(json.load(sys.stdin)["name"])')
+  task_mirror_directory=${1:-${DST_BACKUP_MIRROR_DIR:-}}
+  if [ -n "$task_mirror_directory" ]; then
+    python3 packaging/docker/mirror_config.py --project "$task_mirror_project" --directory "$task_mirror_directory" --output "$task_mirror_override"
+  else
+    python3 packaging/docker/mirror_config.py --project "$task_mirror_project" --output "$task_mirror_override"
+  fi
+}
+
+task_port=''
+case "${1:-up}" in
+  up) if [ "$#" -gt 1 ]; then [ "$#" -eq 3 ] && [ "$2" = '--port' ] || { echo 'Usage: sh bin/dst-docker up [--port PORT]' >&2; exit 1; }; task_port=$3; fi;;
+  http) [ "$#" -le 2 ] || { echo 'Usage: sh bin/dst-docker http [PORT]' >&2; exit 1; }; task_port=${2:-};;
+  port) [ "$#" -eq 2 ] || { echo 'Usage: sh bin/dst-docker port PORT' >&2; exit 1; }; task_port=$2;;
+esac
+if [ -n "$task_port" ]; then
+  case "$task_port" in *[!0-9]*|'') echo 'Choose a console port between 1024 and 65535.' >&2; exit 1;; esac
+  [ "$task_port" -ge 1024 ] && [ "$task_port" -le 65535 ] || { echo 'Choose a console port between 1024 and 65535.' >&2; exit 1; }
+fi
+command -v docker >/dev/null 2>&1 || { echo 'Docker is required. Run this inside Linux or your WSL distribution.' >&2; exit 1; }
+docker compose version >/dev/null
+portal_links() {
+  if [ -f "$task_https_override" ]; then
+    task_origin=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["x-dst-https-origin"])' "$task_https_override")
+    compose exec -T dst cat /data/state/DuneServer/last-url.txt | python3 packaging/docker/portal_urls.py --https-origin "$task_origin"
+  else
+    compose exec -T dst cat /data/state/DuneServer/last-url.txt | python3 packaging/docker/portal_urls.py $(hostname -I 2>/dev/null || true)
+  fi
+}
+public_port() {
+  compose run --rm --no-deps --entrypoint pwsh dst -NoLogo -NoProfile -Command '. /opt/dst/app/server/lib/DockerConsole.ps1; Get-DuneDockerConsolePort'
+}
+configure_https() {
+  task_project=$(compose config --format json | python3 -c 'import json,sys;print(json.load(sys.stdin)["name"])')
+  task_internal=''
+  if [ -f "$task_https_override" ]; then
+    task_internal=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("x-dst-http-internal-port", ""))' "$task_https_override")
+  fi
+  if [ -z "$task_internal" ] || [ "$task_internal" = "$task_tls_port" ]; then
+    task_internal=$(python3 - "$task_tls_port" <<'PY'
+import socket,sys
+with socket.socket() as probe:
+    try:probe.bind(('127.0.0.1',18088 if sys.argv[1]!='18088' else 0))
+    except OSError:probe.bind(('127.0.0.1',0))
+    print(probe.getsockname()[1])
+PY
+)
+  fi
+  task_tls_action=prepare
+  if [ -f "$task_https_override" ]; then task_tls_action=update; fi
+  python3 packaging/docker/https.py "$task_tls_action" --project "$task_project" --address "$task_tls_address" --port "$task_tls_port" --upstream-port "$task_internal" --output "$task_https_override"
+}
+start_https() {
+  # Release the public socket before moving the app to its private listener.
+  compose stop https
+  compose up --no-build -d --no-deps dst
+  wait_portal >/dev/null
+  compose up --no-build -d --no-deps --force-recreate https
+  portal_links
+}
+
+set_port() {
+  compose run --rm --no-deps --entrypoint pwsh dst -NoLogo -NoProfile -File /opt/dst/packaging/docker/set-console-port.ps1 -Port "$task_port"
+}
+wait_portal() {
+  task_attempt=0
+  while [ "$task_attempt" -lt 30 ]; do
+    if compose exec -T dst pwsh -NoLogo -NoProfile -File /opt/dst/healthcheck.ps1 >/dev/null 2>&1; then
+      printf '\nOpen DST in your browser:\n'
+      portal_links
+      return 0
+    fi
+    task_attempt=$((task_attempt + 1)); sleep 1
+  done
+  echo 'DST has not become ready. Inspect: sh bin/dst-docker logs' >&2
+  return 1
+}
+case "${1:-up}" in
+  up)
+    if [ -f "$task_https_override" ]; then
+      python3 packaging/docker/https.py restart-policy --output "$task_https_override"
+    fi
+    prepare_mirror
+    printf '\nPreparing Docker images for the Web UI. First-time builds can take several minutes.\n'
+    docker compose -p dst-docker-assets -f packaging/docker/compose.assets.yaml build
+    # Prepare the external volume without downloading the game before the UI.
+    docker compose -p dst-docker-assets -f packaging/docker/compose.assets.yaml create assets
+    compose build map-observer-image scaler-image regis-tools-image
+    compose pull file-browser-image
+    compose build
+    # Upgrade the earlier separate-port proxy before replacing its app. Keep
+    # the selected secure address, its authority and the existing owner data.
+    if [ -z "$task_port" ] && [ -f "$task_https_override" ] && ! python3 -c 'import json,sys;raise SystemExit(0 if json.load(open(sys.argv[1])).get("x-dst-https-format")==2 else 1)' "$task_https_override"; then
+      task_tls_address=$(python3 -c 'import json,sys,urllib.parse;print(urllib.parse.urlsplit(json.load(open(sys.argv[1]))["x-dst-https-origin"]).hostname)' "$task_https_override")
+      task_tls_port=$(python3 -c 'import json,sys,urllib.parse;print(urllib.parse.urlsplit(json.load(open(sys.argv[1]))["x-dst-https-origin"]).port)' "$task_https_override")
+      configure_https
+      compose stop https
+    fi
+    if [ -n "$task_port" ]; then
+      if [ -f "$task_https_override" ]; then
+        task_tls_address=$(python3 -c 'import json,sys,urllib.parse;print(urllib.parse.urlsplit(json.load(open(sys.argv[1]))["x-dst-https-origin"]).hostname)' "$task_https_override")
+        task_tls_port=$task_port
+        configure_https
+        compose stop https
+      fi
+      set_port
+    fi
+    compose up --no-build -d
+    wait_portal
+    if ! docker compose -p dst-docker-assets -f packaging/docker/compose.assets.yaml run --rm --entrypoint python3 assets -c 'import json; from pathlib import Path; state=json.loads(Path("/srv/dst/install-state.json").read_text()); raise SystemExit(0 if state.get("state")=="downloaded" else 1)' >/dev/null 2>&1; then
+      printf '\nThe Web UI is running. You can open the link above while the official game files download.\nKeep this terminal open until the download finishes; progress appears below.\n'
+      docker compose -p dst-docker-assets -f packaging/docker/compose.assets.yaml run --rm assets || {
+        printf '\nThe Web UI is still running, but the game download failed. Rerun this same up command to retry.\n' >&2
+        exit 1
+      }
+    fi
+    printf '\nOfficial game files are ready. Continue server setup in the Web UI.\n'
+    ;;
+  port)
+    if [ -f "$task_https_override" ]; then
+      task_tls_address=$(python3 -c 'import json,sys,urllib.parse;print(urllib.parse.urlsplit(json.load(open(sys.argv[1]))["x-dst-https-origin"]).hostname)' "$task_https_override")
+      task_tls_port=$task_port
+      configure_https
+      set_port
+      start_https
+    else
+      set_port; compose restart dst; wait_portal
+    fi
+    ;;
+  desktop)
+    [ "$#" -eq 1 ] || { echo 'Usage: sh bin/dst-docker desktop' >&2; exit 1; }
+    exec python3 packaging/docker/host_session.py desktop --root "$task_https_state"
+    ;;
+  shortcut)
+    [ "$#" -eq 1 ] || { echo 'Usage: sh bin/dst-docker shortcut' >&2; exit 1; }
+    exec python3 packaging/docker/host_session.py shortcut --root "$task_https_state"
+    ;;
+  http)
+    if [ -z "$task_port" ]; then task_port=$(public_port); fi
+    if [ -f "$task_https_override" ]; then
+      # Stop the proxy while its service definition is still available. Keep
+      # its configuration and CA volumes for optional HTTPS reactivation.
+      compose stop https
+      task_disabled=$(mktemp "${task_https_override}.disabled.XXXXXX")
+      mv -- "$task_https_override" "$task_disabled"
+    fi
+    set_port
+    compose up --no-build -d --no-deps dst
+    wait_portal
+    ;;
+  https)
+    [ "$#" -ge 2 ] && [ "$#" -le 3 ] || { echo 'Usage: sh bin/dst-docker https HOST_IPV4 [HTTPS_PORT]' >&2; exit 1; }
+    task_tls_address=$2
+    task_tls_port=${3:-$(public_port)}
+    configure_https
+    task_port=$task_tls_port
+    set_port
+    start_https
+    printf '\nHTTPS started. Export its public trust certificate with: sh bin/dst-docker https-root OUTPUT.crt\nTrust that certificate on each client PC before using HTTPS. HTTP bookmarks redirect to HTTPS on the same port.\n'
+
+    ;;
+  https-root)
+    [ "$#" -eq 2 ] && [ -f "$task_https_override" ] || { echo 'Usage after enabling HTTPS: sh bin/dst-docker https-root OUTPUT.crt' >&2; exit 1; }
+    task_project=$(compose config --format json | python3 -c 'import json,sys;print(json.load(sys.stdin)["name"])')
+    python3 packaging/docker/https.py export-root --project "$task_project" --output "$2"
+    ;;
+  mirror-folder)
+    [ "$#" -le 2 ] || { echo 'Usage: sh bin/dst-docker mirror-folder [NEW_FOLDER]' >&2; exit 1; }
+    prepare_mirror "${2:-}"
+    python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["x-dst-backup-mirror-folder"])' "$task_mirror_override"
+    printf '\nThe folder is prepared. Run up to apply its mount, then enable Local backup mirror in Database. Existing copies are never pruned by DST.\n'
+    ;;
+  url) portal_links ;;
+  owners)
+    [ "$#" -eq 1 ] || { echo 'Usage: sh bin/dst-docker owners' >&2; exit 1; }
+    compose exec -T dst pwsh -NoLogo -NoProfile -File /opt/dst/packaging/docker/owner-recovery.ps1 -Action List
+    ;;
+  reset-owner)
+    [ "$#" -eq 2 ] || { echo 'Usage: sh bin/dst-docker reset-owner OWNER_USERNAME' >&2; exit 1; }
+    printf 'Reset the password for Owner "%s"? This clears their sessions and shared sign-in lockouts. Type RESET OWNER: ' "$2"
+    IFS= read -r task_owner_confirmation || { echo 'Owner reset cancelled.' >&2; exit 1; }
+    [ "$task_owner_confirmation" = 'RESET OWNER' ] || { echo 'Owner reset cancelled.' >&2; exit 1; }
+    compose exec -T dst pwsh -NoLogo -NoProfile -File /opt/dst/packaging/docker/owner-recovery.ps1 -Action Reset -Username "$2" -Confirmation "$task_owner_confirmation"
+    ;;
+  status) compose ps ;;
+  logs) compose logs --tail=80 ;;
+  down) compose down ;;
+  *) echo 'Usage: sh bin/dst-docker up [--port PORT] | port PORT | http [PORT] | https HOST_IPV4 [HTTPS_PORT] | https-root OUTPUT.crt | mirror-folder [NEW_FOLDER] | owners | reset-owner OWNER_USERNAME | desktop | shortcut | url | status | logs | down' >&2; exit 1 ;;
+esac

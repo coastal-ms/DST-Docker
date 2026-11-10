@@ -1,0 +1,267 @@
+---
+import Base from "../layouts/Base.astro";
+import PageHeader from "../components/PageHeader.astro";
+import DownloadButton from "../components/DownloadButton.astro";
+import Screenshot from "../components/Screenshot.astro";
+
+const base = import.meta.env.BASE_URL;
+---
+
+<Base
+  title="Install — DST"
+  description="Install DST v16 for Solo only or Self-Hosted + Solo. Solo needs no VM or dedicated server."
+>
+  <PageHeader
+    eyebrow="Install"
+    title="Install DST v16"
+    intro="Choose Solo only or Self-Hosted + Solo in one Windows installer. Solo needs no server setup or VM."
+  />
+
+  <section class="mx-auto max-w-3xl px-6 pb-12">
+    <div id="solo" class="rounded-xl border border-dune-border bg-dune-surface p-8 mb-8 scroll-mt-24">
+      <h2 class="text-2xl font-semibold mb-4">Play Solo? Choose Solo only.</h2>
+      <p class="text-dune-muted leading-relaxed mb-4">
+        v16 includes a dedicated <strong class="text-dune-text">Solo only</strong>
+        installation choice in the same DuneServerSetup.exe. It opens local save
+        tools directly, without server setup pages, VM discovery, server port
+        checks, or server background jobs. No Hyper-V or Self-Hosted Server installation is needed.
+      </p>
+      <ol class="list-decimal pl-6 space-y-3 text-dune-muted leading-relaxed">
+        <li>Install <strong class="text-dune-text">PowerShell 7</strong> first. The installer checks for it before installing or upgrading either mode.</li>
+        <li>Run DuneServerSetup.exe and select <strong class="text-dune-text">Solo only</strong>.</li>
+        <li>Launch Dune: Awakening Solo once to create a save, then close the game.</li>
+        <li>Open DST, connect your supported Retail Solo save, and follow its validation guidance. Save edits require the game to be closed and retain backups.</li>
+      </ol>
+      <Screenshot src={`${base}screenshots/solo-overview.png`} alt="Current DST Solo-only interface with a fictional example save" caption="Solo only opens local save tools directly. Current interface preview with a fictional example save." width={1600} height={1000} />
+      <p class="text-dune-muted leading-relaxed mt-4">
+        Managing a server too? Choose <strong class="text-dune-text">Self-Hosted + Solo</strong>.
+        Both choices include the same Solo tools. Reinstalls and silent updates preserve
+        the selected mode and existing configuration; existing server installations keep Self-Hosted + Solo.
+      </p>
+    </div>
+    <div class="rounded-xl border border-dune-border bg-dune-surface p-8 mb-12">
+      <ol class="space-y-5 text-dune-text">
+        <li class="flex gap-4">
+          <span
+            class="shrink-0 w-7 h-7 rounded-full bg-dune-accent text-dune-bg font-semibold flex items-center justify-center text-sm"
+            >1</span
+          >
+          <div>
+            Download <span class="font-mono">DuneServerSetup.exe</span> from
+            the latest stable release. Test builds are a separate choice.
+            <div class="mt-3">
+              <DownloadButton />
+            </div>
+          </div>
+        </li>
+        <li class="flex gap-4">
+          <span
+            class="shrink-0 w-7 h-7 rounded-full bg-dune-accent text-dune-bg font-semibold flex items-center justify-center text-sm"
+            >2</span
+          >
+          <div>
+            Double-click and choose <strong>Solo only</strong> or
+            <strong>Self-Hosted + Solo</strong>. Solo skips server setup;
+            both options share the same Solo tools. There is one UAC
+            prompt, then a Start Menu shortcut. The default installation folder is{" "}
+            <span class="font-mono text-dune-muted"
+              >C:\Program Files\Dune Server\</span
+            >.
+          </div>
+        </li>
+        <li class="flex gap-4">
+          <span
+            class="shrink-0 w-7 h-7 rounded-full bg-dune-accent text-dune-bg font-semibold flex items-center justify-center text-sm"
+            >3</span
+          >
+          <div>
+            Launch from <strong>Start Menu → Dune Server</strong>. The first
+            launch opens Solo Mode for a Solo-only installation. For
+            Self-Hosted + Solo, the Setup Wizard asks whether you already have
+            a Dune server, then walks you through a fresh install, a
+            connection to an existing VM / SSH key, or{" "}
+            <strong>Hyper-V over LAN</strong> to manage (and optionally
+            remotely install) a VM on a separate Hyper-V host on your
+            network. Answers are saved to{" "}
+            <span class="font-mono text-dune-muted">%APPDATA%\DuneServer\</span
+            >
+            and survive reinstalls.
+          </div>
+        </li>
+      </ol>
+    </div>
+
+    <h2 class="text-2xl font-semibold mb-4">What you need</h2>
+    <ul class="space-y-3 text-dune-muted leading-relaxed mb-12">
+      <li>
+        <strong class="text-dune-text">Windows 10 / 11</strong>. Solo Mode needs
+        no VM. Self-Hosted mode needs Hyper-V locally, or access to a separate
+        Hyper-V host over LAN.
+      </li>
+      <li>
+        <strong class="text-dune-text">PowerShell 7</strong> (<span
+          class="font-mono">pwsh</span
+        >). Install it before running the installer. DST stops installation or
+        upgrade if it is missing and provides Microsoft Store guidance, preserving an existing installation.
+      </li>
+      <li>
+        <strong class="text-dune-text">Microsoft Edge WebView2 Runtime</strong> —
+        ships with Windows 11 and modern Windows 10. Falls back to your
+        default browser if absent.
+      </li>
+      <li>
+        <strong class="text-dune-text">Self-Hosted only:</strong> the{" "}
+        <strong class="text-dune-text">Dune: Awakening Self-Hosted Server</strong>{" "}
+        installed via Steam (provides battlegroup management and the VM image).
+        A targeted live database contract check against Dune: Awakening 1.5.3.5 on
+        September 30, 2026 confirmed that all 61 tables and 25 functions referenced by DST
+        are present in the live schema.
+      </li>
+      <li>
+        <strong class="text-dune-text">Self-Hosted only:</strong> the{" "}
+        <strong class="text-dune-text">SSH private key</strong> for your VM —
+        created automatically during Funcom's official self-hosted setup;
+        usually at{" "}
+        <span class="font-mono text-sm">%LOCALAPPDATA%\DuneAwakeningServer\sshKey</span
+        >.
+      </li>
+      <li>
+        <strong class="text-dune-text">(Optional)</strong>
+        <a
+          href={`${base}remote`}
+          class="underline decoration-dotted hover:text-dune-text"
+          >Remote portal</a
+        >
+        — the responsive full Browser Portal on a phone, tablet, or PC, with
+        optional Owner/Admin accounts. New setups use a free Tailscale Funnel
+        with no domain. DST retains existing Cloudflare custom-domain
+        configuration, but its legacy portal is disabled by default and can be
+        explicitly re-enabled in local Settings.
+      </li>
+    </ul>
+
+    <h2 class="text-2xl font-semibold mb-4">Choose your view</h2>
+    <p class="text-dune-muted leading-relaxed mb-8">
+      Solo-only installations open Solo Mode in a focused Classic interface.
+      In Self-Hosted + Solo, DST opens in <strong>Classic</strong>. Select <strong>Try Command Deck</strong>{" "}
+      in the status bar for the optional World/dashboard and focused workspaces.
+      Its bottom dock includes <strong>DD Atlas</strong>, the shipped static
+      Deep Desert reference. Select <strong>Classic</strong> to return.
+      These are views of the same tools, not separate installations.
+    </p>
+    <p class="text-dune-muted leading-relaxed mb-12">
+      <strong>Solo compatibility:</strong> the current adapter targets the supported
+      Retail Solo save format. Check the in-app adapter guidance before connecting a
+      save; do not assume an older or custom format is supported.
+    </p>
+
+    <h2 class="text-2xl font-semibold mb-4">Hyper-V over LAN <span class="text-dune-muted text-base font-normal">— optional, for a separate host</span></h2>
+    <p class="text-dune-muted leading-relaxed mb-4">
+      Don't want the VM on this PC? The Setup Wizard's third option manages
+      (and can remotely install) the Dune VM on a <strong class="text-dune-text">separate
+      Hyper-V host</strong> on your local network — e.g. a headless server in
+      another room. It's also reachable later from <strong class="text-dune-text">Settings
+      → Hyper-V over LAN</strong>.
+    </p>
+    <ul class="space-y-3 text-dune-muted leading-relaxed mb-4">
+      <li>
+        <strong class="text-dune-text">Remote-host prerequisites</strong> —
+        the host's <strong class="text-dune-text">PowerShell Remoting (WinRM)</strong>
+        must be reachable from this PC. In a workgroup (no Active Directory
+        domain), add the host to this PC's <span class="font-mono">TrustedHosts</span>{" "}
+        first. The host also needs an <strong class="text-dune-text">external
+        virtual switch</strong> for the VM's network adapter (the wizard shows
+        the exact <span class="font-mono">New-VMSwitch</span> command to run
+        on the host if none exists).
+      </li>
+      <li>
+        <strong class="text-dune-text">Existing VM or remote install</strong> —
+        point DST at a host that already has a <span class="font-mono">dune-awakening</span>{" "}
+        VM, or let DST provision one: it connects over PowerShell Remoting,
+        downloads the server image on the host with SteamCMD (anonymous, no
+        Steam login), and imports/starts the VM on a drive and switch you
+        choose.
+      </li>
+      <li>
+        <strong class="text-dune-text">Saved credential &amp; security</strong> —
+        the host administrator credential (which doesn't need to match the
+        Windows account DST runs as on this PC) is saved in{" "}
+        <strong class="text-dune-text">Windows Credential Manager</strong>,
+        scoped to your signed-in Windows user. It's never written to{" "}
+        <span class="font-mono">dune-server.config</span>, logs, diagnostics,
+        or any API response, and is reused automatically for every LAN call.
+      </li>
+      <li>
+        <strong class="text-dune-text">Local-mode fallback</strong> — turning
+        the routing toggle off returns to managing a local VM on this PC and
+        fully bypasses the LAN path; the saved credential is kept for next
+        time until you explicitly remove it.
+      </li>
+    </ul>
+
+    <h2 class="text-2xl font-semibold mb-4">Optional: run at Windows startup</h2>
+    <p class="text-dune-muted leading-relaxed mb-4">
+      Off by default. Open <strong class="text-dune-text">Help → Run at
+      Windows startup</strong> in the top toolbar to toggle it on. After
+      that, DST launches automatically at every Windows sign-in — in the
+      system tray with no app window — and closing the DuneShell window no
+      longer stops the server. Toggle it back off the same way; takes
+      effect at the next launch. The toggle is loopback-only — remote
+      viewers can't enable it on your host. The uninstaller cleans up the
+      scheduled task automatically.
+    </p>
+
+    <h2 class="text-2xl font-semibold mb-4">Optional: keep serving while DST is closed</h2>
+    <p class="text-dune-muted leading-relaxed mb-4">
+      Off by default. Open <strong class="text-dune-text">Help → Keep serving
+      while DST is closed</strong> to install a background service so the
+      Browser Portal, scheduled restarts, and Discord notifications keep
+      running while the DST window is closed — including while your PC is
+      locked — and load at sign-in. You must stay signed in to Windows; a full
+      sign-out stops remote access. Host-only (remote viewers can't enable it),
+      and the uninstaller removes the service.
+    </p>
+
+    <h2 class="text-2xl font-semibold mb-4">Where things live</h2>
+    <div
+      class="rounded-lg border border-dune-border bg-dune-surface overflow-hidden text-sm"
+    >
+      <dl class="divide-y divide-dune-border">
+        <div class="grid grid-cols-[1fr_2fr] gap-4 px-5 py-3">
+          <dt class="text-dune-muted">Install dir</dt>
+          <dd class="font-mono text-dune-text">C:\Program Files\Dune Server\</dd>
+        </div>
+        <div class="grid grid-cols-[1fr_2fr] gap-4 px-5 py-3">
+          <dt class="text-dune-muted">Config &amp; state</dt>
+          <dd class="font-mono text-dune-text">%APPDATA%\DuneServer\</dd>
+        </div>
+        <div class="grid grid-cols-[1fr_2fr] gap-4 px-5 py-3">
+          <dt class="text-dune-muted">Local portal</dt>
+          <dd class="font-mono text-dune-text">
+            http://127.0.0.1:&lt;port&gt;/?t=&lt;token&gt;
+          </dd>
+        </div>
+      </dl>
+    </div>
+
+    <div class="mt-12 rounded-xl border border-dune-border bg-dune-surface p-6">
+      <h2 class="text-2xl font-semibold mb-3">Remote access</h2>
+      <p class="text-dune-muted leading-relaxed">
+        Remote access is optional. DST uses the same responsive Browser Portal
+        as the desktop app, with host-created Owner/Admin accounts and
+        role-enforced navigation and APIs. New setups use Tailscale Funnel.
+        Existing Cloudflare custom-domain configuration is retained, but its
+        legacy portal defaults to disabled until explicitly re-enabled in local
+        Settings. Use the dedicated guide for account setup, migration,
+        role boundaries, transport security, and revocation instead of exposing
+        DST's local port directly.
+      </p>
+      <a
+        href={`${base}remote`}
+        class="inline-flex mt-4 text-dune-accent hover:text-dune-accent-soft"
+      >
+        Open the remote access guide →
+      </a>
+    </div>
+  </section>
+</Base>

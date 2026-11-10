@@ -1,0 +1,74 @@
+# User-generated config (contains local paths — never commit)
+dune-server.config
+
+# Logs
+*.log
+.logs/
+
+# Local SSH keys — never commit
+sshKey
+sshKey.pub
+*.pem
+*.key
+
+# Local environment overrides
+.env
+.env.*
+!.env.example
+
+# Windows
+Thumbs.db
+desktop.ini
+
+# macOS
+.DS_Store
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# Session / scratch
+scratch/
+tmp/
+
+# Desktop app build artifacts (built locally before each release)
+app/build/output/
+app/installer/output/
+app/tools/**/bin/
+app/tools/**/obj/
+
+# Pre-redaction screenshot originals — contain real PII, never commit
+docs/img/_originals/
+
+# OneDrive cloud-sync leftovers — corrupt dehydrated placeholders that also
+# break ripgrep (os error 383). Never commit.
+*.todelete.gone~*
+*~RF*.TMP
+
+testResults.xml
+
+
+# Staged cloudflared binary (downloaded/copied at build time, not committed)
+app/installer/vendor/
+/redirect-dist/
+
+# Atlas imports create bytecode locally; runtime packages contain source only.
+app/tools/DuneAtlas/**/__pycache__/
+app/tools/DuneAtlas/__pycache__/
+tools/atlas/__pycache__/
+
+# Generated from the pinned Monaco npm package for offline installer assets.
+/webui/public/vendor/monaco/
+
+# Docker observer Python bytecode
+/packaging/docker/__pycache__/
+
+# Local player INI backups produced when running helpers from source.
+/app/DST/INI Backups/
+# Local HTTPS configuration contains installation-specific volume names.
+https.compose.json
+
+# Persistent local host backup folder binding
+/mirror.compose.json

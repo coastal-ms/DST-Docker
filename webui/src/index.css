@@ -1,0 +1,188 @@
+@import "tailwindcss";
+@import "./theme/signal.css";
+
+@utility map-management-input {
+  min-height: 2.75rem;
+  border: 1px solid var(--color-border);
+  border-radius: 0.5rem;
+  background: var(--color-surface);
+  color: var(--color-text);
+  padding: 0.5rem 0.75rem;
+  &:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
+  &:disabled { opacity: 0.6; }
+}
+
+/* Immediate pointer/touch feedback while an action's own pending state starts. */
+#root button:enabled:active { filter:brightness(1.18); box-shadow:inset 0 0 0 2px var(--color-accent); transform:translateY(1px); }
+@media(prefers-reduced-motion:reduce){#root button:enabled:active { transform:none; }}
+
+@theme {
+  /* Eyes of Ibad — Dune Server brand palette */
+  --color-base: #0c0a09;
+  --color-surface: #18120e;
+  --color-surface-2: #221913;
+  --color-surface-3: #2d211a;
+  --color-border: #3d2e23;
+  --color-border-bright: #5a4030;
+
+  --color-text: #f5ebe0;
+  --color-text-muted: #b8a692;
+  --color-text-dim: #7a6a5a;
+
+  /* Accent — desert amber */
+  --color-accent: #d97706;
+  --color-accent-bright: #f59e0b;
+  --color-accent-dim: #92400e;
+  /* Foreground (text) color used ON TOP of accent — e.g. primary button text.
+   * Themes that flip the accent to a light color (Sietch Tabr) must override
+   * this to a dark value, or button text becomes unreadable. */
+  --color-accent-fg: #0c0a09;
+
+  /* Eyes of Ibad cyan glow — for highlights & focus rings */
+  --color-ibad: #38bdf8;
+  --color-ibad-bright: #7dd3fc;
+
+  --color-success: #4ade80;
+  --color-danger: #f87171;
+  --color-warning: #fbbf24;
+  --color-info: #38bdf8;
+
+  --font-sans: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Code", "Consolas", monospace;
+}
+
+@layer base {
+  [data-dst-font-scale="default"] { --dst-font-scale: 1; }
+  [data-dst-font-scale="medium"] { --dst-font-scale: 1.125; }
+  [data-dst-font-scale="large"] { --dst-font-scale: 1.25; }
+
+  [data-dst-font-scale] {
+    --text-xs: calc(0.75rem * var(--dst-font-scale));
+    --text-xs--line-height: calc(1rem * var(--dst-font-scale));
+    --text-sm: calc(0.875rem * var(--dst-font-scale));
+    --text-sm--line-height: calc(1.25rem * var(--dst-font-scale));
+    --text-base: calc(1rem * var(--dst-font-scale));
+    --text-base--line-height: calc(1.5rem * var(--dst-font-scale));
+    --text-lg: calc(1.125rem * var(--dst-font-scale));
+    --text-lg--line-height: calc(1.75rem * var(--dst-font-scale));
+    --text-xl: calc(1.25rem * var(--dst-font-scale));
+    --text-xl--line-height: calc(1.75rem * var(--dst-font-scale));
+    --text-2xl: calc(1.5rem * var(--dst-font-scale));
+    --text-2xl--line-height: calc(2rem * var(--dst-font-scale));
+    --text-3xl: calc(1.875rem * var(--dst-font-scale));
+    --text-3xl--line-height: calc(2.25rem * var(--dst-font-scale));
+  }
+
+  [data-dst-font-scale] [class~="text-[8px]"] { font-size: calc(8px * var(--dst-font-scale)); }
+  [data-dst-font-scale] [class~="text-[9px]"] { font-size: calc(9px * var(--dst-font-scale)); }
+  [data-dst-font-scale] [class~="text-[10px]"] { font-size: calc(10px * var(--dst-font-scale)); }
+  [data-dst-font-scale] [class~="text-[11px]"] { font-size: calc(11px * var(--dst-font-scale)); }
+  [data-dst-font-scale] [class~="text-[12px]"] { font-size: calc(12px * var(--dst-font-scale)); }
+  [data-dst-font-scale] [class~="text-[13px]"] { font-size: calc(13px * var(--dst-font-scale)); }
+
+  [data-section-nav-id] {
+    scroll-margin-top: 4rem;
+  }
+  html, body, #root {
+    height: 100%;
+    min-height: 100%;
+    width: 100%;
+    max-width: 100%;
+    overflow-x: hidden;
+  }
+  body {
+    @apply bg-base text-text font-sans antialiased;
+    font-size: var(--text-base);
+    line-height: var(--text-base--line-height);
+    overscroll-behavior-x: none;
+    /* Glow tints follow the active theme automatically — color-mix bakes a
+     * 12%/5% wash of the current accent and highlight tokens. */
+    background-image:
+      radial-gradient(ellipse 80% 50% at 50% -20%, color-mix(in oklab, var(--color-accent) 12%, transparent), transparent),
+      radial-gradient(ellipse 60% 40% at 80% 110%, color-mix(in oklab, var(--color-ibad) 5%, transparent), transparent);
+    background-attachment: fixed;
+  }
+  html[data-dst-desktop],
+  html[data-dst-desktop] body,
+  html[data-dst-desktop] #root {
+    height: 100dvh;
+    min-height: 0;
+    overflow: hidden;
+  }
+  select option,
+  select optgroup {
+    background-color: var(--color-surface-2);
+    color: var(--color-text);
+  }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { @apply bg-border rounded-full; }
+  ::-webkit-scrollbar-thumb:hover { @apply bg-border-bright; }
+}
+
+@layer components {
+  .card {
+    @apply bg-surface/80 border border-border rounded-xl backdrop-blur-sm;
+    box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 8px 24px -12px rgba(0, 0, 0, 0.6);
+  }
+  .card-hover {
+    @apply transition-all hover:border-border-bright hover:bg-surface-2/80;
+  }
+  .btn {
+    @apply inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium whitespace-nowrap
+           transition-colors disabled:opacity-50 disabled:cursor-not-allowed
+           focus:outline-none focus-visible:ring-2 focus-visible:ring-ibad;
+  }
+  .btn-primary {
+    /* `text-accent-fg` (NOT the old `text-base` which was secretly the
+     * font-size utility and never colored the button) keeps button text
+     * readable across light + dark themes. */
+    @apply inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium whitespace-nowrap
+           transition-colors disabled:opacity-50 disabled:cursor-not-allowed
+           focus:outline-none focus-visible:ring-2 focus-visible:ring-ibad
+           bg-accent text-accent-fg hover:bg-accent-bright;
+  }
+  .btn-secondary {
+    @apply inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium whitespace-nowrap
+           transition-colors disabled:opacity-50 disabled:cursor-not-allowed
+           focus:outline-none focus-visible:ring-2 focus-visible:ring-ibad
+           bg-surface-2 border border-border text-text hover:bg-surface-3 hover:border-border-bright;
+  }
+  .btn-ghost {
+    @apply inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium whitespace-nowrap
+           transition-colors disabled:opacity-50 disabled:cursor-not-allowed
+           focus:outline-none focus-visible:ring-2 focus-visible:ring-ibad
+           text-text-muted hover:text-text hover:bg-surface-2;
+  }
+  .btn-danger {
+    @apply inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium whitespace-nowrap
+           transition-colors disabled:opacity-50 disabled:cursor-not-allowed
+           focus:outline-none focus-visible:ring-2 focus-visible:ring-ibad
+           bg-danger/15 border border-danger/40 text-danger hover:bg-danger/25;
+  }
+  .pill {
+    @apply inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium border;
+  }
+  .pill-success { @apply inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium border bg-success/10 border-success/30 text-success; }
+  .pill-danger  { @apply inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium border bg-danger/10 border-danger/30 text-danger; }
+  .pill-warning { @apply inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium border bg-warning/10 border-warning/30 text-warning; }
+  .pill-info    { @apply inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium border bg-info/10 border-info/30 text-info; }
+  .pill-muted   { @apply inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium border bg-surface-2 border-border text-text-muted; }
+}
+
+/* Steady double-thump heartbeat used by the Game-servers health sensor. */
+@keyframes heartbeat {
+  0%   { transform: scale(1); }
+  14%  { transform: scale(1.35); }
+  28%  { transform: scale(1); }
+  42%  { transform: scale(1.35); }
+  70%  { transform: scale(1); }
+  100% { transform: scale(1); }
+}
+.animate-heartbeat {
+  animation: heartbeat 1.4s ease-in-out infinite;
+  transform-origin: center;
+}
+@media (prefers-reduced-motion: reduce) {
+  .animate-heartbeat { animation: none; }
+}

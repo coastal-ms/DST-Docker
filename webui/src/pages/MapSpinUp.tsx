@@ -1,0 +1,721 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  DndContext,
+  PointerSensor,
+  KeyboardSensor,
+  useSensor,
+  useSensors,
+  closestCenter,
+  type DragEndEvent,
+} from '@dnd-kit/core'
+import {
+  SortableContext,
+  arrayMove,
+  sortableKeyboardCoordinates,
+  useSortable,
+  rectSortingStrategy,
+} from '@dnd-kit/sortable'
+import { CSS } from '@dnd-kit/utilities'
+import { PageHeader } from '../components/PageHeader'
+import { Icon } from '../components/Icon'
+import { ApiError } from '../api/client'
+import { MemoryBalancingControl } from '../components/MemoryBalancingControl'
+import { getMapSpinUp, setMapPartySharing, setMapSpinUp, type SpinUpMap, type SpinUpMissingSection, type SpinUpNotStartedSection } from '../api/mapSpinUp'
+import { fixOnDemandPartitions, getMapState, restartMapPods, type MapState } from '../api/maps'
+import { confirmRoutineAction } from '../hooks/useReducedRoutineUi'
+import { RemoteMapQr } from './workspaces/RemoteMapQr'
+import { DockerMapManagement } from './docker/DockerMapManagement'
+
+const dockerEdition = import.meta.env.VITE_DST_EDITION === 'docker'
+
+// Map SpinUp section names → on-demand map keys that expose a live, schedulable
+// pod state via GET /api/maps/{key}. Only these three report whether a pod is
+// actually coming up, so only they get the loading counter + failure diagnosis.
+// Every other map can only reflect the director.ini MinServers floor.
+const ON_DEMAND_KEY: Record<string, string> = {
+  DeepDesert_1: 'deepdesert',
+  SH_Arrakeen: 'arakeen',
+  SH_HarkoVillage: 'harkovillage',
+}
+
+// How often to poll the pod state, and how long to wait before declaring the
+// spin-up stuck. Cold maps usually settle in ~1-3 min; 5 min is a safe ceiling.
+const LOAD_POLL_MS = 5000
+const LOAD_TIMEOUT_MS = 300000
+
+// Turn a not-yet-running MapState into a plain-English reason. Mirrors the same
+// failure modes Get-DuneOnDemandMapState computes server-side.
+function diagnoseStuck(s: MapState): string {
+  if (s.missingPartitionBinding || s.hasDisabledPart || s.stuckDedicatedScaling) {
+    return 'its on-demand partitions are still pinned/disabled in the battlegroup. Click “Fix partitions”, then try again.'
+  }
+  if (!s.present) {
+    return 'this map set is not in the battlegroup CRD. Add it via the Battlegroup editor first.'
+  }
+  if ((s.activeInstances ?? 0) > 0 && (s.readyInstances ?? 0) < (s.targetInstances ?? 1)) {
+    return `${s.readyInstances ?? 0} of ${s.targetInstances ?? 1} configured instances are ready.`
+  }
+  if (s.totalReplicas < 1) {
+    return 'the director never scheduled a pod — usually the Hyper-V VM has no free RAM to start another map. Free memory (spin a map down) and retry.'
+  }
+  return 'the pod has not reported ready in time. It may still be loading, or the director is reconciling — give it a moment and Refresh.'
+}
+
+function fmtElapsed(sec: number): string {
+  const m = Math.floor(sec / 60)
+  const s = sec % 60
+  return `${m}:${s.toString().padStart(2, '0')}`
+}
+
+// Most-used maps pinned to the front by default — these fill the first row.
+// Everything else keeps the backend's order beneath them. Users can drag any
+// card to reorder; the custom order is saved per-browser in localStorage.
+const PRIORITY = ['DeepDesert_1', 'SH_Arrakeen', 'SH_HarkoVillage']
+const ORDER_KEY = 'dst.mapspinup.order.v1'
+
+function defaultOrder(maps: SpinUpMap[]): string[] {
+  const keys = maps.map(m => m.map)
+  const pinned = PRIORITY.filter(k => keys.includes(k))
+  const rest = keys.filter(k => !PRIORITY.includes(k))
+  return [...pinned, ...rest]
+}
+
+function loadSavedOrder(): string[] | null {
+  try {
+    const raw = localStorage.getItem(ORDER_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) && parsed.every(x => typeof x === 'string') ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+// Merge a saved order with the live map list: keep saved keys still present (in
+// their saved order), then append any new maps in default (priority) order.
+function reconcileOrder(saved: string[] | null, maps: SpinUpMap[]): string[] {
+  const def = defaultOrder(maps)
+  if (!saved) return def
+  const present = new Set(maps.map(m => m.map))
+  const kept = saved.filter(k => present.has(k))
+  const keptSet = new Set(kept)
+  const added = def.filter(k => !keptSet.has(k))
+  return [...kept, ...added]
+}
+
+export function MapSpinUp({ embedded = false }: { embedded?: boolean }) {
+  return dockerEdition ? <DockerMapManagement legacyTools={<LegacyMapSpinUp embedded />} /> : <LegacyMapSpinUp embedded={embedded} />
+}
+
+function LegacyMapSpinUp({ embedded = false }: { embedded?: boolean }) {
+  const [maps, setMaps] = useState<SpinUpMap[] | null>(null)
+  const [missingSections, setMissingSections] = useState<SpinUpMissingSection[]>([])
+  const [notStartedSections, setNotStartedSections] = useState<SpinUpNotStartedSection[]>([])
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [message, setMessage] = useState<string | null>(null)
+  const [busy, setBusy] = useState<string | null>(null)
+  const [fixBusy, setFixBusy] = useState(false)
+  const [fixLog, setFixLog] = useState<string | null>(null)
+  const [restartBusy, setRestartBusy] = useState<string | null>(null)
+  const [order, setOrder] = useState<string[] | null>(null)
+  // Live pod-readiness tracking for the on-demand maps. `tracking` holds the
+  // spin-up start time per map; `loadElapsed` is the per-second tick the cards
+  // render; `loadErrors` carries the diagnosed reason a map failed to come up.
+  const [tracking, setTracking] = useState<Record<string, { startedAt: number }>>({})
+  const [loadElapsed, setLoadElapsed] = useState<Record<string, number>>({})
+  const [loadErrors, setLoadErrors] = useState<Record<string, string>>({})
+  const pollMeta = useRef<Record<string, { lastPoll: number; inFlight: boolean }>>({})
+
+  const stopTracking = useCallback((mapName: string) => {
+    delete pollMeta.current[mapName]
+    setTracking(prev => { const n = { ...prev }; delete n[mapName]; return n })
+    setLoadElapsed(prev => { const n = { ...prev }; delete n[mapName]; return n })
+  }, [])
+
+  const startTracking = useCallback((mapName: string) => {
+    if (!ON_DEMAND_KEY[mapName]) return
+    pollMeta.current[mapName] = { lastPoll: 0, inFlight: false }
+    setLoadErrors(prev => { const n = { ...prev }; delete n[mapName]; return n })
+    setTracking(prev => ({ ...prev, [mapName]: { startedAt: Date.now() } }))
+  }, [])
+
+  const dismissLoadError = useCallback((mapName: string) => {
+    setLoadErrors(prev => { const n = { ...prev }; delete n[mapName]; return n })
+  }, [])
+
+  const refresh = useCallback(async () => {
+    setLoading(true); setError(null)
+    try {
+      const r = await getMapSpinUp()
+      setMaps(r.maps ?? [])
+      setMissingSections(r.missingSections ?? [])
+      setNotStartedSections(r.notStartedSections ?? [])
+    } catch (e) {
+      setMaps(null)
+      setMissingSections([])
+      setNotStartedSections([])
+      setError(e instanceof ApiError ? e.message : String(e))
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => { void refresh() }, [refresh])
+
+  const onToggle = useCallback(async (m: SpinUpMap, next: boolean) => {
+    setBusy(m.map); setMessage(null); setError(null)
+    if (!next) { stopTracking(m.map); dismissLoadError(m.map) }
+    // optimistic
+    setMaps(prev => prev?.map(x => x.map === m.map
+      ? { ...x, enabled: next, minServers: next ? (x.availablePartitions ?? 1) : 0 }
+      : x) ?? prev)
+    try {
+      const r = await setMapSpinUp(m.map, next)
+      await refresh()
+      if (r.ok) {
+        setMessage(r.message ?? (next ? `${m.label} spin-up enabled.` : `${m.label} spin-up disabled.`))
+      } else {
+        setError(r.message ?? 'The change may not have applied.')
+      }
+      // Once the floor is set, watch the pod actually come up (on-demand maps only).
+      if (next && r.ok && ON_DEMAND_KEY[m.map]) startTracking(m.map)
+    } catch (e) {
+      const mutationError = e instanceof ApiError ? e.message : String(e)
+      await refresh()
+      setError(mutationError)
+    } finally {
+      setBusy(null)
+    }
+  }, [refresh, startTracking, stopTracking, dismissLoadError])
+
+  const onStartRetail = useCallback(async (s: SpinUpNotStartedSection) => {
+    const ok = confirmRoutineAction(
+      `Start ${s.label} for the first time?\n\n`
+      + 'This creates its director.ini section and keeps one server instance warm '
+      + '(MinServers = 1) from now on.\n\n'
+      + "It spins up a brand-new server instance, which needs additional Hyper-V VM "
+      + 'RAM on top of whatever is already running. Make sure the VM has room before '
+      + 'starting several of these back-to-back.',
+    )
+    if (!ok) return
+    setBusy(s.map); setMessage(null); setError(null)
+    try {
+      const r = await setMapSpinUp(s.map, true)
+      await refresh()
+      if (r.ok) {
+        setMessage(r.message ?? `${s.label} is starting up.`)
+      } else {
+        setError(r.message ?? 'The change may not have applied.')
+      }
+    } catch (e) {
+      const mutationError = e instanceof ApiError ? e.message : String(e)
+      await refresh()
+      setError(mutationError)
+    } finally {
+      setBusy(null)
+    }
+  }, [refresh])
+
+  const onPartySharing = useCallback(async (m: SpinUpMap, shared: boolean) => {
+    setBusy(m.map); setMessage(null); setError(null)
+    setMaps(prev => prev?.map(x => x.map === m.map ? { ...x, sharedParties: shared } : x) ?? prev)
+    try {
+      const r = await setMapPartySharing(m.map, shared)
+      await refresh()
+      if (r.ok) {
+        setMessage(r.message ?? (shared
+          ? `${m.label} now allows separate parties to share its server.`
+          : `${m.label} now keeps one party per server.`))
+      } else {
+        setError(r.message ?? 'The party-sharing change may not have applied.')
+      }
+    } catch (e) {
+      const mutationError = e instanceof ApiError ? e.message : String(e)
+      await refresh()
+      setError(mutationError)
+    } finally {
+      setBusy(null)
+    }
+  }, [refresh])
+
+  // Drive the loading counter + readiness polling for any tracked map. Ticks
+  // once a second for the elapsed display and polls the live pod state every
+  // LOAD_POLL_MS until it's running, times out, or the read fails.
+  useEffect(() => {
+    const names = Object.keys(tracking)
+    if (names.length === 0) return
+    const id = window.setInterval(() => {
+      const now = Date.now()
+      setLoadElapsed(() => {
+        const next: Record<string, number> = {}
+        for (const name of Object.keys(tracking)) {
+          next[name] = Math.floor((now - tracking[name].startedAt) / 1000)
+        }
+        return next
+      })
+      for (const name of Object.keys(tracking)) {
+        const key = ON_DEMAND_KEY[name]
+        const meta = pollMeta.current[name]
+        if (!key || !meta || meta.inFlight || now - meta.lastPoll < LOAD_POLL_MS) continue
+        const elapsed = now - tracking[name].startedAt
+        meta.lastPoll = now
+        meta.inFlight = true
+        getMapState(key).then(s => {
+          if (pollMeta.current[name]) pollMeta.current[name].inFlight = false
+          if (s.running) {
+            stopTracking(name)
+            setMessage(`${s.label ?? name} pod is up (took ${fmtElapsed(Math.floor(elapsed / 1000))}).`)
+            void refresh()
+          } else if (elapsed >= LOAD_TIMEOUT_MS) {
+            stopTracking(name)
+            setLoadErrors(prev => ({ ...prev, [name]: `${s.label ?? name} didn’t come up: ${diagnoseStuck(s)}` }))
+          }
+        }).catch(e => {
+          if (pollMeta.current[name]) pollMeta.current[name].inFlight = false
+          stopTracking(name)
+          const msg = e instanceof ApiError ? e.message : String(e)
+          setLoadErrors(prev => ({ ...prev, [name]: `${name} couldn’t load: ${msg}` }))
+        })
+      }
+    }, 1000)
+    return () => window.clearInterval(id)
+  }, [tracking, refresh, stopTracking])
+
+  const onFixPartitions = useCallback(async () => {
+    const ok = confirmRoutineAction(
+      'Clear stuck partition pins on the on-demand maps (Deep Desert, Arrakeen, '
+      + 'Harko Village) so the director can re-assign partitions and spin them up '
+      + 'on demand?\n\n'
+      + 'Safety:\n'
+      + '• Only those 3 maps are touched. Overmap and Survival_1 are never affected.\n'
+      + '• Any map with a running pod is skipped — no live session will be disturbed.\n'
+      + '• Partitions are re-assigned by the director on next spawn.\n\n'
+      + 'Use this when a map refuses to launch after a reboot or BG restart.',
+    )
+    if (!ok) return
+    setFixBusy(true); setMessage(null); setError(null); setFixLog(null)
+    try {
+      const r = await fixOnDemandPartitions()
+      setMessage(r.message ?? 'Partition cleanup ran.')
+      const tail = (r.logTail && r.logTail.trim().length > 0) ? r.logTail : (r.output ?? '')
+      setFixLog(tail || null)
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : String(e))
+    } finally {
+      setFixBusy(false)
+    }
+  }, [])
+
+  const onRestartPods = useCallback(async (key: 'survival' | 'deepdesert', label: string) => {
+    const ok = window.confirm(
+      `Restart the ${label} pod(s)?\n\n`
+        + (dockerEdition
+          ? 'This restarts the running map server. Loading can take a few minutes. Its saved spin-up policy stays the same.\n\n'
+          : 'This deletes the running Kubernetes pod(s); the operator recreates them fresh in about 60-120 seconds.\n\n')
+      + 'Anyone currently on the map will be disconnected. '
+      + (key === 'survival'
+        ? 'Survival_1 hosts the persistent Hagga overworld, so this affects the main world.'
+        : 'Use this when Deep Desert is stuck or misbehaving.'),
+    )
+    if (!ok) return
+    setRestartBusy(key); setMessage(null); setError(null); setFixLog(null)
+    try {
+      const r = await restartMapPods(key)
+      setMessage(r.message ?? `${label} restart requested.`)
+      if (!r.ok) setError(r.message ?? 'The restart may not have applied.')
+      if (r.raw) setFixLog(r.raw)
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : String(e))
+    } finally {
+      setRestartBusy(null)
+    }
+  }, [])
+
+  // Reconcile the saved drag-order against the live map list whenever maps load.
+  useEffect(() => {
+    if (!maps) return
+    setOrder(reconcileOrder(loadSavedOrder(), maps))
+  }, [maps])
+
+  const orderedMaps = useMemo<SpinUpMap[]>(() => {
+    if (!maps) return []
+    const byKey = new Map(maps.map(m => [m.map, m]))
+    const seq = order ?? defaultOrder(maps)
+    const out = seq.map(k => byKey.get(k)).filter((m): m is SpinUpMap => Boolean(m))
+    // Defensive: append any map missing from the order sequence.
+    for (const m of maps) if (!seq.includes(m.map)) out.push(m)
+    return out
+  }, [maps, order])
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  )
+
+  const onDragEnd = useCallback((e: DragEndEvent) => {
+    const { active, over } = e
+    if (!over || active.id === over.id) return
+    setOrder(prev => {
+      const base = prev ?? (maps ? defaultOrder(maps) : [])
+      const oldIdx = base.indexOf(String(active.id))
+      const newIdx = base.indexOf(String(over.id))
+      if (oldIdx < 0 || newIdx < 0) return prev
+      const next = arrayMove(base, oldIdx, newIdx)
+      try { localStorage.setItem(ORDER_KEY, JSON.stringify(next)) } catch { /* ignore */ }
+      return next
+    })
+  }, [maps])
+
+  const resetOrder = useCallback(() => {
+    try { localStorage.removeItem(ORDER_KEY) } catch { /* ignore */ }
+    setOrder(maps ? defaultOrder(maps) : null)
+  }, [maps])
+
+  const isCustomOrder = useMemo(() => {
+    if (!maps || !order) return false
+    const def = defaultOrder(maps)
+    return order.length !== def.length || order.some((k, i) => k !== def[i])
+  }, [maps, order])
+
+  const lifecycleActions = (
+    <>
+      {isCustomOrder && (
+        <button
+          className="btn-secondary min-h-11 flex-1 justify-center sm:flex-none"
+          onClick={resetOrder}
+          disabled={loading || busy !== null || fixBusy}
+          title="Restore the default card order (Deep Desert, Arrakeen, Harko Village first)."
+        >
+          <Icon name="RotateCcw" size={14} /> Reset order
+        </button>
+      )}
+      <button
+        className="btn-secondary min-h-11 flex-1 justify-center sm:flex-none"
+        onClick={() => { void onFixPartitions() }}
+        disabled={loading || busy !== null || fixBusy}
+        title="Clear stuck igwsss.spec.partitions pins on Deep Desert / Arrakeen / Harko Village. Safe — only touches those 3 maps, skips any with a running pod, and never touches Overmap or Survival_1."
+      >
+        <Icon name={fixBusy ? 'Loader2' : 'Wrench'} size={15} className={fixBusy ? 'animate-spin' : ''} />
+        {fixBusy ? 'Fixing…' : 'Fix partitions'}
+      </button>
+      <button className="btn-secondary min-h-11 flex-1 justify-center sm:flex-none" onClick={() => { void refresh() }} disabled={loading || busy !== null || fixBusy}>
+        <Icon name="RefreshCw" size={15} className={loading ? 'animate-spin' : ''} /> Refresh
+      </button>
+    </>
+  )
+
+  return (
+    <>
+      {embedded ? (
+        <div
+          aria-label="Map lifecycle actions"
+          className="mb-4 grid grid-cols-2 gap-2 min-[460px]:flex min-[460px]:flex-wrap min-[460px]:justify-end"
+        >
+          {lifecycleActions}
+        </div>
+      ) : (
+        <PageHeader
+          title="Map SpinUp"
+          icon="Power"
+          description="Keep map servers warm. Deep Desert starts every configured partition; other maps keep one warm. Hot-swappable — no restart needed. Drag cards to reorder."
+          actions={lifecycleActions}
+        />
+      )}
+
+      <div className="mb-4 flex flex-wrap items-start gap-3">
+        <RemoteMapQr />
+        <div className="grid min-w-0 flex-1 grid-cols-1 min-[360px]:grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:items-center sm:justify-center sm:gap-3">
+        <button
+          className="btn-secondary min-h-11 w-full justify-center sm:w-auto"
+          onClick={() => { void onRestartPods('survival', 'Hagga (Survival_1)') }}
+          disabled={loading || busy !== null || fixBusy || restartBusy !== null}
+            title={dockerEdition ? 'Restart the Hagga server. Disconnects anyone on the main world.' : 'Delete and recreate the Survival_1 (Hagga overworld) pod(s). Disconnects anyone on the main world; the operator brings them back in ~60-120s.'}
+        >
+          <Icon name={restartBusy === 'survival' ? 'Loader2' : 'RotateCcw'} size={15} className={restartBusy === 'survival' ? 'animate-spin' : ''} />
+          {restartBusy === 'survival' ? 'Restarting…' : 'Restart Hagga'}
+        </button>
+        <button
+          className="btn-secondary min-h-11 w-full justify-center sm:w-auto"
+          onClick={() => { void onRestartPods('deepdesert', 'Deep Desert') }}
+          disabled={loading || busy !== null || fixBusy || restartBusy !== null}
+            title={dockerEdition ? 'Restart the running Deep Desert server. Disconnects anyone in Deep Desert.' : 'Delete and recreate the DeepDesert_1 pod(s). Disconnects anyone in Deep Desert; the operator brings them back in ~60-120s.'}
+        >
+          <Icon name={restartBusy === 'deepdesert' ? 'Loader2' : 'RotateCcw'} size={15} className={restartBusy === 'deepdesert' ? 'animate-spin' : ''} />
+          {restartBusy === 'deepdesert' ? 'Restarting…' : 'Restart Deep Desert'}
+        </button>
+        </div>
+      </div>
+
+      {dockerEdition && <div className="mb-4"><MemoryBalancingControl /></div>}
+      <div className="mb-4 rounded-lg border border-warning/60 bg-warning/15 px-3 py-3 sm:px-4 flex items-start gap-3">
+        <Icon name="AlertTriangle" size={20} className="shrink-0 mt-0.5 text-warning" />
+        <div className="text-sm text-warning">
+          <div className="font-bold uppercase tracking-wide mb-1">RAM requirement</div>
+          <span className="text-warning/90">
+            {dockerEdition ? <>
+              With memory balancing on, empty on-demand maps can unload to free RAM. A cold map can take several minutes to load.
+              Turn on Warm before traveling to keep a map ready; it continues using memory until you turn Warm off.
+              Docker checks the available memory before starting another map. Occupied maps stay running.
+            </> : <>
+            Because the RAM allocated to each map can be customized, some maps may not spin up if the
+            Hyper-V VM doesn't have enough memory to support all of them at once. OverMap, Hagga, and
+            DeepDesert alone can consume <strong>31–35 GB</strong> at the default level — adjust
+            accordingly. Maps will <strong>not</strong> spin down while a player is present, and they
+            also scale on demand when a player tries to enter (though that player may see a longer
+            load while the map spins up). On-demand is the recommended approach; this Map SpinUp page
+            simply lets you start the spawn process ahead of time, before you arrive, if desired.
+            </>}
+          </span>
+        </div>
+      </div>
+
+      {error && (
+        <div className="card p-4 mb-4 border-danger/40">
+          <p className="text-sm text-danger break-words">{error}</p>
+        </div>
+      )}
+      {message && (
+        <div className="card p-4 mb-4 border-accent/40">
+          <p className="text-sm text-text">{message}</p>
+          {fixLog && (
+            <pre className="mt-3 text-[11px] leading-snug text-text-dim font-mono whitespace-pre-wrap break-words max-h-60 overflow-auto border-t border-border/40 pt-2">
+              {fixLog}
+            </pre>
+          )}
+        </div>
+      )}
+
+      {!maps ? (
+        <div className="card p-6">
+          <p className="text-sm text-text-dim italic">{loading ? 'Loading…' : 'No data yet.'}</p>
+        </div>
+      ) : (
+        <>
+          {missingSections.length > 0 && (
+            <MissingSectionsGroup sections={missingSections} />
+          )}
+          {notStartedSections.length > 0 && (
+            <NotStartedSectionsGroup sections={notStartedSections} busy={busy} onStart={onStartRetail} />
+          )}
+          <MapGroup
+            title="Maps"
+            hint="Deep Desert keeps all configured partitions warm; other maps keep one server warm. Some maps don't ship MinServers natively — enabling those may be ignored or consume additional RAM."
+            maps={orderedMaps}
+            busy={busy}
+            onToggle={onToggle}
+            onPartySharing={onPartySharing}
+            loadElapsed={loadElapsed}
+            loadErrors={loadErrors}
+            onDismissError={dismissLoadError}
+            sensors={sensors}
+            onDragEnd={onDragEnd}
+          />
+        </>
+      )}
+    </>
+  )
+}
+
+// Maps DST expects a director.ini section for, but whose [ Map_Name ] header
+// is entirely absent — a config gap, not something the user can toggle here.
+// Rendered separately from the normal cards since there's nothing to enable.
+function MissingSectionsGroup({ sections }: { sections: SpinUpMissingSection[] }) {
+  return (
+    <section className="mb-6">
+      <h2 className="text-sm font-semibold uppercase tracking-wider mb-1 flex items-center gap-2 text-danger">
+        <Icon name="AlertTriangle" size={14} className="text-danger" />
+        Missing from director.ini
+      </h2>
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+        {sections.map(s => (
+          <div key={s.map} className="card p-4 flex flex-col gap-1 border-danger/40">
+            <div className="text-sm font-semibold truncate">{s.label}</div>
+            <div className="text-xs text-text-dim font-mono truncate">{s.map}</div>
+            <p className="text-xs text-danger mt-1 break-words">{s.message}</p>
+          </div>
+        ))}
+      </div>
+    </section>
+  )
+}
+
+// Retail maps whose section is absent only because they haven't been
+// started yet - the normal, low-severity case. Deliberately calmer than
+// MissingSectionsGroup: an info tone, not danger, since this isn't
+// game-breaking, just a one-time "hasn't run yet" state.
+function NotStartedSectionsGroup({ sections, busy, onStart }: {
+  sections: SpinUpNotStartedSection[]
+  busy: string | null
+  onStart: (s: SpinUpNotStartedSection) => void
+}) {
+  return (
+    <section className="mb-6">
+      <h2 className="text-sm font-semibold uppercase tracking-wider mb-1 flex items-center gap-2 text-info">
+        <Icon name="Info" size={14} className="text-info" />
+        Not started yet
+      </h2>
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+        {sections.map(s => (
+          <div key={s.map} className="card p-4 flex flex-col gap-1 border-info/40">
+            <div className="text-sm font-semibold truncate">{s.label}</div>
+            <div className="text-xs text-text-dim font-mono truncate">{s.map}</div>
+            <p className="text-xs text-text-dim mt-1 break-words">{s.message}</p>
+            <button
+              type="button"
+              className="btn-secondary min-h-9 mt-2 justify-center"
+              disabled={busy !== null}
+              onClick={() => onStart(s)}
+            >
+              <Icon name={busy === s.map ? 'Loader2' : 'Power'} size={14} className={busy === s.map ? 'animate-spin' : ''} />
+              {busy === s.map ? 'Starting…' : 'Start it'}
+            </button>
+          </div>
+        ))}
+      </div>
+    </section>
+  )
+}
+
+function MapGroup({ title, hint, tone = 'text', maps, busy, onToggle, onPartySharing, loadElapsed, loadErrors, onDismissError, sensors, onDragEnd }: {
+  title: string
+  hint: string
+  tone?: 'text' | 'warning'
+  maps: SpinUpMap[]
+  busy: string | null
+  onToggle: (m: SpinUpMap, next: boolean) => void
+  onPartySharing: (m: SpinUpMap, shared: boolean) => void
+  loadElapsed: Record<string, number>
+  loadErrors: Record<string, string>
+  onDismissError: (mapName: string) => void
+  sensors: ReturnType<typeof useSensors>
+  onDragEnd: (e: DragEndEvent) => void
+}) {
+  if (maps.length === 0) return null
+  const headColor = tone === 'warning' ? 'text-warning' : 'text-text-muted'
+  return (
+    <section className="mb-6">
+      <h2 className={`text-sm font-semibold uppercase tracking-wider mb-1 flex items-center gap-2 ${headColor}`}>
+        {tone === 'warning' && <Icon name="AlertTriangle" size={14} className="text-warning" />}
+        {title}
+      </h2>
+      <p className="text-xs text-text-dim mb-3 max-w-3xl">{hint}</p>
+      <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
+        <SortableContext items={maps.map(m => m.map)} strategy={rectSortingStrategy}>
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+            {maps.map(m => (
+              <SortableMapCard
+                key={m.map}
+                map={m}
+                busy={busy}
+                onToggle={onToggle}
+                onPartySharing={onPartySharing}
+                elapsed={loadElapsed[m.map]}
+                loadError={loadErrors[m.map]}
+                onDismissError={onDismissError}
+              />
+            ))}
+          </div>
+        </SortableContext>
+      </DndContext>
+    </section>
+  )
+}
+
+function SortableMapCard({ map: m, busy, onToggle, onPartySharing, elapsed, loadError, onDismissError }: {
+  map: SpinUpMap
+  busy: string | null
+  onToggle: (m: SpinUpMap, next: boolean) => void
+  onPartySharing: (m: SpinUpMap, shared: boolean) => void
+  elapsed?: number
+  loadError?: string
+  onDismissError: (mapName: string) => void
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
+    useSortable({ id: m.map })
+  const style: React.CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.4 : busy === m.map ? 0.6 : undefined,
+  }
+  const loading = elapsed !== undefined
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      className="card p-4 flex flex-col gap-2"
+    >
+      <div className="flex items-center gap-3">
+        <button
+          type="button"
+          className="shrink-0 -ml-1 min-h-11 min-w-11 inline-flex items-center justify-center text-text-dim hover:text-text cursor-grab active:cursor-grabbing touch-none"
+          title="Drag to reorder"
+          {...attributes}
+          {...listeners}
+        >
+          <Icon name="GripVertical" size={16} />
+        </button>
+        <label className="flex items-center justify-between gap-3 flex-1 min-w-0 cursor-pointer">
+          <div className="min-w-0">
+            <div className="text-sm font-semibold truncate">{m.label}</div>
+            <div className="text-xs text-text-dim font-mono truncate">{m.map}</div>
+            {m.map === 'DeepDesert_1' && (m.availablePartitions ?? 1) > 1 && (
+              <div className="text-[10px] text-warning mt-0.5">
+                {m.availablePartitions} configured partitions
+              </div>
+            )}
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            {loading ? (
+              <span className="pill-warning" title="Waiting for the map pod to come up">
+                <Icon name="Loader2" size={10} className="animate-spin" /> Loading… {fmtElapsed(elapsed)}
+              </span>
+            ) : (
+              <span className={m.enabled ? 'pill-success' : 'pill-muted'}>
+                {m.enabled ? 'Warm' : dockerEdition ? 'On demand' : 'Off'}
+              </span>
+            )}
+            <input
+              type="checkbox"
+              className="h-4 w-4 accent-accent"
+              checked={m.enabled}
+              disabled={busy !== null || loading}
+              onChange={e => onToggle(m, e.target.checked)}
+            />
+          </div>
+        </label>
+      </div>
+      {m.supportsPartySharing && (
+        <label className="flex items-start justify-between gap-3 border-t border-border/40 pt-2 text-xs cursor-pointer">
+          <span>
+            <span className="block font-semibold text-text">Shared multiplayer</span>
+            <span className="text-text-dim">
+              Let separate parties use the same Zanovar server instead of limiting it to one party.
+            </span>
+          </span>
+          <input
+            type="checkbox"
+            className="mt-0.5 h-4 w-4 shrink-0 accent-accent"
+            checked={m.sharedParties === true}
+            disabled={busy !== null}
+            onChange={e => onPartySharing(m, e.target.checked)}
+          />
+        </label>
+      )}
+      {loadError && (
+        <div className="flex items-start gap-2 rounded-md border border-danger/40 bg-danger/10 px-2.5 py-1.5 text-xs text-danger">
+          <Icon name="AlertTriangle" size={13} className="shrink-0 mt-0.5" />
+          <span className="flex-1 break-words">{loadError}</span>
+          <button
+            type="button"
+            className="shrink-0 text-danger/70 hover:text-danger"
+            title="Dismiss"
+            onClick={() => onDismissError(m.map)}
+          >
+            <Icon name="X" size={13} />
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}

@@ -1,0 +1,743 @@
+﻿# Gameplay API — Players. Read views (list + detail) follow the live/demo +
+# `source` convention; write actions require a live DB (no demo writes) and
+# mirror the reference implementation's stored procedures. Shared helpers Get-DuneQ /
+# Test-DuneDemoRequested come from routes/Gameplay.ps1 (loaded first).
+
+# Read a scalar field from a parsed JSON body (hashtable or PSObject).
+function Get-DuneBodyValue {
+    param($Body, [string]$Name)
+    if ($null -eq $Body) { return $null }
+    if ($Body -is [System.Collections.IDictionary]) {
+        if ($Body.Contains($Name)) { return $Body[$Name] }
+        return $null
+    }
+    if ($Body.PSObject.Properties[$Name]) { return $Body.$Name }
+    return $null
+}
+
+function Get-DuneBodyInt {
+    param($Body, [string]$Name)
+    $v = Get-DuneBodyValue -Body $Body -Name $Name
+    $n = 0L
+    if ([Int64]::TryParse([string]$v, [ref]$n)) { return $n }
+    return $null
+}
+
+# ---------------------------------------------------------------------------
+# GET /api/gameplay/players  — full character list (live -> demo).
+# ---------------------------------------------------------------------------
+Register-DuneRoute -Method GET -Path '/api/gameplay/players' -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        if ([string]$routeParams.requestPrincipal.type -eq 'linked-player') {
+            Write-DuneJson -Response $res -Body @{ players = @($routeParams.linkedPlayer); total = 1; source = 'live' }
+            return
+        }
+        $source = 'demo'
+        $players = $null
+        $liveError = $null
+        if (-not (Test-DuneDemoRequested $req)) {
+            $ctx = Get-DuneDbContext
+            if ($ctx.ok) {
+                $live = Get-DunePlayersLive -Ip $ctx.ip
+                if ($live.ok) { $players = $live.players; $source = 'live' }
+                else { $liveError = $live.error }
+            } else { $liveError = $ctx.message }
+        }
+        if ($null -eq $players) { $players = Get-DunePlayersDemo }
+        $out = @{ players = @($players); total = @($players).Count; source = $source }
+        if ($liveError) { $out['liveError'] = $liveError }
+        Write-DuneJson -Response $res -Body $out
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message "Players list failed: $($_.Exception.Message)"
+    }
+}
+
+# ---------------------------------------------------------------------------
+# GET /api/gameplay/players/detail?pawn=<id>&controller=<id>
+#   — inventory + specs + currency for one player.
+# ---------------------------------------------------------------------------
+Register-DuneRoute -Method GET -Path '/api/gameplay/players/detail' -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $pawn = 0L; $controller = 0L
+        [void][Int64]::TryParse((Get-DuneQ $req 'pawn'), [ref]$pawn)
+        [void][Int64]::TryParse((Get-DuneQ $req 'controller'), [ref]$controller)
+        if ($pawn -le 0) { Write-DuneError -Response $res -Status 400 -Message 'pawn id is required.'; return }
+
+        $inventoryKind = Get-DuneQ $req 'inventory_kind'
+        if (-not $inventoryKind) { $inventoryKind = 'item' }
+        if ($inventoryKind -notin @('item','emote','contract')) { Write-DuneError -Response $res -Status 400 -Message 'inventory_kind must be item, emote or contract.'; return }
+        $inventoryOffset = -1
+        $offsetValue = Get-DuneQ $req 'inventory_offset'
+        if ($offsetValue) {
+            if (-not [int]::TryParse($offsetValue, [ref]$inventoryOffset) -or $inventoryOffset -lt 0) { Write-DuneError -Response $res -Status 400 -Message 'inventory_offset must be a non-negative integer.'; return }
+        }
+        $source = 'demo'
+        $detail = $null
+        $liveError = $null
+        if (-not (Test-DuneDemoRequested $req)) {
+            $ctx = Get-DuneDbContext
+            if ($ctx.ok) {
+                $live = Get-DunePlayerDetailLive -Ip $ctx.ip -PawnId $pawn -ControllerId $controller -InventoryOffset $inventoryOffset -InventoryKind $inventoryKind
+                if ($live.ok) { $detail = $live; $source = 'live' }
+                else { $liveError = $live.error }
+            } else { $liveError = $ctx.message }
+        }
+        if ($null -eq $detail) { $detail = Get-DunePlayerDetailDemo -PawnId $pawn }
+        $out = @{
+            inventory = @($detail.inventory)
+            specs     = @($detail.specs)
+            currency  = @($detail.currency)
+            source    = $source
+        }
+        if ($inventoryOffset -ge 0) {
+            $pageItems = @($detail.inventory)
+            if ($source -eq 'demo') { $pageItems = @($pageItems | Where-Object { (Get-DuneItemKind -TemplateId ([string]$_.template_id)) -eq $inventoryKind } | Select-Object -Skip $inventoryOffset -First 29) }
+            $out['inventory_has_more'] = $pageItems.Count -gt 28
+            $out['inventory'] = @($pageItems | Select-Object -First 28)
+        }
+        if ($liveError) { $out['liveError'] = $liveError }
+        Write-DuneJson -Response $res -Body $out
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message "Player detail failed: $($_.Exception.Message)"
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Write actions. All require a live DB; they never touch demo data.
+# ---------------------------------------------------------------------------
+function Invoke-DunePlayerWriteRoute {
+    param($Response, [scriptblock]$Action)
+    $ctx = Get-DuneDbContext
+    if (-not $ctx.ok) { Write-DuneError -Response $Response -Status 503 -Message $ctx.message; return }
+    $result = & $Action $ctx.ip
+    if (-not $result.ok) { Write-DuneError -Response $Response -Status 503 -Message $result.error; return }
+    Write-DuneJson -Response $Response -Body @{ ok = $true; message = $result.message; result = $result }
+}
+
+# GET /api/gameplay/players/reserve-recovery?pawn=<id>&controller=<id>
+Register-DuneRoute -Method GET -Path '/api/gameplay/players/reserve-recovery' -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $pawn = 0L; $controller = 0L
+        [void][Int64]::TryParse((Get-DuneQ $req 'pawn'), [ref]$pawn)
+        [void][Int64]::TryParse((Get-DuneQ $req 'controller'), [ref]$controller)
+        if ($pawn -le 0 -or $controller -le 0) {
+            Write-DuneError -Response $res -Status 400 -Message 'pawn and controller ids are required.'
+            return
+        }
+        $ctx = Get-DuneDbContext
+        if (-not $ctx.ok) { Write-DuneError -Response $res -Status 503 -Message $ctx.message; return }
+        $preview = Get-DuneReserveRecoveryPreview -Ip $ctx.ip -PawnId $pawn -ControllerId $controller
+        if (-not $preview.ok) { Write-DuneError -Response $res -Status 503 -Message $preview.error; return }
+        Write-DuneJson -Response $res -Body (ConvertTo-DuneReservePublicPreview -Preview $preview)
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message "Reserve recovery preview failed: $($_.Exception.Message)"
+    }
+}
+
+# POST /api/gameplay/players/reserve-recovery  { pawn_id, controller_id, revision }
+Register-DuneRoute -Method POST -Path '/api/gameplay/players/reserve-recovery' -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $pawn = Get-DuneBodyInt -Body $body -Name 'pawn_id'
+        $controller = Get-DuneBodyInt -Body $body -Name 'controller_id'
+        $revision = [string](Get-DuneBodyValue -Body $body -Name 'revision')
+        if ($null -eq $pawn -or $pawn -le 0 -or $null -eq $controller -or $controller -le 0) {
+            Write-DuneError -Response $res -Status 400 -Message 'pawn_id and controller_id are required.'
+            return
+        }
+        if ($revision -notmatch '^[a-f0-9]{64}$') {
+            Write-DuneError -Response $res -Status 400 -Message 'A current Reserve preview revision is required.'
+            return
+        }
+        Invoke-DunePlayerWriteRoute -Response $res -Action { param($ip)
+            Invoke-DuneReserveRecovery -Ip $ip -PawnId $pawn -ControllerId $controller -Revision $revision
+        }
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message "Reserve recovery failed: $($_.Exception.Message)"
+    }
+}
+
+# POST /api/gameplay/players/reserve-recovery/rollback
+# { pawn_id, controller_id, recovery_id }
+Register-DuneRoute -Method POST -Path '/api/gameplay/players/reserve-recovery/rollback' -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $pawn = Get-DuneBodyInt -Body $body -Name 'pawn_id'
+        $controller = Get-DuneBodyInt -Body $body -Name 'controller_id'
+        $recoveryId = [string](Get-DuneBodyValue -Body $body -Name 'recovery_id')
+        if ($null -eq $pawn -or $pawn -le 0 -or $null -eq $controller -or $controller -le 0) {
+            Write-DuneError -Response $res -Status 400 -Message 'pawn_id and controller_id are required.'
+            return
+        }
+        if ($recoveryId -notmatch '^[a-f0-9]{32}$') {
+            Write-DuneError -Response $res -Status 400 -Message 'recovery_id is required.'
+            return
+        }
+        Invoke-DunePlayerWriteRoute -Response $res -Action { param($ip)
+            Invoke-DuneReserveRecoveryRollback -Ip $ip -PawnId $pawn -ControllerId $controller -RecoveryId $recoveryId
+        }
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message "Reserve recovery rollback failed: $($_.Exception.Message)"
+    }
+}
+
+# POST /api/gameplay/players/give-solari  { controller_id, amount }
+Register-DuneRoute -Method POST -Path '/api/gameplay/players/give-solari' -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $cid = Get-DuneBodyInt -Body $body -Name 'controller_id'
+        $amt = Get-DuneBodyInt -Body $body -Name 'amount'
+        if ($null -eq $cid -or $cid -le 0) { Write-DuneError -Response $res -Status 400 -Message 'controller_id is required.'; return }
+        if ($null -eq $amt) { Write-DuneError -Response $res -Status 400 -Message 'amount must be an integer.'; return }
+        Invoke-DunePlayerWriteRoute -Response $res -Action { param($ip) Invoke-DunePlayerGiveSolari -Ip $ip -ControllerId $cid -Amount $amt }
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message "Give solari failed: $($_.Exception.Message)"
+    }
+}
+
+# GET /api/gameplay/augments/catalog
+Register-DuneRoute -Method GET -Path '/api/gameplay/augments/catalog' -Handler {
+    param($req, $res)
+    try {
+        Write-DuneJson -Response $res -Body (Get-DuneAugmentCatalog)
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message "Augment catalog failed: $($_.Exception.Message)"
+    }
+}
+
+# POST /api/gameplay/players/give-item  { pawn_id, template, qty, quality, augments?:[{id,quality}], fls_id? }
+# v12.0.3 — Auto-routes between online (RMQ ServerCommand, instant) and offline
+# (SQL backpack insert) based on player state.
+# - Online + quality<=0     → RMQ live (instant in-game)
+# - Online + quality>0      → ERROR — a Grade write is SQL-only and requires the player offline
+# - Offline                 → SQL (will appear on next login)
+# Response includes 'path' = 'rmq' | 'sql'. Use /give-item-live for explicit RMQ override.
+Register-DuneRoute -Method POST -Path '/api/gameplay/players/give-item' -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $pawn = Get-DuneBodyInt -Body $body -Name 'pawn_id'
+        $tmpl = [string](Get-DuneBodyValue -Body $body -Name 'template')
+        $qty  = Get-DuneBodyInt -Body $body -Name 'qty'
+        $qual = Get-DuneBodyInt -Body $body -Name 'quality'
+        $augmentRaw = Get-DuneBodyValue -Body $body -Name 'augments'
+        try {
+            $augments = @(ConvertTo-DuneAugmentSelections -Augments $augmentRaw)
+        } catch {
+            Write-DuneError -Response $res -Status 400 -Message $_.Exception.Message
+            return
+        }
+        $fls  = [string](Get-DuneBodyValue -Body $body -Name 'fls_id')
+        # Drop-to-ground (overflow) defaults ON so a full inventory never silently
+        # swallows the give; pass allow_overflow=false explicitly to opt out.
+        $ovRaw = Get-DuneBodyValue -Body $body -Name 'allow_overflow'
+        $overflow = if ($null -eq $ovRaw) { $true } else { [bool]$ovRaw }
+        if ($null -eq $qual) { $qual = 0L }
+        if ($null -eq $pawn -or $pawn -le 0) { Write-DuneError -Response $res -Status 400 -Message 'pawn_id is required.'; return }
+        if (-not $tmpl) { Write-DuneError -Response $res -Status 400 -Message 'template is required.'; return }
+        if ($null -eq $qty -or $qty -le 0) { Write-DuneError -Response $res -Status 400 -Message 'qty must be a positive integer.'; return }
+
+        $tv = Test-DuneValidGiveTemplate -TemplateId $tmpl
+        if (-not $tv.ok) { Write-DuneError -Response $res -Status 400 -Message $tv.error; return }
+
+        Invoke-DunePlayerWriteRoute -Response $res -Action {
+            param($ip)
+            $off = Test-DunePlayerOffline -Ip $ip -PawnId $pawn -RequireVerifiedStatus:($augments.Count -gt 0)
+            if ($augments.Count -gt 0 -and -not $off.ok) {
+                return @{ ok = $false; error = $off.reason }
+            }
+            $isOnline = -not $off.ok
+            if ($isOnline -and $augments.Count -gt 0) {
+                return @{ ok = $false; error = 'Pre-augmented grants require the player to be offline. Ask the player to log out, then retry.' }
+            }
+            # Online + default quality → RMQ live (instant, no relog)
+            if ($isOnline -and $qual -le 0) {
+                $r = Invoke-DunePlayerGiveItemLive -Ip $ip -ActorId $pawn -FlsId $fls -Template $tmpl -Quantity ([int]$qty) -Durability 1.0 -AllowOverflow $overflow
+                if ($r.ok -and -not $r.path) { $r['path'] = 'rmq' }
+                return $r
+            }
+            # A Grade (quality) write only goes through SQL, and the game overwrites
+            # it from RAM while a live session exists — refuse instead of writing a
+            # value that silently won't stick.
+            if ($isOnline -and $qual -gt 0) {
+                return @{ ok = $false; error = 'Changing the Grade requires the player to be offline. Ask the player to log out, then retry.' }
+            }
+            # Offline → SQL (appears on next login)
+            $r = Invoke-DunePlayerGiveItem -Ip $ip -PawnId $pawn -Template $tmpl -Qty $qty -Quality $qual -Augments $augments
+            if ($r.ok) { $r['path'] = 'sql' }
+            return $r
+        }
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message "Give item failed: $($_.Exception.Message)"
+    }
+}
+
+# POST /api/gameplay/players/rename  { account_id, name }
+Register-DuneRoute -Method POST -Path '/api/gameplay/players/rename' -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $aid = Get-DuneBodyInt -Body $body -Name 'account_id'
+        $name = [string](Get-DuneBodyValue -Body $body -Name 'name')
+        if ($null -eq $aid -or $aid -le 0) { Write-DuneError -Response $res -Status 400 -Message 'account_id is required.'; return }
+        if (-not $name -or -not $name.Trim()) { Write-DuneError -Response $res -Status 400 -Message 'name is required.'; return }
+        Invoke-DunePlayerWriteRoute -Response $res -Action { param($ip) Invoke-DunePlayerRename -Ip $ip -AccountId $aid -Name $name }
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message "Rename failed: $($_.Exception.Message)"
+    }
+}
+
+# POST /api/gameplay/players/set-spec-level  { controller_id, track_type, level }
+Register-DuneRoute -Method POST -Path '/api/gameplay/players/set-spec-level' -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $cid = Get-DuneBodyInt -Body $body -Name 'controller_id'
+        $track = [string](Get-DuneBodyValue -Body $body -Name 'track_type')
+        $level = Get-DuneBodyInt -Body $body -Name 'level'
+        if ($null -eq $cid -or $cid -le 0) { Write-DuneError -Response $res -Status 400 -Message 'controller_id is required.'; return }
+        if (-not $track) { Write-DuneError -Response $res -Status 400 -Message 'track_type is required.'; return }
+        if ($null -eq $level) { Write-DuneError -Response $res -Status 400 -Message 'level must be an integer.'; return }
+        Invoke-DunePlayerWriteRoute -Response $res -Action { param($ip) Invoke-DunePlayerSetSpecLevel -Ip $ip -ControllerId $cid -TrackType $track -Level ([int]$level) }
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message "Set spec level failed: $($_.Exception.Message)"
+    }
+}
+
+# POST /api/gameplay/players/apply-spec-level  { controller_id, track_type, level }
+Register-DuneRoute -Method POST -Path '/api/gameplay/players/apply-spec-level' -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $cid = Get-DuneBodyInt -Body $body -Name 'controller_id'
+        $track = [string](Get-DuneBodyValue -Body $body -Name 'track_type')
+        $level = Get-DuneBodyInt -Body $body -Name 'level'
+        if ($null -eq $cid -or $cid -le 0) { Write-DuneError -Response $res -Status 400 -Message 'controller_id is required.'; return }
+        if (-not $track) { Write-DuneError -Response $res -Status 400 -Message 'track_type is required.'; return }
+        if ($null -eq $level) { Write-DuneError -Response $res -Status 400 -Message 'level must be an integer.'; return }
+        Invoke-DunePlayerWriteRoute -Response $res -Action { param($ip) Invoke-DunePlayerApplySpecLevel -Ip $ip -ControllerId $cid -TrackType $track -Level ([int]$level) }
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message "Apply spec level failed: $($_.Exception.Message)"
+    }
+}
+
+# POST /api/gameplay/players/prepare-pattern-upgrading  { controller_id }
+Register-DuneRoute -Method POST -Path '/api/gameplay/players/prepare-pattern-upgrading' -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $cid = Get-DuneBodyInt -Body $body -Name 'controller_id'
+        if ($null -eq $cid -or $cid -le 0) { Write-DuneError -Response $res -Status 400 -Message 'controller_id is required.'; return }
+        Invoke-DunePlayerWriteRoute -Response $res -Action { param($ip) Invoke-DunePlayerPreparePatternUpgrading -Ip $ip -ControllerId $cid }
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message "Prepare Pattern Upgrading failed: $($_.Exception.Message)"
+    }
+}
+
+# POST /api/gameplay/players/delete-item  { item_id }
+Register-DuneRoute -Method POST -Path '/api/gameplay/players/delete-item' -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $iid = Get-DuneBodyInt -Body $body -Name 'item_id'
+        $expected = Get-DuneBodyInt -Body $body -Name 'expected_stack_size'
+        if ($null -eq $iid -or $iid -le 0) { Write-DuneError -Response $res -Status 400 -Message 'item_id is required.'; return }
+        if ($null -ne $expected -and $expected -lt 0) { Write-DuneError -Response $res -Status 400 -Message 'expected_stack_size cannot be negative.'; return }
+        Invoke-DunePlayerWriteRoute -Response $res -Action { param($ip) Invoke-DunePlayerDeleteItem -Ip $ip -ItemId $iid -ExpectedStackSize $expected }
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message "Delete item failed: $($_.Exception.Message)"
+    }
+}
+
+# POST /api/gameplay/players/repair-item  { item_id }
+Register-DuneRoute -Method POST -Path '/api/gameplay/players/repair-item' -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $iid = Get-DuneBodyInt -Body $body -Name 'item_id'
+        if ($null -eq $iid -or $iid -le 0) { Write-DuneError -Response $res -Status 400 -Message 'item_id is required.'; return }
+        Invoke-DunePlayerWriteRoute -Response $res -Action { param($ip) Invoke-DunePlayerRepairItem -Ip $ip -ItemId $iid }
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message "Repair item failed: $($_.Exception.Message)"
+    }
+}
+
+# POST /api/gameplay/players/set-item-durability  { item_id, max, current, decayed }
+# Per-item durability editor: writes the three FItemStackAndDurabilityStats
+# fields verbatim. Lets the operator override the GREATEST/catalog guess when
+# it's wrong. Items without the durability block are left untouched (no-op).
+Register-DuneRoute -Method POST -Path '/api/gameplay/players/set-item-durability' -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $iid = Get-DuneBodyInt -Body $body -Name 'item_id'
+        if ($null -eq $iid -or $iid -le 0) { Write-DuneError -Response $res -Status 400 -Message 'item_id is required.'; return }
+        $mv = Get-DuneBodyValue -Body $body -Name 'max'
+        $cv = Get-DuneBodyValue -Body $body -Name 'current'
+        $dv = Get-DuneBodyValue -Body $body -Name 'decayed'
+        if ($null -eq $mv -or $null -eq $cv -or $null -eq $dv) {
+            Write-DuneError -Response $res -Status 400 -Message 'max, current, and decayed are required.'; return
+        }
+        $mxd = 0.0; $crd = 0.0; $dcd = 0.0
+        $ci = [System.Globalization.CultureInfo]::InvariantCulture
+        if (-not [double]::TryParse([string]$mv, [System.Globalization.NumberStyles]::Float, $ci, [ref]$mxd)) {
+            Write-DuneError -Response $res -Status 400 -Message 'max must be a number.'; return
+        }
+        if (-not [double]::TryParse([string]$cv, [System.Globalization.NumberStyles]::Float, $ci, [ref]$crd)) {
+            Write-DuneError -Response $res -Status 400 -Message 'current must be a number.'; return
+        }
+        if (-not [double]::TryParse([string]$dv, [System.Globalization.NumberStyles]::Float, $ci, [ref]$dcd)) {
+            Write-DuneError -Response $res -Status 400 -Message 'decayed must be a number.'; return
+        }
+        Invoke-DunePlayerWriteRoute -Response $res -Action { param($ip)
+            Invoke-DunePlayerSetItemDurability -Ip $ip -ItemId $iid -Max $mxd -Current $crd -Decayed $dcd
+        }
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message "Set item durability failed: $($_.Exception.Message)"
+    }
+}
+
+# POST /api/gameplay/players/set-item-water  { item_id, amount }
+# Per-item water editor: writes FFillableItemStats[1].CurrentAmount for water
+# canteens/literjons + stillsuit hydration. Items without the fillable block are
+# left untouched (no-op). The value only reflects in-game after the map pod /
+# battlegroup is restarted (pod caches inventory in RAM).
+Register-DuneRoute -Method POST -Path '/api/gameplay/players/set-item-water' -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $iid = Get-DuneBodyInt -Body $body -Name 'item_id'
+        if ($null -eq $iid -or $iid -le 0) { Write-DuneError -Response $res -Status 400 -Message 'item_id is required.'; return }
+        $av = Get-DuneBodyValue -Body $body -Name 'amount'
+        if ($null -eq $av) { Write-DuneError -Response $res -Status 400 -Message 'amount is required.'; return }
+        $amt = 0.0
+        $ci = [System.Globalization.CultureInfo]::InvariantCulture
+        if (-not [double]::TryParse([string]$av, [System.Globalization.NumberStyles]::Float, $ci, [ref]$amt)) {
+            Write-DuneError -Response $res -Status 400 -Message 'amount must be a number.'; return
+        }
+        Invoke-DunePlayerWriteRoute -Response $res -Action { param($ip)
+            Invoke-DunePlayerSetItemWater -Ip $ip -ItemId $iid -Amount $amt
+        }
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message "Set item water failed: $($_.Exception.Message)"
+    }
+}
+
+# POST /api/gameplay/players/set-item-stack  { item_id, stack_size }
+# Per-item stack-quantity editor for player inventory: rewrites the stack_size
+# column. Online players cache inventory in RAM, so the value only reflects
+# in-game after the player relogs / the map pod is restarted.
+Register-DuneRoute -Method POST -Path '/api/gameplay/players/set-item-stack' -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $iid = Get-DuneBodyInt -Body $body -Name 'item_id'
+        if ($null -eq $iid -or $iid -le 0) { Write-DuneError -Response $res -Status 400 -Message 'item_id is required.'; return }
+        $ss = Get-DuneBodyInt -Body $body -Name 'stack_size'
+        $expected = Get-DuneBodyInt -Body $body -Name 'expected_stack_size'
+        if ($null -eq $ss -or $ss -lt 1) { Write-DuneError -Response $res -Status 400 -Message 'stack_size must be at least 1.'; return }
+        if ($null -ne $expected -and $expected -lt 1) { Write-DuneError -Response $res -Status 400 -Message 'expected_stack_size must be at least 1.'; return }
+        Invoke-DunePlayerWriteRoute -Response $res -Action { param($ip)
+            Invoke-DunePlayerSetItemStack -Ip $ip -ItemId $iid -StackSize $ss -ExpectedStackSize $expected
+        }
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message "Set item stack failed: $($_.Exception.Message)"
+    }
+}
+
+# POST /api/gameplay/players/set-weapon-ammo  { pawn_id, item_id, ammo, expected_ammo }
+# Offline-only loaded-ammo editor for player-carried ranged weapons. The expected
+# value prevents overwriting a stale row after the inventory view was loaded.
+Register-DuneRoute -Method POST -Path '/api/gameplay/players/set-weapon-ammo' -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $pawn = Get-DuneBodyInt -Body $body -Name 'pawn_id'
+        $iid = Get-DuneBodyInt -Body $body -Name 'item_id'
+        $ammo = Get-DuneBodyInt -Body $body -Name 'ammo'
+        $expected = Get-DuneBodyInt -Body $body -Name 'expected_ammo'
+        if ($null -eq $pawn -or $pawn -le 0) { Write-DuneError -Response $res -Status 400 -Message 'pawn_id is required.'; return }
+        if ($null -eq $iid -or $iid -le 0) { Write-DuneError -Response $res -Status 400 -Message 'item_id is required.'; return }
+        if ($null -eq $ammo -or $ammo -lt 0) { Write-DuneError -Response $res -Status 400 -Message 'ammo must be at least 0.'; return }
+        if ($null -eq $expected -or $expected -lt 0) { Write-DuneError -Response $res -Status 400 -Message 'expected_ammo must be at least 0.'; return }
+        Invoke-DunePlayerWriteRoute -Response $res -Action { param($ip)
+            Invoke-DunePlayerSetWeaponAmmo -Ip $ip -PawnId $pawn -ItemId $iid -Ammo $ammo -ExpectedAmmo $expected
+        }
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message "Set weapon ammo failed: $($_.Exception.Message)"
+    }
+}
+
+# ===========================================================================
+# v11.5.6 — extended player surface routes.
+# ===========================================================================
+
+# Helper: run a read with live/demo fallback. $LiveBlock returns @{ok,...},
+# $DemoBlock returns the payload directly. Both shapes get wrapped with
+# `source` + optional `liveError`.
+function Invoke-DunePlayerReadRoute {
+    param($Response, $Request, [scriptblock]$LiveBlock, [scriptblock]$DemoBlock, [string]$PayloadKey)
+    $source = 'demo'
+    $payload = $null
+    $liveError = $null
+    if (-not (Test-DuneDemoRequested $Request)) {
+        $ctx = Get-DuneDbContext
+        if ($ctx.ok) {
+            $live = & $LiveBlock $ctx.ip
+            if ($live -and $live.ok) {
+                $payload = $live
+                $source = 'live'
+            } else { $liveError = if ($live) { $live.error } else { 'no result' } }
+        } else { $liveError = $ctx.message }
+    }
+    if ($null -eq $payload) {
+        $demo = & $DemoBlock
+        if ($demo -is [System.Collections.IDictionary] -and $demo.Contains('ok')) {
+            $payload = $demo
+        } else {
+            $payload = @{ ok = $true; $PayloadKey = $demo }
+        }
+    }
+    $out = @{}
+    foreach ($k in $payload.Keys) { if ($k -ne 'ok' -and $k -ne 'error') { $out[$k] = $payload[$k] } }
+    $out['source'] = $source
+    if ($liveError) { $out['liveError'] = $liveError }
+    Write-DuneJson -Response $Response -Body $out
+}
+
+# GET /api/gameplay/players/summary — server-wide dashboard.
+Register-DuneRoute -Method GET -Path '/api/gameplay/players/summary' -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        Invoke-DunePlayerReadRoute -Response $res -Request $req `
+            -LiveBlock { param($ip) Get-DunePlayerSummaryLive -Ip $ip } `
+            -DemoBlock { Get-DunePlayerSummaryDemo } `
+            -PayloadKey 'summary'
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message "Player summary failed: $($_.Exception.Message)"
+    }
+}
+
+# GET /api/gameplay/players/{pawn}/stats — per-player snapshot.
+Register-DuneRoute -Method GET -Path '/api/gameplay/players/stats' -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $pawn = 0L
+        [void][Int64]::TryParse((Get-DuneQ $req 'pawn'), [ref]$pawn)
+        if ($pawn -le 0) { Write-DuneError -Response $res -Status 400 -Message 'pawn id is required.'; return }
+        Invoke-DunePlayerReadRoute -Response $res -Request $req `
+            -LiveBlock { param($ip) Get-DunePlayerStatsLive -Ip $ip -PawnId $pawn } `
+            -DemoBlock { @{ ok = $true; stats = (Get-DunePlayerStatsDemo -PawnId $pawn) } } `
+            -PayloadKey 'stats'
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message "Player stats failed: $($_.Exception.Message)"
+    }
+}
+
+# GET /api/gameplay/players/specs?pawn=&controller= — tracks + keystones.
+Register-DuneRoute -Method GET -Path '/api/gameplay/players/specs' -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $pawn = 0L; $controller = 0L
+        [void][Int64]::TryParse((Get-DuneQ $req 'pawn'),       [ref]$pawn)
+        [void][Int64]::TryParse((Get-DuneQ $req 'controller'), [ref]$controller)
+        if ($pawn -le 0) { Write-DuneError -Response $res -Status 400 -Message 'pawn id is required.'; return }
+        Invoke-DunePlayerReadRoute -Response $res -Request $req `
+            -LiveBlock { param($ip) Get-DunePlayerSpecsFullLive -Ip $ip -PawnId $pawn -ControllerId $controller } `
+            -DemoBlock { Get-DunePlayerSpecsFullDemo } `
+            -PayloadKey 'specs'
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message "Player specs failed: $($_.Exception.Message)"
+    }
+}
+
+# POST /api/gameplay/players/grant-max-spec  { controller_id, track_type }
+Register-DuneRoute -Method POST -Path '/api/gameplay/players/grant-max-spec' -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $cid   = Get-DuneBodyInt -Body $body -Name 'controller_id'
+        $track = [string](Get-DuneBodyValue -Body $body -Name 'track_type')
+        if ($null -eq $cid -or $cid -le 0) { Write-DuneError -Response $res -Status 400 -Message 'controller_id is required.'; return }
+        if (-not $track) { Write-DuneError -Response $res -Status 400 -Message 'track_type is required.'; return }
+        Invoke-DunePlayerWriteRoute -Response $res -Action { param($ip) Invoke-DunePlayerGrantMaxSpec -Ip $ip -ControllerId $cid -TrackType $track }
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message "Grant max spec failed: $($_.Exception.Message)"
+    }
+}
+
+# POST /api/gameplay/players/reset-spec  { controller_id, track_type }
+Register-DuneRoute -Method POST -Path '/api/gameplay/players/reset-spec' -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $cid   = Get-DuneBodyInt -Body $body -Name 'controller_id'
+        $track = [string](Get-DuneBodyValue -Body $body -Name 'track_type')
+        if ($null -eq $cid -or $cid -le 0) { Write-DuneError -Response $res -Status 400 -Message 'controller_id is required.'; return }
+        if (-not $track) { Write-DuneError -Response $res -Status 400 -Message 'track_type is required.'; return }
+        Invoke-DunePlayerWriteRoute -Response $res -Action { param($ip) Invoke-DunePlayerResetSpec -Ip $ip -ControllerId $cid -TrackType $track }
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message "Reset spec failed: $($_.Exception.Message)"
+    }
+}
+
+# POST /api/gameplay/players/reset-all-specs  { controller_id } — tracks + keystones.
+Register-DuneRoute -Method POST -Path '/api/gameplay/players/reset-all-specs' -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $cid = Get-DuneBodyInt -Body $body -Name 'controller_id'
+        if ($null -eq $cid -or $cid -le 0) { Write-DuneError -Response $res -Status 400 -Message 'controller_id is required.'; return }
+        Invoke-DunePlayerWriteRoute -Response $res -Action { param($ip) Invoke-DunePlayerResetAllSpecs -Ip $ip -ControllerId $cid }
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message "Reset all specs failed: $($_.Exception.Message)"
+    }
+}
+
+# POST /api/gameplay/players/grant-all-keystones  { controller_id }
+Register-DuneRoute -Method POST -Path '/api/gameplay/players/grant-all-keystones' -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $cid = Get-DuneBodyInt -Body $body -Name 'controller_id'
+        if ($null -eq $cid -or $cid -le 0) { Write-DuneError -Response $res -Status 400 -Message 'controller_id is required.'; return }
+        Invoke-DunePlayerWriteRoute -Response $res -Action { param($ip) Invoke-DunePlayerGrantAllKeystones -Ip $ip -ControllerId $cid }
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message "Grant all keystones failed: $($_.Exception.Message)"
+    }
+}
+
+# POST /api/gameplay/players/reset-all-keystones  { controller_id }
+Register-DuneRoute -Method POST -Path '/api/gameplay/players/reset-all-keystones' -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $cid = Get-DuneBodyInt -Body $body -Name 'controller_id'
+        if ($null -eq $cid -or $cid -le 0) { Write-DuneError -Response $res -Status 400 -Message 'controller_id is required.'; return }
+        Invoke-DunePlayerWriteRoute -Response $res -Action { param($ip) Invoke-DunePlayerResetAllKeystones -Ip $ip -ControllerId $cid }
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message "Reset all keystones failed: $($_.Exception.Message)"
+    }
+}
+
+# GET /api/gameplay/players/tags?account=  — tag list for one account.
+Register-DuneRoute -Method GET -Path '/api/gameplay/players/tags' -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $aid = 0L
+        [void][Int64]::TryParse((Get-DuneQ $req 'account'), [ref]$aid)
+        if ($aid -le 0) { Write-DuneError -Response $res -Status 400 -Message 'account id is required.'; return }
+        Invoke-DunePlayerReadRoute -Response $res -Request $req `
+            -LiveBlock { param($ip) Get-DunePlayerTagsLive -Ip $ip -AccountId $aid } `
+            -DemoBlock { @{ ok = $true; tags = (Get-DunePlayerTagsDemo) } } `
+            -PayloadKey 'tags'
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message "Player tags failed: $($_.Exception.Message)"
+    }
+}
+
+# POST /api/gameplay/players/tags  { account_id, tags: string[] }
+Register-DuneRoute -Method POST -Path '/api/gameplay/players/tags' -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $aid = Get-DuneBodyInt -Body $body -Name 'account_id'
+        if ($null -eq $aid -or $aid -le 0) { Write-DuneError -Response $res -Status 400 -Message 'account_id is required.'; return }
+        if($env:DST_HOSTING_BACKEND -eq 'docker'){
+            # Preserve a one-element JSON array; the scalar helper enumerates it.
+            $raw=$body.tags
+            if($null -eq $raw -or $raw -is [string] -or $raw -isnot [System.Collections.IEnumerable]){
+                Write-DuneError -Response $res -Status 400 -Message 'tags must be an array (use [] to clear all tags).'; return
+            }
+        }else{$raw = Get-DuneBodyValue -Body $body -Name 'tags'}
+        $tags = @()
+        if ($raw -is [System.Collections.IEnumerable] -and -not ($raw -is [string])) {
+            foreach ($t in $raw) { $tags += ([string]$t) }
+        }
+        Invoke-DunePlayerWriteRoute -Response $res -Action { param($ip) Invoke-DunePlayerSetTags -Ip $ip -AccountId $aid -Tags $tags }
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message "Set player tags failed: $($_.Exception.Message)"
+    }
+}
+
+# GET /api/gameplay/players/events?account=&limit=  — history.
+Register-DuneRoute -Method GET -Path '/api/gameplay/players/events' -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $aid = 0L; $limit = 100
+        [void][Int64]::TryParse((Get-DuneQ $req 'account'), [ref]$aid)
+        [void][Int32]::TryParse((Get-DuneQ $req 'limit'),   [ref]$limit)
+        if ($aid -le 0) { Write-DuneError -Response $res -Status 400 -Message 'account id is required.'; return }
+        Invoke-DunePlayerReadRoute -Response $res -Request $req `
+            -LiveBlock { param($ip) Get-DunePlayerEventsLive -Ip $ip -AccountId $aid -Limit $limit } `
+            -DemoBlock { @{ ok = $true; events = (Get-DunePlayerEventsDemo) } } `
+            -PayloadKey 'events'
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message "Player events failed: $($_.Exception.Message)"
+    }
+}
+
+
+# v11.5.7+v11.5.9 — POST /api/gameplay/players/fill-water  { pawn_id|actor_id|fls_id, water_amount? }
+# Online players: RMQ UpdateAllWaterFillables (live, via mq-game broker).
+# Offline players: SQL UPDATE of FFillableItemStats CurrentAmount = MaxAmount.
+Register-DuneRoute -Method POST -Path '/api/gameplay/players/fill-water' -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $pawn = Get-DuneBodyInt -Body $body -Name 'pawn_id'
+        if (-not $pawn) { $pawn = Get-DuneBodyInt -Body $body -Name 'actor_id' }
+        if (-not $pawn) { $pawn = Get-DuneBodyInt -Body $body -Name 'id' }
+        $fls  = [string](Get-DuneBodyValue -Body $body -Name 'fls_id')
+        if ((-not $pawn -or $pawn -le 0) -and [string]::IsNullOrWhiteSpace($fls)) {
+            Write-DuneError -Response $res -Status 400 -Message 'pawn_id (actor id) or fls_id is required.'
+            return
+        }
+        $amt = Get-DuneBodyInt -Body $body -Name 'water_amount'
+        if ($null -eq $amt -or $amt -le 0) { $amt = 1000000 }
+
+        Invoke-DunePlayerWriteRoute -Response $res -Action {
+            param($ip)
+            # Online path when fls_id supplied or pawn online.
+            if (-not [string]::IsNullOrWhiteSpace($fls)) {
+                return Invoke-DunePlayerFillWaterLive -Ip $ip -FlsId $fls -WaterAmount ([int]$amt)
+            }
+            $off = Test-DunePlayerOffline -Ip $ip -PawnId $pawn
+            if (-not $off.ok) {
+                return Invoke-DunePlayerFillWaterLive -Ip $ip -ActorId $pawn -WaterAmount ([int]$amt)
+            }
+            # Offline: existing SQL refill (per-item MaxAmount).
+            Invoke-DunePlayerFillWater -Ip $ip -PawnId $pawn
+        }
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message "Fill water failed: $($_.Exception.Message)"
+    }
+}
+
+# Preview the exact owner/cistern count before the disruptive fill.
+Register-DuneRoute -Method GET -Path '/api/gameplay/players/base-water-summary' -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $allPlayers = ((Get-DuneQ $req 'all_players') -eq '1')
+        $controller = 0L
+        [void][Int64]::TryParse((Get-DuneQ $req 'controller_id'), [ref]$controller)
+        if (-not $allPlayers -and $controller -le 0) {
+            Write-DuneError -Response $res -Status 400 -Message 'controller_id is required unless all_players=1.'
+            return
+        }
+        $ctx = Get-DuneDbContext
+        if (-not $ctx.ok) { Write-DuneError -Response $res -Status 503 -Message $ctx.message; return }
+        $result = Get-DunePlayerBaseCisternSummary -Ip $ctx.ip -ControllerId $controller -AllPlayers:$allPlayers
+        if (-not $result.ok) { Write-DuneError -Response $res -Status 503 -Message $result.error; return }
+        Write-DuneJson -Response $res -Body $result
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message "Base water summary failed: $($_.Exception.Message)"
+    }
+}
+
+# Fill exact supported cistern classes for one rank-1 owner or every rank-1
+# owner. The backend creates a safety backup, stops the battlegroup so map RAM
+# cannot overwrite the DB write, verifies, then starts the battlegroup again.
+Register-DuneRoute -Method POST -Path '/api/gameplay/players/fill-base-water' -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        if (-not (Test-DuneDisruptiveActionGuard -Req $req -Res $res -Action 'stopping the battlegroup to fill base water')) { return }
+        $controller = Get-DuneBodyInt -Body $body -Name 'controller_id'
+        $allPlayers = [bool](Get-DuneBodyValue -Body $body -Name 'all_players')
+        if (-not $allPlayers -and ($null -eq $controller -or $controller -le 0)) {
+            Write-DuneError -Response $res -Status 400 -Message 'controller_id is required unless all_players is true.'
+            return
+        }
+        Invoke-DunePlayerWriteRoute -Response $res -Action {
+            param($ip)
+            Invoke-DuneFillPlayerBaseWater -Ip $ip -ControllerId ([long]$controller) -AllPlayers:$allPlayers
+        }
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message "Fill base water failed: $($_.Exception.Message)"
+    }
+}

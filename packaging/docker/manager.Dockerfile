@@ -1,0 +1,36 @@
+FROM python:3.13-slim-bookworm
+LABEL io.dst.asset-activator="true"
+RUN apt-get update && apt-get install -y --no-install-recommends openssl && rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir PyYAML==6.0.3
+RUN groupadd --gid 10001 dst && mkdir -p /control /projects && chgrp dst /control && chmod 750 /control
+COPY packaging/docker/engine.py packaging/docker/manager.py /opt/dst-manager/
+COPY packaging/docker/resource_policy.py /opt/dst-manager/resource_policy.py
+COPY packaging/docker/memory_swap.py packaging/docker/memory_swap_control.py packaging/docker/host_memory_swap.py /opt/dst-manager/
+COPY packaging/docker/backup_schedule.py packaging/docker/backup_storage.py /opt/dst-manager/
+COPY packaging/docker/backup_import.py /opt/dst-manager/backup_import.py
+COPY packaging/docker/migration-job.py /opt/dst-manager/migration-job.py
+COPY packaging/docker/backup-job.py /opt/dst-manager/backup-job.py
+COPY packaging/docker/restore-job.py /opt/dst-manager/restore-job.py
+COPY packaging/docker/world_template.py /opt/dst-manager/world_template.py
+COPY packaging/docker/game_plan.py packaging/docker/connection_services.py /opt/dst-manager/
+COPY packaging/docker/core_services.py packaging/docker/native-game.sh /opt/dst-manager/
+COPY packaging/docker/rmq_commands.py /opt/dst-manager/rmq_commands.py
+COPY packaging/docker/rmq_chat.py /opt/dst-manager/rmq_chat.py
+COPY packaging/docker/scale_protocol.py packaging/docker/scaler.py /opt/dst-manager/
+COPY packaging/docker/map_modes.py /opt/dst-manager/map_modes.py
+COPY packaging/docker/director_policy.py /opt/dst-manager/director_policy.py
+COPY packaging/docker/file_browser.py /opt/dst-manager/file_browser.py
+COPY packaging/docker/director_web.py /opt/dst-manager/director_web.py
+COPY packaging/docker/regis_artifacts.py packaging/docker/regis_job.py packaging/docker/regis_compatibility.py /opt/dst-manager/
+COPY app/resources/regis-tanks/ /opt/dst-manager/regis-recipes/
+COPY packaging/docker/asset_version.py /opt/dst-manager/asset_version.py
+COPY packaging/docker/log_export.py /opt/dst-manager/log_export.py
+COPY packaging/docker/assets.py packaging/docker/asset_updates.py /opt/dst-manager/
+COPY packaging/docker/asset_activation.py /opt/dst-manager/asset_activation.py
+COPY packaging/docker/service_generations.py /opt/dst-manager/service_generations.py
+COPY packaging/docker/world_update.py /opt/dst-manager/world_update.py
+COPY packaging/docker/world_restart.py packaging/docker/world_research.py packaging/docker/fresh-world-job.py /opt/dst-manager/
+COPY packaging/docker/settings_service.py packaging/docker/settings_client.py packaging/docker/settings_adapter.py /opt/dst-manager/
+COPY packaging/docker/backup_mirror.py packaging/docker/backup_mirror_control.py packaging/docker/mirror_jobs.py /opt/dst-manager/
+WORKDIR /opt/dst-manager
+ENTRYPOINT ["python3", "-B", "manager.py"]

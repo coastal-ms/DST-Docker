@@ -1,0 +1,227 @@
+name: PII Guard
+
+# Enforces the long-standing DST rule: only "coastal-ms" / "allcoast" may
+# appear in public repo artifacts. Fails any PR that introduces the
+# maintainer's personal first name, last name, personal-email LHS, or
+# legacy Tailscale hostname prefix into:
+#
+#   * the PR title
+#   * the PR body
+#   * any added line in the PR diff
+#   * any commit message introduced by the PR
+#
+# The banned-pattern list is built at runtime from single-character
+# concatenation so this workflow file itself does not contain the literal
+# strings (and therefore does not trip its own check).
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+# Draft PRs run no jobs. Ready PRs validate each new head; superseded runs stop.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scan:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR merge result with full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build banned pattern
+        id: build
+        shell: bash
+        run: |
+          set -e
+          n=n; e=e; i=i; l=l; b=b; r=r; o=o; m=m; pc=pc
+          NAME="${n}${e}${i}${l}"
+          LAST="${b}${r}${o}${o}${m}${e}"
+          EMAIL_LHS="${n}${b}${r}${o}${o}${m}${e}"
+          HOSTPREFIX="${NAME}${pc}"
+          PAT="(\\b${NAME}\\b|\\b${LAST}\\b|${EMAIL_LHS}@|${HOSTPREFIX})"
+          echo "pat=${PAT}" >> "$GITHUB_OUTPUT"
+          echo "Pattern built (${#PAT} chars)."
+
+      - name: Scan PR title + body
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY:  ${{ github.event.pull_request.body }}
+          PAT:      ${{ steps.build.outputs.pat }}
+        shell: bash
+        run: |
+          set -e
+          fail=0
+          if printf '%s' "$PR_TITLE" | grep -Eiq "$PAT"; then
+            echo "::error::PR title contains banned PII pattern."
+            fail=1
+          fi
+          if printf '%s' "$PR_BODY" | grep -Eiq "$PAT"; then
+            echo "::error::PR body contains banned PII pattern."
+            fail=1
+          fi
+          exit "$fail"
+
+      - name: Scan PR diff
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PAT:      ${{ steps.build.outputs.pat }}
+        shell: bash
+        run: |
+          set -e
+          # The guard file constructs the pattern at runtime so it cannot
+          # contain the literal strings; exclude it anyway to make intent
+          # explicit.
+          excluded='^\.github/workflows/pii-guard\.yml$'
+
+          files=$(git diff --name-only --diff-filter=ACMR "$BASE_SHA...$HEAD_SHA")
+          if [ -z "$files" ]; then
+            echo "no changed files"
+            exit 0
+          fi
+
+          fail=0
+          echo "$files" | while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            echo "$f" | grep -Eq "$excluded" && continue
+            added=$(git diff -U0 "$BASE_SHA...$HEAD_SHA" -- "$f" | grep -E '^\+[^+]' || true)
+            [ -z "$added" ] && continue
+            if printf '%s' "$added" | grep -Eiq "$PAT"; then
+              echo "::error file=$f::Banned PII pattern in added lines."
+              echo "$f" >> /tmp/pii-violations.txt
+            fi
+          done
+
+          if [ -s /tmp/pii-violations.txt ]; then
+            echo ""
+            echo "Files with violations:"
+            sort -u /tmp/pii-violations.txt | sed 's/^/  - /'
+            exit 1
+          fi
+
+      - name: Scan commit messages introduced by the PR
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PAT:      ${{ steps.build.outputs.pat }}
+        shell: bash
+        run: |
+          set -e
+          fail=0
+          shas=$(git rev-list "$BASE_SHA..$HEAD_SHA")
+          for sha in $shas; do
+            msg=$(git log -1 --format='%B' "$sha")
+            if printf '%s' "$msg" | grep -Eiq "$PAT"; then
+              echo "::error::Commit $sha message contains banned PII pattern."
+              fail=1
+            fi
+          done
+          exit "$fail"
+
+      - name: Scan full tree, PR text, and commit identities
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY:  ${{ github.event.pull_request.body }}
+        shell: python
+        run: |
+          import os
+          import pathlib
+          import re
+          import subprocess
+          import sys
+
+          first = "".join(("n", "e", "i", "l"))
+          last = "".join(("b", "r", "o", "o", "m", "e"))
+          email_lhs = "".join(("n", "b", "r", "o", "o", "m", "e"))
+          host_prefix = first + "pc"
+          identity_patterns = (
+              re.compile(rf"(?<![\w']){re.escape(first)}(?![\w'])", re.I),
+              re.compile(rf"(?<![\w']){re.escape(last)}(?![\w'])", re.I),
+              re.compile(re.escape(email_lhs) + r"@", re.I),
+              re.compile(re.escape(host_prefix), re.I),
+          )
+          allowed_user_segments = {
+              "user", "username", "yourname", "your-user", "user-with-apostrophe",
+              "example", "example-user", "anyone", "alice", "you", "name",
+              "&lt;you&gt;"
+          }
+
+          def reasons(text):
+              found = []
+              if any(pattern.search(text) for pattern in identity_patterns):
+                  found.append("banned identity")
+              if re.search(r"@desktop-[a-z0-9-]+", text, re.I):
+                  found.append("machine-name email")
+              if re.search(r"[a-z]:\\GH Projects\\", text, re.I):
+                  found.append("machine-local workspace path")
+              for match in re.finditer(r"[a-z]:\\Users\\([^\\\s\"']+)", text, re.I):
+                  segment = match.group(1).strip("<>").lower()
+                  if segment not in allowed_user_segments:
+                      found.append("unsanitized Windows user path")
+                      break
+              return sorted(set(found))
+
+          failures = []
+          pr_reasons = reasons(os.environ.get("PR_TITLE", "") + "\n" + os.environ.get("PR_BODY", ""))
+          if pr_reasons:
+              failures.append(("PR title/body", pr_reasons))
+
+          excluded = pathlib.PurePosixPath(".github/workflows/pii-guard.yml")
+          tracked = subprocess.check_output(("git", "ls-files", "-z")).decode().split("\0")
+          for name in tracked:
+              if not name or pathlib.PurePosixPath(name) == excluded:
+                  continue
+              path = pathlib.Path(name)
+              try:
+                  raw = path.read_bytes()
+                  # WebP pixel data is compressed binary, not source text.
+                  # Keep scanning embedded EXIF/XMP metadata for identities.
+                  if raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+                      metadata = []
+                      offset = 12
+                      while offset + 8 <= len(raw):
+                          kind = raw[offset:offset + 4]
+                          size = int.from_bytes(raw[offset + 4:offset + 8], "little")
+                          end = offset + 8 + size
+                          if end > len(raw):
+                              break
+                          if kind in (b"EXIF", b"XMP "):
+                              metadata.append(raw[offset + 8:end])
+                          offset = end + size % 2
+                      else:
+                          raw = b"\n".join(metadata)
+                  text = raw.decode("utf-8", errors="ignore")
+              except OSError:
+                  continue
+              file_reasons = reasons(text)
+              if file_reasons:
+                  failures.append((name, file_reasons))
+
+          base = os.environ["BASE_SHA"]
+          head = os.environ["HEAD_SHA"]
+          shas = subprocess.check_output(("git", "rev-list", f"{base}..{head}"), text=True).split()
+          for sha in shas:
+              metadata = subprocess.check_output(
+                  ("git", "show", "-s", "--format=%an%n%ae%n%cn%n%ce%n%B", sha),
+                  text=True,
+                  errors="ignore",
+              )
+              commit_reasons = reasons(metadata)
+              if commit_reasons:
+                  failures.append((f"commit {sha}", commit_reasons))
+
+          for subject, subject_reasons in failures:
+              print(f"::error::{subject}: {', '.join(subject_reasons)}")
+          if failures:
+              sys.exit(1)

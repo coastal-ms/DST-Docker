@@ -1,0 +1,413 @@
+﻿# Config — read/save dune-server.config (INI-style key=value).
+#
+# Location: <install-root>\dune-server.config, which is one level up from
+# $script:AppDir (the app/ directory).
+
+$script:DuneConfigKeys = @(
+    'InstallationMode',
+    'SteamPath',
+    'SshKey',
+    'WindowsUser',
+    'PortCheckMode',
+    'PortCheckUrlTemplate',
+    'ShowUdpPortStatus',
+    'PublicIpMode',
+    'DdnsHostname',
+    'ManualPublicIp',
+    'LastResolvedPublicIp',
+    'LastAppliedPublicIp',
+    'PublicIpHostRouteEnabled',
+    'OpenInAppWindow',
+    'ConsolePresence',
+    'ConsolePresenceVersion',
+    'MarketBotAddr',
+    'MarketBotToken',
+    'DecoupleNoticeAck',
+    'ClientConfigPath',
+    'ClientEngineIniEnabled',
+    'DbPort',
+    'UpdateChannel',
+    'UpdatePreReleaseTag',
+    'UpdateInstalledPrerelease',
+    'UpdateInstalledTag',
+    'LocalBackupMirrorEnabled',
+    'LocalBackupMirrorFolder',
+    'VmHostMode',
+    'HyperVHostIp',
+    'LastKnownVmIp',
+    'LastKnownVmHost',
+    'DdBaseBackupGuard'
+)
+
+# Default in-pod PostgreSQL port. All DST DB access runs as
+# `kubectl exec <db-pod> -- psql -p <port>`, so this is the port the postgres
+# process listens on INSIDE the cluster pod, not a port reachable from Windows.
+# Funcom's stock self-hosted server uses 15432; some setups differ (e.g. 15433),
+# which previously made Players/Bases/Storage show empty with no error.
+$script:DuneDefaultDbPort = 15432
+
+# Keys that ONLY a pre-decouple (<= 11.4.13) build ever wrote into
+# dune-server.config. Their presence on disk is how we know a config was
+# created before DST was split off from the companion admin tool — a fresh
+# 12.x install never writes them. Used to drive the one-time decoupling notice.
+$script:DuneLegacyAdminKeys = @(
+    'DuneAdminExe',
+    'AutoApplyPricingPatch',
+    'GambleDieSize',
+    'GambleTarget'
+)
+
+function Get-DuneConfigPath {
+    if ($script:DuneConfigFile) { return $script:DuneConfigFile }
+    # Primary location used by the installer and shared with the v6.0.x
+    # business-logic script (dune-server.ps1 / app/lib/Db-Postgres.ps1).
+    # Both the source/dev launcher and the installed launcher read & write
+    # the same file here, so settings survive reinstalls and are consistent
+    # across both invocation paths.
+    $appdataPath = Join-Path $env:APPDATA 'DuneServer\dune-server.config'
+    if (Test-Path -LiteralPath $appdataPath) { return $appdataPath }
+    # Dev fallback: repo-root file next to dune-server.ps1.
+    if ($script:AppDir) {
+        $root = Split-Path -Parent $script:AppDir
+        if ($root) {
+            $devPath = Join-Path $root 'dune-server.config'
+            if (Test-Path -LiteralPath $devPath) { return $devPath }
+        }
+    }
+    # Neither exists yet — return the canonical APPDATA path so a future
+    # Save-DuneConfig creates it there.
+    return $appdataPath
+}
+
+function Read-DuneConfigRaw {
+    $path = Get-DuneConfigPath
+    $cfg = [ordered]@{}
+    foreach ($k in $script:DuneConfigKeys) { $cfg[$k] = '' }
+    if (Test-Path -LiteralPath $path) {
+        foreach ($line in Get-Content -LiteralPath $path) {
+            if ($line -match '^\s*#') { continue }
+            if ($line -match '^\s*([^#=\s][^=]*?)\s*=\s*(.*?)\s*$') {
+                $cfg[$Matches[1]] = $Matches[2]
+            }
+        }
+    }
+    return $cfg
+}
+
+# True when the portal should open in the standalone DuneShell app window
+# instead of a browser tab. Defaults to TRUE (app window is the preferred
+# experience); only an explicit false/0/no/off falls back to the browser.
+function Get-DstOpenInAppWindow {
+    $raw = Read-DuneConfigRaw
+    $v = if ($raw.Contains('OpenInAppWindow')) { [string]$raw['OpenInAppWindow'] } else { '' }
+    if ($v -match '^(?i:false|0|no|off)$') { return $false }
+    return $true
+}
+
+# Effective config view. Currently identical to the raw on-disk file; kept as a
+# distinct function so callers have a single "resolved config" entry point.
+function Read-DuneConfig {
+    return Read-DuneConfigRaw
+}
+
+function Get-DuneInstallationMode {
+    # Docker is the native Linux/WSL server edition. Imported Windows settings
+    # must not switch it into the separate standalone Solo installation mode.
+    if ($env:DST_HOSTING_BACKEND -eq 'docker') { return 'full' }
+    # Standalone tools and isolated test runtimes may not have a Windows profile
+    # or an explicit config. They retain the pre-existing full-mode behavior.
+    if (-not $env:APPDATA -and -not $script:DuneConfigFile) { return 'full' }
+    $raw = Read-DuneConfigRaw
+    if ([string]$raw['InstallationMode'] -eq 'solo') { return 'solo' }
+    return 'full'
+}
+
+function Test-DuneSoloInstallation {
+    return (Get-DuneInstallationMode) -eq 'solo'
+}
+
+function Test-DuneSoloServerApiPath {
+    param([string]$Path, [string]$Method = 'GET')
+    # Solo permits its local save API and explicitly shared controls. New server
+    # route families stay unavailable until deliberately reviewed for Solo use.
+    if ($Path -notmatch '^/(?:api|ws)/') { return $false }
+    if ($Path -match '^/api/(?:solo|update|portal)(?:/|$)') { return $false }
+    if ($Path -in @('/api/game/launch-preferences','/api/autostart','/api/service-mode','/api/console') -and $Method -in @('GET','POST')) { return $false }
+    if ($Path -eq '/api/diagnostics/bundle' -and $Method -eq 'POST') { return $false }
+    if ($Path -eq '/api/config' -and $Method -in @('GET','PUT')) { return $false }
+    if ($Method -eq 'GET' -and $Path -in @(
+        '/api/installation', '/api/status', '/api/portal-auth/status',
+        '/api/system/install-location', '/api/v1/capabilities', '/api/gameconfig/backup-folder',
+        '/api/catalog/items', '/api/catalog/cosmetics', '/api/catalog/vehicle-kits',
+        '/api/catalog/character-defs', '/api/gameplay/augments/catalog',
+        '/api/gameplay/tags/catalog'
+    )) { return $false }
+    if ($Method -eq 'POST' -and $Path -in @(
+        '/api/browse-path', '/api/system/install-location/open', '/api/gameconfig/backup-folder/open',
+        '/api/status/refresh', '/api/portal-auth/logout', '/api/shutdown'
+    )) { return $false }
+    return $true
+}
+
+# Resolve the in-pod PostgreSQL port DST should use. Reads the DbPort config key,
+# validates it as a 1-65535 integer, and falls back to the Funcom default
+# (15432) when unset or invalid.
+function Get-DuneDbPort {
+    $default = if ($script:DuneDefaultDbPort) { $script:DuneDefaultDbPort } else { 15432 }
+    try {
+        $raw = Read-DuneConfigRaw
+        $v = if ($raw.Contains('DbPort')) { [string]$raw['DbPort'] } else { '' }
+        $parsed = 0
+        if ($v -and [int]::TryParse($v.Trim(), [ref]$parsed) -and $parsed -ge 1 -and $parsed -le 65535) {
+            return $parsed
+        }
+    } catch {}
+    return $default
+}
+
+# Update channel the in-app updater follows: 'stable' (default) or 'test'.
+# 'stable' serves the newest non-prerelease GitHub release (everyone). 'test'
+# opts into GitHub pre-releases (targeted Discord test builds). Any value other
+# than an explicit test/beta/prerelease token resolves to stable.
+function Get-DuneUpdateChannel {
+    try {
+        $raw = Read-DuneConfigRaw
+        $v = if ($raw.Contains('UpdateChannel')) { [string]$raw['UpdateChannel'] } else { '' }
+        if ($v -match '^(?i:test|beta|prerelease|pre-release)$') { return 'test' }
+    } catch {}
+    return 'stable'
+}
+
+# Specific pre-release tag the user pinned on the test channel (e.g.
+# 'v12.9.5-test1'). Empty string means "latest" (newest available build).
+function Get-DuneUpdatePreReleaseTag {
+    try {
+        $raw = Read-DuneConfigRaw
+        $v = if ($raw.Contains('UpdatePreReleaseTag')) { [string]$raw['UpdatePreReleaseTag'] } else { '' }
+        return $v.Trim()
+    } catch {}
+    return ''
+}
+
+# Whether the build currently installed was itself a GitHub pre-release (a
+# targeted Discord test build), as recorded by the in-app updater at the moment
+# it launched that install. This is the truth source for the app-wide "running a
+# test build" indicator — NOT the UpdateChannel preference. Merely toggling the
+# channel to Test (a preference that takes effect on the NEXT install) must not
+# light the indicator; only actually installing a pre-release build does. A
+# subsequent stable install writes 'false' and clears it. Absent/blank => false
+# (a normal stable install never wrote it).
+function Get-DuneVersionCore {
+    param([string]$Value)
+    $m = [regex]::Match($Value.Trim(), '^v?(\d+\.\d+\.\d+(?:\.\d+)?)(?:-|$)', 'IgnoreCase')
+    if (-not $m.Success) { return '' }
+    return $m.Groups[1].Value
+}
+
+function Get-DuneUpdateRunningBuildInfo {
+    try {
+        $raw = Read-DuneConfigRaw
+        $marker = if ($raw.Contains('UpdateInstalledPrerelease')) { [string]$raw['UpdateInstalledPrerelease'] } else { '' }
+        $markerIsPrerelease = ($marker -match '^(?i:true|1|yes)$')
+        $storedTag = if ($raw.Contains('UpdateInstalledTag')) { ([string]$raw['UpdateInstalledTag']).Trim() } else { '' }
+        $currentCore = Get-DuneVersionCore ([string]$script:DuneToolVersion)
+        $metadata = if (Get-Command Get-DuneBuildMetadata -ErrorAction SilentlyContinue) {
+            Get-DuneBuildMetadata
+        } else {
+            @{ commit = ''; prerelease = $false; tag = ''; present = $false }
+        }
+        $metadataTag = ([string]$metadata.tag).Trim()
+        $metadataTagMatches = ($metadataTag -and $currentCore -and (Get-DuneVersionCore $metadataTag) -eq $currentCore)
+        $legacyTagMatches = ($storedTag -and $currentCore -and (Get-DuneVersionCore $storedTag) -eq $currentCore)
+        return @{
+            runningIsPrerelease = if ([bool]$metadata.present) {
+                [bool]$metadata.prerelease
+            } else {
+                $markerIsPrerelease
+            }
+            installedTag = if ([bool]$metadata.present) {
+                if ($metadataTagMatches) { $metadataTag } else { '' }
+            } elseif ($legacyTagMatches) {
+                $storedTag
+            } else { '' }
+            buildCommit = [string]$metadata.commit
+        }
+    } catch {}
+    return @{ runningIsPrerelease = $false; installedTag = ''; buildCommit = '' }
+}
+
+function Get-DuneUpdateInstalledPrerelease {
+    return [bool](Get-DuneUpdateRunningBuildInfo).runningIsPrerelease
+}
+
+# Local backup mirror — resolved settings for the "copy each new backup to a
+# local folder" feature (see BackupMirror.ps1 route + lib). Enabled is boolean-
+# ish (falsy unless explicitly '1'/'true'/'yes'/'on'); folder is a plain path
+# or empty.
+function Get-DuneLocalBackupMirrorEnabled {
+    $raw = Read-DuneConfigRaw
+    $v = if ($raw.Contains('LocalBackupMirrorEnabled')) { [string]$raw['LocalBackupMirrorEnabled'] } else { '' }
+    return ($v -match '^(?i:true|1|yes|on)$')
+}
+
+function Get-DuneLocalBackupMirrorFolder {
+    $raw = Read-DuneConfigRaw
+    $v = if ($raw.Contains('LocalBackupMirrorFolder')) { [string]$raw['LocalBackupMirrorFolder'] } else { '' }
+    return $v.Trim()
+}
+
+# Windows host route used only for same-PC public-IP loopback. Default on keeps
+# existing behavior; relay/VPN hosts can explicitly disable it.
+function Get-DunePublicIpHostRouteEnabled {
+    try {
+        $raw = Read-DuneConfigRaw
+        $v = if ($raw.Contains('PublicIpHostRouteEnabled')) { [string]$raw['PublicIpHostRouteEnabled'] } else { '' }
+        return ($v -notmatch '^(?i:false|0|no|off)$')
+    } catch {}
+    return $true
+}
+
+function Set-DunePublicIpHostRouteEnabled {
+    param([bool]$Enabled)
+    [void](Save-DuneConfig -Config @{ PublicIpHostRouteEnabled = $(if ($Enabled) { 'true' } else { 'false' }) })
+    return (Get-DunePublicIpHostRouteEnabled)
+}
+
+# Hyper-V VM host location. 'local' (default) = the VM runs in Hyper-V on THIS
+# PC, today's behavior. 'lan' = the VM runs on a separate Hyper-V host reachable
+# on the local network at HyperVHostIp, and DST targets it remotely (Get-VM /
+# Start-VM / etc. get -ComputerName <HyperVHostIp>). A missing/blank/unknown
+# value resolves to 'local', so every existing install is unaffected and
+# unchecking the LAN option fully bypasses the remote path.
+function Get-DuneVmHostMode {
+    try {
+        $raw = Read-DuneConfigRaw
+        $v = if ($raw.Contains('VmHostMode')) { [string]$raw['VmHostMode'] } else { '' }
+        if ($v.Trim() -match '^(?i:lan)$') { return 'lan' }
+    } catch {}
+    return 'local'
+}
+
+# The LAN Hyper-V HOST's IP (or resolvable name) that DST manages remotely when
+# VmHostMode='lan'. This is the hypervisor host address the user enters in the
+# wizard — NOT the guest VM's IP (DST discovers that THROUGH this host via
+# Get-VMNetworkAdapter). Empty string when unset.
+function Get-DuneHyperVHostIp {
+    try {
+        $raw = Read-DuneConfigRaw
+        $v = if ($raw.Contains('HyperVHostIp')) { [string]$raw['HyperVHostIp'] } else { '' }
+        return $v.Trim()
+    } catch {}
+    return ''
+}
+
+# Deep Desert base-backup guard opt-in (see lib/BaseBackupGuard.ps1). When on,
+# DST keeps the 'BaseBackup' actor state excluded from Funcom's Coriolis wipe so
+# a base backup taken in the Deep Desert can still be PLACED after the weekly
+# reset instead of only recycled. Off unless explicitly turned on, because it
+# edits a Funcom-owned database function.
+function Get-DuneBaseBackupGuardEnabled {
+    try {
+        $raw = Read-DuneConfigRaw
+        $v = if ($raw.Contains('DdBaseBackupGuard')) { [string]$raw['DdBaseBackupGuard'] } else { '' }
+        return ($v -match '^(?i:true|1|yes|on)$')
+    } catch {}
+    return $false
+}
+
+function Set-DuneBaseBackupGuardEnabled {
+    param([bool]$Enabled)
+    [void](Save-DuneConfig -Config @{ DdBaseBackupGuard = $(if ($Enabled) { 'true' } else { 'false' }) })
+    return (Get-DuneBaseBackupGuardEnabled)
+}
+
+function Save-DuneConfig {
+    param([hashtable]$Config)
+    $path = Get-DuneConfigPath
+    $existing = Read-DuneConfigRaw
+    $hostChanged = $false
+    foreach ($hostKey in @('VmHostMode', 'HyperVHostIp')) {
+        if ($Config.ContainsKey($hostKey) -and
+            -not [string]::Equals(
+                "$($existing[$hostKey])".Trim(),
+                "$($Config[$hostKey])".Trim(),
+                [StringComparison]::OrdinalIgnoreCase)) {
+            $hostChanged = $true
+        }
+    }
+    foreach ($k in $Config.Keys) {
+        if ($script:DuneConfigKeys -notcontains $k) { continue }
+        $existing[$k] = "$($Config[$k])"
+    }
+    if ($hostChanged) {
+        $existing['LastKnownVmIp'] = ''
+        $existing['LastKnownVmHost'] = ''
+    }
+    $lines = [System.Collections.Generic.List[string]]::new()
+    $lines.Add('# Dune Server configuration')
+    $lines.Add("# Managed by Dune Server v$script:DuneToolVersion")
+    $lines.Add('')
+    foreach ($k in $script:DuneConfigKeys) {
+        $v = if ($existing.Contains($k)) { $existing[$k] } else { '' }
+        $lines.Add("$k=$v")
+    }
+    $dir = Split-Path -Parent $path
+    if ($dir -and -not (Test-Path -LiteralPath $dir)) {
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    }
+    Set-Content -LiteralPath $path -Value $lines -Encoding UTF8
+    return Read-DuneConfig
+}
+
+function Test-DuneConfigComplete {
+    param([hashtable]$Config)
+    if (-not $Config) { $Config = Read-DuneConfig }
+    if ([string]$Config['InstallationMode'] -eq 'solo') { return $true }
+    if (-not $Config.SshKey -or -not (Test-Path -LiteralPath $Config.SshKey)) { return $false }
+    if (-not $Config.SteamPath) { return $false }
+    return $true
+}
+
+# Decoupling notice ----------------------------------------------------------
+#
+# As of v12.x DST is a standalone tool: the bundled companion admin tool and
+# its in-app launch commands were removed (that tool is now run separately and
+# reached at https://dune-admin.layout.tools). Anyone upgrading from a
+# pre-decouple build (<= 11.4.13) must be told this once, and shown where their
+# old companion-tool folder lives so they can still launch it.
+#
+# Detection: pre-decouple builds wrote the reference implementation-era keys (see
+# $script:DuneLegacyAdminKeys) into dune-server.config; a fresh 12.x install
+# never does. We treat the presence of any of those keys as "this user came
+# from the bundled-companion era". `DecoupleNoticeAck` is set once the user
+# acknowledges, after which the notice never shows again.
+function Get-DuneDecoupleNotice {
+    $raw = Read-DuneConfigRaw
+    $ack = if ($raw.Contains('DecoupleNoticeAck')) { [string]$raw['DecoupleNoticeAck'] } else { '' }
+    $acknowledged = -not [string]::IsNullOrWhiteSpace($ack)
+
+    $hasLegacy = $false
+    foreach ($k in $script:DuneLegacyAdminKeys) {
+        if ($raw.Contains($k)) { $hasLegacy = $true; break }
+    }
+
+    $exe = if ($raw.Contains('DuneAdminExe')) { [string]$raw['DuneAdminExe'] } else { '' }
+    $folder = ''
+    if ($exe) {
+        try { $folder = Split-Path -Parent $exe } catch { $folder = '' }
+    }
+
+    return [pscustomobject]@{
+        Needed          = ((-not $acknowledged) -and $hasLegacy)
+        Acknowledged    = $acknowledged
+        AckVersion      = $ack
+        FromLegacy      = $hasLegacy
+        DuneAdminExe    = $exe
+        DuneAdminFolder = $folder
+    }
+}
+
+function Set-DuneDecoupleAck {
+    param([string]$Version)
+    Save-DuneConfig -Config @{ DecoupleNoticeAck = $Version } | Out-Null
+}

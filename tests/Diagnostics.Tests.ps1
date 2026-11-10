@@ -1,0 +1,409 @@
+# Tests the pure helpers in the diagnostics-bundle route: the duplicate-section
+# detector that headlines each INI snapshot, and the redaction pass that runs on
+# every file before it lands in a ZIP the user attaches to a public issue.
+# No SSH / IO — the live INI pull is exercised only on a real VM.
+
+BeforeAll {
+    . (Join-Path $PSScriptRoot '_TestHelpers.ps1')
+    Import-DstRoute 'Diagnostics.ps1'
+}
+
+Describe 'Solo diagnostics bundle' {
+    BeforeAll {
+        Import-DstLib 'Config.ps1'
+        Import-DstLib 'GameConfig.ps1'
+        Import-DstLib 'Database.ps1'
+        Import-DstLib 'VmMemoryPressure.ps1'
+        Import-DstLib 'SoloMode.ps1'
+    }
+    It 'collects local and Solo evidence without probing a dedicated server' {
+        $savedEnv=@{}
+        $savedAppDir=$script:AppDir
+        foreach($name in @('TEMP','APPDATA','LOCALAPPDATA','ProgramData')) {
+            $savedEnv[$name]=[Environment]::GetEnvironmentVariable($name)
+            $root=Join-Path $TestDrive $name
+            New-Item -ItemType Directory -Path $root -Force | Out-Null
+            [Environment]::SetEnvironmentVariable($name,$root)
+        }
+        $script:AppDir=Join-Path $TestDrive 'App'
+        New-Item -ItemType Directory -Path $script:AppDir -Force | Out-Null
+        Mock Test-DuneSoloInstallation { $true }
+        Mock Read-DuneConfigRaw { @{InstallationMode='solo'} }
+        Mock Get-DuneConfigPath { Join-Path $TestDrive 'missing.config' }
+        Mock Get-DstDesktopPath { @{path=$TestDrive;fallback=$false} }
+        Mock Get-DstWebView2Version { 'test' }
+        Mock Get-DuneGameConfigClient { @{ok=$false;message='No client INIs in fixture'} }
+        Mock Get-DuneSoloStatus { @{supported=$true;platform='Windows';connected=$false;gameRunning=$false;helperAvailable=$true;processes=@()} }
+        Mock Get-DuneGameConfigContext { throw 'Dedicated-server context must not be queried' }
+        Mock Get-DuneDbContext { throw 'Dedicated-server database must not be queried' }
+        Mock Get-DuneVmMemoryPressure { throw 'Dedicated-server VM must not be queried' }
+        Mock Start-Process {}
+        try {
+            $bundle=New-DstDiagnosticBundle
+            $bundle.ok | Should -BeTrue
+            $contents=Join-Path $TestDrive 'bundle-contents'
+            Expand-Archive -LiteralPath $bundle.path -DestinationPath $contents
+            Test-Path (Join-Path $contents 'env.txt') | Should -BeTrue
+            Get-Content (Join-Path $contents 'solo-mode.txt') -Raw | Should -Match 'Supported\s+: True'
+            Should -Invoke Get-DuneGameConfigContext -Times 0 -Exactly
+            Should -Invoke Get-DuneDbContext -Times 0 -Exactly
+            Should -Invoke Get-DuneVmMemoryPressure -Times 0 -Exactly
+        } finally {
+            foreach($name in $savedEnv.Keys){[Environment]::SetEnvironmentVariable($name,$savedEnv[$name])}
+            $script:AppDir=$savedAppDir
+        }
+    }
+}
+
+Describe 'Get-DstBackendLogFiles' -Tag 'Pure' {
+    It 'includes the active backend log and rollover rather than only launcher transcripts' {
+        $root = Join-Path $TestDrive 'local'
+        $dir = Join-Path $root 'DuneServer'
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        $path = Join-Path $dir 'dune-server.log'
+        Set-Content -LiteralPath $path -Value 'chat command dispatched'
+        Set-Content -LiteralPath "$path.old" -Value 'earlier chat command'
+        Set-Content -LiteralPath (Join-Path $dir 'unrelated.txt') -Value 'not a log'
+        $files = @(Get-DstBackendLogFiles -ActiveLogPath $path -LocalDataRoot $root)
+        $files.Count | Should -Be 2
+        $files.Path | Should -Contain $path
+        $files.Path | Should -Contain "$path.old"
+        $files.Name | Should -Be @('backend-runtime-1.log', 'backend-runtime-2.log')
+    }
+
+    It 'also discovers a configured backend path outside the default directory' {
+        $path = Join-Path $TestDrive 'custom-runtime.log'
+        Set-Content -LiteralPath $path -Value 'chat command tick error'
+        $files = @(Get-DstBackendLogFiles -ActiveLogPath $path -LocalDataRoot (Join-Path $TestDrive 'absent'))
+        $files.Count | Should -Be 1
+        $files[0].Path | Should -Be $path
+    }
+
+    It 'does not fabricate evidence when runtime logs are missing' {
+        @(Get-DstBackendLogFiles -ActiveLogPath '' -LocalDataRoot (Join-Path $TestDrive 'missing')).Count | Should -Be 0
+    }
+}
+
+Describe 'Get-DstIniDuplicateHeaders' -Tag 'Pure' {
+    It 'flags a section name that appears twice' {
+        $raw = @"
+[/Script/DuneSandbox.BuildingSettings]
+m_BuildingBlueprintMaxExtensions=5
+[/Script/DuneSandbox.InventorySystemSettings]
+PlayerInventoryStartingVolumeCapacity=195
+[/Script/DuneSandbox.BuildingSettings]
+m_BaseBackupMaxExtensions=3
+"@
+        $dupes = Get-DstIniDuplicateHeaders -Raw $raw
+        $dupes | Should -Contain '/Script/DuneSandbox.BuildingSettings x2'
+        $dupes.Count | Should -Be 1
+    }
+
+    It 'returns nothing when every header is unique' {
+        $raw = "[A]`nk=1`n[B]`nk=2`n"
+        @(Get-DstIniDuplicateHeaders -Raw $raw).Count | Should -Be 0
+    }
+
+    It 'returns nothing for empty / null input' {
+        @(Get-DstIniDuplicateHeaders -Raw '').Count   | Should -Be 0
+        @(Get-DstIniDuplicateHeaders -Raw $null).Count | Should -Be 0
+    }
+
+    It 'ignores key=value lines and indented brackets in values' {
+        $raw = "[Only]`nname=[not a header]`nlist=(1,2)`n"
+        @(Get-DstIniDuplicateHeaders -Raw $raw).Count | Should -Be 0
+    }
+}
+
+Describe 'Invoke-DstRedaction' -Tag 'Pure' {
+    It 'redacts IPv4 addresses but leaves loopback alone' {
+        $out = Invoke-DstRedaction -Text 'connect 203.0.113.7 then 127.0.0.1'
+        $out | Should -Match '<ip>'
+        $out | Should -Match '127\.0\.0\.1'
+        $out | Should -Not -Match '203\.0\.113\.7'
+    }
+
+    It 'collapses any Windows user-profile path to <user>' {
+        $out = Invoke-DstRedaction -Text 'C:\Users\Alice\.ssh\dune'
+        $out | Should -Be 'C:\Users\<user>\.ssh\dune'
+    }
+
+    It 'redacts the explicit Windows user when supplied' {
+        $out = Invoke-DstRedaction -Text 'hello Bob world' -WindowsUser 'Bob'
+        $out | Should -Be 'hello <user> world'
+    }
+
+    It 'redacts PowerShell transcript user and machine identity headers' {
+        $raw = "Username: DOMAIN\Alice`nRunAs User: DOMAIN\Alice`nMachine: DESKTOP-SECRET (Windows)"
+        $out = Invoke-DstRedaction -Text $raw -WindowsUser 'Alice'
+        $out | Should -Match 'Username: <redacted>'
+        $out | Should -Match 'RunAs User: <redacted>'
+        $out | Should -Match 'Machine: <redacted>'
+        $out | Should -Not -Match 'DOMAIN|DESKTOP-SECRET|Alice'
+    }
+
+    It 'redacts game login passwords from server-state JSON' {
+        $raw = '{"serverId":"abc","loginPassword":"server-secret","displayName":"Test"}'
+        $out = Invoke-DstRedaction -Text $raw
+
+        $out | Should -Be '{"serverId":"abc","loginPassword":"<redacted>","displayName":"Test"}'
+        $out | Should -Not -Match 'server-secret'
+    }
+
+    It 'redacts nested game-service credentials without requiring a connection URI' {
+        $raw = '[gateway] payload={"services":[{"superPassword":"synthetic-admin","rabbit":{"GameRmqSecret":"synthetic-rmq"}}],"state":"Running","port":7777}'
+        $out = Invoke-DstRedaction -Text $raw
+        $out | Should -Not -Match 'synthetic-admin|synthetic-rmq'
+        $payload = $out.Substring($out.IndexOf('{')) | ConvertFrom-Json
+        $payload.services[0].superPassword | Should -Be '<redacted>'
+        $payload.services[0].rabbit.GameRmqSecret | Should -Be '<redacted>'
+        $payload.state | Should -Be 'Running'
+        $payload.port | Should -Be 7777
+    }
+
+    It 'consumes escaped quotes and backslashes in JSON credential values' {
+        $raw = '{"loginPassword":"start\"still-secret\\end","superPassword":"a","GameRmqSecret":"b","name":"Test"}'
+        $out = Invoke-DstRedaction -Text $raw
+        $out | Should -Not -Match 'start|still-secret|end'
+        $payload = $out | ConvertFrom-Json
+        $payload.loginPassword | Should -Be '<redacted>'
+        $payload.superPassword | Should -Be '<redacted>'
+        $payload.GameRmqSecret | Should -Be '<redacted>'
+        $payload.name | Should -Be 'Test'
+    }
+
+    It 'covers mixed-case password and secret suffixes and preserves empty and noncredential fields' {
+        $raw = '{"SUPERPASSWORD":"synthetic-one","gameRmqSECRET":"synthetic-two","db_password":"synthetic-three","secret":"synthetic-four","password":"","secretName":"queue-name","passwordRequired":true}'
+        $payload = Invoke-DstRedaction -Text $raw | ConvertFrom-Json
+        $payload.SUPERPASSWORD | Should -Be '<redacted>'
+        $payload.gameRmqSECRET | Should -Be '<redacted>'
+        $payload.db_password | Should -Be '<redacted>'
+        $payload.secret | Should -Be '<redacted>'
+        $payload.password | Should -Be ''
+        $payload.secretName | Should -Be 'queue-name'
+        $payload.passwordRequired | Should -BeTrue
+    }
+
+    It 'redacts private sender and location values from chat teleport traces' {
+        $raw = @'
+[2026-09-07T12:00:00.000Z] [INFO] chat command !tp from Funcom-Private-Handle: ok=True trace=msg_abc-123
+[2026-09-07T12:00:00.000Z] [INFO] chat tp trace=msg_abc-123 stage=dequeued channel="global" chat_origin_x="123.45" chat_origin_y="-67.89" chat_origin_z="42" command_timestamp="2026-09-07T12:00:00Z" destination="My Hidden Base"
+[2026-09-07T12:00:00.000Z] [INFO] chat tp trace=msg_abc-123 stage=dispatch destination="My Hidden Base" source_dimension="0" source_map="Hagga Basin" source_partition="21" source_x="123.45" source_y="-67.89" source_z="42" target_dimension="0" target_map="Hagga Basin" target_partition="21" target_x="900.1" target_y="800.2" target_z="700.3"
+[2026-09-07T12:00:00.000Z] [INFO] chat tp trace=msg_abc-123 stage=post-dispatch-db-readback dimension="0" map="Hagga Basin" ok="True" partition="21" sample="1" x="900.1" y="800.2" z="700.3"
+'@
+        $out = Invoke-DstRedaction -Text $raw
+
+        $out | Should -Match 'chat command !tp from <chat-sender>: ok=True trace=msg_abc-123'
+        $out | Should -Match 'chat tp trace=msg_abc-123 stage=dispatch'
+        $out | Should -Match 'stage=post-dispatch-db-readback.*ok="True".*sample="1"'
+        $out | Should -Not -Match 'Funcom-Private-Handle|My Hidden Base|Hagga Basin|123\.45|900\.1'
+    }
+
+    It 'is a no-op on empty input' {
+        Invoke-DstRedaction -Text '' | Should -Be ''
+    }
+}
+
+Describe 'Read-DstLogText' -Tag 'Pure' {
+    It 'preserves a complete WebView2-sized log larger than the old 200 KB limit' {
+        $path = Join-Path $TestDrive 'webview2-debug.log'
+        $start = '[shell] startup failure'
+        $end = '[console.error] latest failure'
+        $padding = 'x' * 225000
+        [IO.File]::WriteAllText($path, "$start`n$padding`n$end", [Text.UTF8Encoding]::new($false))
+
+        $content = Read-DstLogText -Path $path
+
+        $content | Should -Match ([regex]::Escape($start))
+        $content | Should -Match ([regex]::Escape($end))
+        ([Text.Encoding]::UTF8.GetByteCount($content)) | Should -BeGreaterThan 204800
+    }
+
+    It 'retains bounded tail reads for other diagnostic logs' {
+        $path = Join-Path $TestDrive 'cli.log'
+        [IO.File]::WriteAllText($path, ('a' * 1024) + 'END', [Text.UTF8Encoding]::new($false))
+
+        $content = Read-DstLogTail -Path $path -MaxBytes 128
+
+        $content | Should -Be (('a' * 125) + 'END')
+    }
+}
+
+Describe 'ConvertTo-DstWorldRestartDiagnosticState' -Tag 'Pure' {
+    It 'exports operational state without player identities or paths' {
+        $state = [pscustomobject]@{
+            phase='error'; running=$false; operation='restart'
+            started='2026-08-20T00:00:00Z'; finished='2026-08-20T00:10:00Z'
+            rollbackAvailable=$true; recoveryRequired=$true
+            researchRecoveryRequired=$true; researchRecoveryRunning=$false
+            automaticRollback=$false; error='Character Coastal failed at C:\secret'
+            backupPath='/private/world.backup'
+            researchSnapshot=[pscustomobject]@{
+                characters=@([pscustomobject]@{ characterName='Coastal'; funcomId='Coastal#1'; accountId=42 })
+            }
+            steps=@([pscustomobject]@{ id='verify'; status='failed'; detail='Verification failed.' })
+        }
+
+        $json = ConvertTo-DstWorldRestartDiagnosticState -State $state |
+            ConvertTo-Json -Depth 6
+
+        $json | Should -Match '"phase": "error"'
+        $json | Should -Match '"hasError": true'
+        $json | Should -Match '"id": "verify"'
+        $json | Should -Not -Match 'Verification failed|Coastal|funcomId|accountId|backupPath|world\.backup|C:\\secret'
+    }
+}
+
+Describe 'Maps platform diagnostics' -Tag 'Pure' {
+    It 'exports cache health without cached rows, identifiers, or coordinates' {
+        $state = [pscustomobject]@{
+            available = $true
+            revision = 7
+            lastErrorCode = $null
+            snapshot = @{
+                layers = @(@{
+                    layerId = 'active-spice'
+                    sourceKey = 'maps.active-spice'
+                    observedAt = '2026-08-30T12:00:00Z'
+                    cachedAt = '2026-08-30T12:00:01Z'
+                    expiresAt = '2026-08-30T12:01:00Z'
+                    freshnessState = 'fresh'
+                    lastErrorCode = $null
+                    rowCount = 1
+                    truncated = $false
+                })
+                activeSpice = @(@{
+                    fieldId = 'private-field-id'
+                    x = 12345
+                    y = 67890
+                })
+            }
+        }
+        $health = [pscustomobject]@{
+            sources = @([pscustomobject]@{
+                sourceKey = 'maps.active-spice'
+                schemaFingerprint = ('a' * 64)
+                lastAttemptAt = '2026-08-30T12:00:00Z'
+                lastSuccessAt = '2026-08-30T12:00:00Z'
+                expiresAt = '2026-08-30T12:01:00Z'
+                lastErrorCode = $null
+                runtime = [pscustomobject]@{
+                    attemptCount = 2
+                    successCount = 2
+                    failureCount = 0
+                    failureStreak = 0
+                    lastAttemptAt = '2026-08-30T12:00:00Z'
+                    lastSuccessAt = '2026-08-30T12:00:00Z'
+                    lastDurationMs = 12
+                    lastRowCount = 1
+                    lastPayloadBytes = 400
+                    lastErrorCode = $null
+                    nextAttemptAt = $null
+                    nextDueAt = '2026-08-30T12:00:15Z'
+                    privateValue = 'runtime-secret'
+                }
+                details = [pscustomobject]@{
+                    cadenceSeconds = 15
+                    identityStatus = 'source-map-dimension'
+                    partitionStatus = 'unresolved'
+                    mapDimensions = @([pscustomobject]@{
+                        map = 'DeepDesert'
+                        dimensionIndex = 0
+                        privateValue = 'dimension-secret'
+                    })
+                    privateValue = 'details-secret'
+                }
+            })
+        }
+        $integrity = [pscustomobject]@{
+            available = $true
+            schemaVersion = 1
+            schemaChecksum = 'maps-v1'
+            quickCheck = 'ok'
+            fileBytes = 4096
+            generationPresent = $true
+            counts = [pscustomobject]@{ activeSpiceCurrent = 1 }
+            databasePath = 'C:\Users\example\platform-cache.sqlite'
+        }
+
+        $json = ConvertTo-DstMapPlatformDiagnosticState `
+            -State $state `
+            -Integrity $integrity `
+            -Health $health |
+            ConvertTo-Json -Depth 12
+
+        $json | Should -Match 'maps.active-spice'
+        $json | Should -Match 'source-map-dimension'
+        $json | Should -Match 'DeepDesert'
+        $json | Should -Not -Match 'private-field-id|12345|67890'
+        $json | Should -Not -Match 'runtime-secret|details-secret|dimension-secret'
+        $json | Should -Not -Match 'databasePath|C:\\Users\\example'
+    }
+}
+
+Describe 'Diagnostics route registration' -Tag 'Pure' {
+    It 'collects only updater text evidence through the redaction path' {
+        $routeFile = Join-Path (Get-DstRepoRoot) 'app\server\routes\Diagnostics.ps1'
+        $source = Get-Content -LiteralPath $routeFile -Raw
+        $source | Should -Match 'update-result-\[A-Za-z0-9\._-\]'
+        $source | Should -Match 'Invoke-DstRedaction -Text \$tail'
+        $source | Should -Not -Match "Get-ChildItem.+DuneServerSetup.+included"
+    }
+
+    It 'includes the complete bounded WebView2 debug log' {
+        $routeFile = Join-Path (Get-DstRepoRoot) 'app\server\routes\Diagnostics.ps1'
+        $source = Get-Content -LiteralPath $routeFile -Raw
+
+        $source | Should -Match 'Read-DstLogText -Path \$wv2'
+        $source | Should -Match 'webview2-debug\.log \(complete, sanitized'
+        $source | Should -Not -Match 'webview2-debug\.log was truncated'
+    }
+
+    It 'includes row-free Maps cache health through the redaction path' {
+        $routeFile = Join-Path (Get-DstRepoRoot) 'app\server\routes\Diagnostics.ps1'
+        $source = Get-Content -LiteralPath $routeFile -Raw
+
+        $source | Should -Match "maps-platform\.txt"
+        $source | Should -Match "Invoke-DunePlatformHelper -Command integrity"
+        $source | Should -Match "Get-DuneMapsRuntimeSourceHealth"
+        $source | Should -Match 'Invoke-DstRedaction -Text \$mapText'
+        $source | Should -Not -Match "snapshot\['activeSpice'\]"
+    }
+
+    It 'includes an identifier-free Shared Inventory Explorer read probe' {
+        $routeFile = Join-Path (Get-DstRepoRoot) 'app\server\routes\Diagnostics.ps1'
+        $source = Get-Content -LiteralPath $routeFile -Raw
+
+        $source | Should -Match "inventory-explorer\.txt"
+        $source | Should -Match "Invoke-DuneInventorySearchLive"
+        $source | Should -Match '-EntityTypes @\(\$inventoryType\) -Limit 1'
+        $source | Should -Match 'Invoke-DstRedaction -Text \(\$inventoryProbe'
+        $source | Should -Not -Match 'inventoryProbe\.Add\(.+\.(?:id|name|owner|templateId|inventoryId)'
+    }
+
+    It 'registers failed database operation cleanup at script scope' {
+        $routeFile = Join-Path (Get-DstRepoRoot) 'app\server\routes\Diagnostics.ps1'
+        $tokens = $null
+        $errors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+            $routeFile,
+            [ref]$tokens,
+            [ref]$errors
+        )
+        $errors | Should -BeNullOrEmpty
+
+        $route = @($ast.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.CommandAst] -and
+                $node.GetCommandName() -eq 'Register-DuneRoute' -and
+                $node.Extent.Text -match '/api/diagnostics/cleanup-failed-database-operations'
+        }, $true))
+        $route.Count | Should -Be 1
+
+        $ancestor = $route[0].Parent
+        while ($ancestor -and $ancestor -isnot [System.Management.Automation.Language.ScriptBlockAst]) {
+            $ancestor = $ancestor.Parent
+        }
+        $ancestor.Parent | Should -BeNullOrEmpty
+    }
+}

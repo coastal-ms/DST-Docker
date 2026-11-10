@@ -1,0 +1,267 @@
+import { useEffect, useState, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
+import { DndContext, DragOverlay, PointerSensor, KeyboardSensor, useSensor, useSensors, closestCorners, type DragEndEvent } from '@dnd-kit/core'
+import { SortableContext, arrayMove, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable'
+import { CSS } from '@dnd-kit/utilities'
+import { Icon } from '../Icon'
+import { api } from '../../api/client'
+import { ConfirmationModal } from '../ConfirmationModal'
+import { CollapsibleCard } from '../CollapsibleCard'
+import { pickLocalFolder } from '../../util/pathPicker'
+import { isShellHost, openShellFolder } from '../../util/shellBridge'
+
+interface Mod { folder: string; id: string; name: string; version: string; enabled: boolean; warnings?: string[]; errors: string[] }
+type ModImport = { path: string } | { filename: string; base64: string }
+interface OverwriteRequest { body: ModImport; mods: string[]; archiveHash: string }
+interface State { runtimeVersions?: {version: string; label: string}[]; runtimePreferenceVersion?: string; useNewerRuntime?: boolean; runtimeVersion?: string; runtimeFallback?: boolean; runtimeWarnings?: string[]; gameRunning?: boolean; mods: Mod[]; folder: string; gamePath: string; skipIntro: boolean; soloArguments?: string; runtimeReady: boolean; session: { runtimeVersion?: string } | null; launchError?: string; runtimeLog?: string }
+
+function SortableMod({ mod, disabled, children }: { mod: Mod; disabled: boolean; children: ReactNode }) {
+  const { attributes, listeners, setNodeRef, setActivatorNodeRef, transform, transition, isDragging } = useSortable({ id: mod.folder, disabled })
+  return <div ref={setNodeRef} style={{ transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.35 : undefined }} className="border border-border rounded p-3 flex items-start gap-3">
+    <button ref={setActivatorNodeRef} type="button" aria-label={`Reorder ${mod.name}`} title="Drag to reorder"
+      {...attributes} {...listeners} disabled={disabled}
+      className="shrink-0 -ml-1 flex items-center justify-center w-6 text-text-dim hover:text-accent cursor-grab active:cursor-grabbing focus:outline-none focus:text-accent touch-none disabled:opacity-40 disabled:cursor-default">
+      <Icon name="GripVertical" size={14} />
+    </button>
+    <div className="flex-1 min-w-0">{children}</div>
+  </div>
+}
+
+export function SoloMods({ connectionToken = '' }: { connectionToken?: string }) {
+  const [state, setState] = useState<State | null>(null)
+  const [gamePath, setGamePath] = useState('')
+  const [platform, setPlatform] = useState('steam')
+  const [soloArguments, setSoloArguments] = useState('')
+  const [dragged, setDragged] = useState<string | null>(null)
+  const [fileOver, setFileOver] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [refreshing, setRefreshing] = useState(false)
+  const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
+  const [deleting, setDeleting] = useState<Mod | null>(null)
+  const [overwrite, setOverwrite] = useState<OverwriteRequest | null>(null)
+  const [log, setLog] = useState<{ available: boolean; content: string } | null>(null)
+  const [logLoading, setLogLoading] = useState(false)
+  const viewLog = async () => {
+    setLogLoading(true)
+    setError('')
+    try { setLog(await api<{ available: boolean; content: string }>('/api/solo/mods/log')) }
+    catch (err) { setError(err instanceof Error ? err.message : String(err)) }
+    finally { setLogLoading(false) }
+  }
+  const downloadLog = () => {
+    if (!log?.available) return
+    const url = URL.createObjectURL(new Blob([log.content], { type: 'text/plain;charset=utf-8' }))
+    const link = document.createElement('a')
+    link.href = url
+    link.download = 'UE4SS.log'
+    link.click()
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+  }
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  )
+  const refresh = async () => {
+    const result = await api<State>('/api/solo/mods')
+    setState({ ...result, mods: result.mods.filter(mod => mod.id !== 'dst-regis-tanks') })
+    setGamePath(result.gamePath)
+    setPlatform((result as State & { platform?: string }).platform ?? 'steam')
+    setSoloArguments(result.soloArguments ?? '')
+  }
+  useEffect(() => { void refresh().catch(e => setError(String(e))) }, [connectionToken])
+  const run = async (action: string, body: unknown = {}) => {
+    setBusy(true); setError(''); setNotice('')
+    try {
+      await api(`/api/solo/mods/${action}`, { method: 'POST', body: JSON.stringify(body) })
+      await refresh()
+      if (action === 'shortcut') setNotice('Desktop shortcut created.')
+      if (action === 'restore') setNotice('Launch files reset. Normal launch restored; saves and installed mods were kept.')
+      if (action === 'runtime') setNotice('Mod runtime installed and verified. Saves, installed mods and mod selections were kept.')
+    } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
+    finally { setBusy(false) }
+  }
+  const save = (mods = state?.mods ?? [], path = gamePath) => run('selection', { mods, gamePath: path, platform })
+  const refreshMods = async () => {
+    setBusy(true); setRefreshing(true); setError(''); setNotice('')
+    try { await refresh(); setNotice('Mod list refreshed.') }
+    catch (e) { setError(e instanceof Error ? e.message : String(e)) }
+    finally { setRefreshing(false); setBusy(false) }
+  }
+  const openModsFolder = async () => {
+    setBusy(true); setError(''); setNotice('')
+    try {
+      const desktop = isShellHost()
+      const result = await api<{ path: string }>('/api/solo/mods/open', { method: 'POST', body: JSON.stringify({ desktop }) })
+      if (desktop) await openShellFolder(result.path)
+      setNotice('Mods folder opening in File Explorer.')
+    } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
+    finally { setBusy(false) }
+  }
+  const saveArguments = async () => {
+    setBusy(true); setError('')
+    try {
+      await api('/api/game/launch-preferences', { method: 'POST', body: JSON.stringify({ soloArguments }) })
+      await refresh()
+    } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
+    finally { setBusy(false) }
+  }
+  const move = (index: number, direction: number) => {
+    if (!state || index + direction < 0 || index + direction >= state.mods.length) return
+    const mods = [...state.mods]
+    ;[mods[index], mods[index + direction]] = [mods[index + direction], mods[index]]
+    void save(mods)
+  }
+  const dropMod = ({ active, over }: DragEndEvent) => {
+    setDragged(null)
+    if (!state || busy || state.gameRunning || !over || active.id === over.id) return
+    const from = state.mods.findIndex(mod => mod.folder === active.id)
+    const to = state.mods.findIndex(mod => mod.folder === over.id)
+    if (from < 0 || to < 0) return
+    const mods = arrayMove(state.mods, from, to)
+    setState({ ...state, mods })
+    void save(mods)
+  }
+  const pickGame = async () => {
+    const path = await pickLocalFolder({ initialPath: gamePath, description: 'Select Dune Awakening installation' })
+    if (path) await save(state?.mods, path)
+  }
+  const install = async () => {
+    try {
+      const pick = await api<{ cancelled: boolean; path: string }>('/api/browse-path', {
+        method: 'POST', body: JSON.stringify({ mode: 'file', title: 'Install mod ZIP', filter: 'Mod ZIP (*.zip)|*.zip' }),
+      })
+      if (!pick.cancelled && pick.path) await importMod({ path: pick.path })
+    } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
+  }
+  const importMod = async (body: ModImport, archiveHash?: string) => {
+    setBusy(true); setError(''); setNotice('')
+    try {
+      const result = await api<{ overwriteRequired?: boolean; mods?: string[]; archiveHash?: string }>('/api/solo/mods/import', {
+        method: 'POST', body: JSON.stringify(archiveHash ? { ...body, overwrite: true, archiveHash } : body),
+      })
+      if (result.overwriteRequired && result.mods && result.archiveHash) {
+        setOverwrite({ body, mods: result.mods, archiveHash: result.archiveHash })
+        return
+      }
+      await refresh()
+      setNotice(`${'filename' in body ? body.filename : 'Mod ZIP'} installed.`)
+    } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
+    finally { setBusy(false) }
+  }
+  const importDroppedZip = async (files: FileList) => {
+    setFileOver(false)
+    if (busy || !state || state.gameRunning) return
+    const file = files[0]
+    if (files.length !== 1 || !file || !/\.zip$/i.test(file.name) || file.size === 0 || file.size > 16 * 1024 * 1024) {
+      setError('Drop one ZIP up to 16 MB, or use Install mod ZIP for larger files.')
+      return
+    }
+    setBusy(true); setError(''); setNotice('')
+    try {
+      const base64 = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onerror = () => reject(new Error('The ZIP could not be read. Try Install mod ZIP instead.'))
+        reader.onload = () => resolve(String(reader.result).split(',')[1] ?? '')
+        reader.readAsDataURL(file)
+      })
+      await importMod({ filename: file.name, base64 })
+    } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
+    finally { setBusy(false) }
+  }
+  return <CollapsibleCard id="solo-mods" title="Solo mods" icon="Package" defaultOpen={false} subtitle="Download mods from Nexus Mods or another source, then install your downloaded ZIP. Mod settings stay in their INI files." headerClassName="px-5 py-4 flex-wrap [&>div]:w-full" headerRight={
+    <div className="flex flex-wrap gap-2 w-full">
+      <label className="block w-full rounded border border-accent/40 bg-accent/5 p-3 text-sm">Dune installation folder
+        <select aria-label="Mod installation platform" className="input mt-2" value={platform} disabled={busy || state?.gameRunning} onChange={e => void run('selection', { mods: state?.mods ?? [], platform: e.target.value, gamePath: '' })}>
+          <option value="steam">Steam</option><option value="xbox">Xbox PC</option>
+        </select>
+        <div className="flex flex-wrap gap-2 mt-1">
+          <input className="flex-1 min-w-0 px-3 py-2 rounded-lg bg-surface-2 border border-border text-text text-sm focus:outline-none focus:ring-2 focus:ring-ibad focus:border-ibad/50" value={gamePath} onChange={e => setGamePath(e.target.value)} placeholder="Select your Dune Awakening installation folder" />
+          <button className="btn-secondary" disabled={busy} onClick={() => void pickGame()}>Browse</button>
+          <button className="btn-secondary" disabled={busy} onClick={() => void save()}>Save</button>
+        </div>
+        <span className="block text-xs text-text-muted mt-2">Xbox PC detects the installed game automatically. Browse saves a manual folder; if you type it, click Save.</span>
+      </label>
+      <label className="block w-full text-sm">Launch Arguments
+        <div className="flex flex-wrap gap-2 mt-1">
+          <input className="flex-1 min-w-0 px-3 py-2 rounded-lg bg-surface-2 border border-border text-text text-sm focus:outline-none focus:ring-2 focus:ring-ibad focus:border-ibad/50" value={soloArguments} maxLength={8192} onChange={e => setSoloArguments(e.target.value)} placeholder="Optional command line arguments" />
+          <button className="btn-secondary" disabled={busy} onClick={() => void saveArguments()}>Save arguments</button>
+        </div>
+        <span className="block text-xs text-text-muted mt-2">Type your arguments in the box, then click Save arguments. Used by both Solo launch buttons in DST.</span>
+      </label>
+      {notice && <p role="status" className="text-sm w-full">{notice}</p>}
+      {(error || state?.launchError) && <p role="alert" className="text-danger whitespace-pre-wrap text-sm w-full">{error || state?.launchError}</p>}
+      <button className="btn-secondary" disabled={busy} onClick={() => void run('launch', { withMods: true })}>Launch with Mods</button>
+      <button className="btn-primary" disabled={busy} onClick={() => void run('launch', { withMods: false })}>Launch Solo</button>
+      <button className="btn-secondary" disabled={busy} title="Close Dune first. Restore original launch files and remove DST session DLLs; saves and installed mods are kept." onClick={() => void run('restore')}>Reset launch files</button>
+      <button className="btn-secondary" disabled={busy} onClick={() => void run('shortcut')}>Create desktop shortcut</button>
+      <button className="btn-secondary" disabled={busy || !state || state.gameRunning} onClick={() => void run('runtime')}>{state?.runtimeReady ? 'Repair mod runtime' : 'Install mod runtime'}</button>
+    </div>
+  }>
+    <div className="space-y-3">
+      <p className="text-sm text-text-muted">Launch with Mods loads your enabled mods.</p>
+      <label className="flex items-center gap-2 text-sm">
+        UE4SS runtime
+        <select value={state?.runtimePreferenceVersion ?? state?.runtimeVersion ?? ''} disabled={busy || !state || state.gameRunning} onChange={e => void run('selection', { mods: state?.mods ?? [], gamePath, platform, runtimeVersion: e.target.value })}>
+          {state?.runtimeVersions?.map(runtime => <option key={runtime.version} value={runtime.version}>{runtime.label}</option>)}
+        </select>
+      </label>
+      {state?.runtimeVersion && <details><summary className="cursor-pointer text-sm text-text-muted">Runtime details</summary><p role="status" className="text-sm text-text-muted mt-2">Selected for next mod launch: UE4SS {state.runtimeVersion}.{state.gameRunning && state.session?.runtimeVersion ? ` Current session: UE4SS ${state.session.runtimeVersion}.` : ''}</p></details>}
+      {state?.runtimeFallback && <p className="text-sm text-warning">The newer runtime failed to initialize. DST selected previous runtime 1140 for the next launch. Select a runtime again to retry your chosen version.</p>}
+      {state?.runtimeWarnings?.map(message => <p className="text-sm text-warning" key={message}>{message}</p>)}
+      {platform === 'xbox' && (
+        <p className="rounded border border-warning/30 bg-warning/5 p-3 text-sm text-text-muted">
+          Use mods compatible with Xbox PC / Game Pass.
+        </p>
+      )}
+      {deleting && <ConfirmationModal title={`Delete ${deleting.name}?`} description="This permanently removes the mod folder and its INI settings. You can reinstall the mod from its ZIP." confirmLabel="Delete mod" onCancel={() => setDeleting(null)} onConfirm={() => { const folder = deleting.folder; setDeleting(null); void run('delete', { folder }) }} />}
+      {overwrite && <ConfirmationModal title="Overwrite installed mods?" description={`Replace ${overwrite.mods.join(', ')} with the files from this ZIP? This replaces the mod folders, including control files and INI settings. Any custom settings or files in those folders will be lost. Mod enabled selections and load order are kept.`} confirmLabel="Overwrite mods" onCancel={() => setOverwrite(null)} onConfirm={() => { const pending = overwrite; setOverwrite(null); void importMod(pending.body, pending.archiveHash) }} />}
+      <a className="text-sm text-accent-bright underline" href="https://www.nexusmods.com/duneawakening" target="_blank" rel="noopener noreferrer">Browse Dune: Awakening mods on Nexus Mods</a>
+      <div role="region" aria-label="Drop a mod ZIP" aria-disabled={busy || !state || state.gameRunning}
+        className={`rounded-lg border-2 border-dashed p-4 text-center text-sm ${fileOver ? 'border-accent bg-accent/10' : 'border-border text-text-muted'}`}
+        onDragOver={e => { if (Array.from(e.dataTransfer.types).includes('Files')) { e.preventDefault(); e.dataTransfer.dropEffect = busy || !state || state.gameRunning ? 'none' : 'copy'; setFileOver(!busy && !!state && !state.gameRunning) } }}
+        onDragLeave={e => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setFileOver(false) }}
+        onDrop={e => { if (Array.from(e.dataTransfer.types).includes('Files')) { e.preventDefault(); void importDroppedZip(e.dataTransfer.files) } }}>
+        {state?.gameRunning ? 'Close Dune before installing a mod ZIP.' : busy ? 'Working…' : 'Drop a mod ZIP here to install · up to 16 MB'}
+      </div>
+      <div className="flex flex-wrap gap-2">
+        <button className="btn-secondary" disabled={busy} onClick={() => void install()}>Install mod ZIP</button>
+        <button className="btn-secondary" disabled={busy} onClick={() => void openModsFolder()}>Open Mods Folder</button>
+        <button className="btn-secondary" disabled={logLoading} onClick={() => void viewLog()}>{logLoading ? 'Loading log…' : 'View UE4SS Log'}</button>
+        <button className="btn-secondary" disabled={busy} aria-busy={refreshing} onClick={() => void refreshMods()}>
+          <Icon name={refreshing ? 'LoaderCircle' : 'RefreshCw'} size={14} className={refreshing ? 'animate-spin' : ''} />
+          {refreshing ? 'Refreshing…' : 'Refresh'}
+        </button>
+      </div>
+      {state && state.mods.length > 1 && <p className="text-sm text-text-muted">Mods load from top to bottom. Follow the mod author's load order instructions.</p>}
+      <DndContext sensors={sensors} collisionDetection={closestCorners}
+        onDragStart={({ active }) => setDragged(String(active.id))} onDragEnd={dropMod} onDragCancel={() => setDragged(null)}>
+      <SortableContext items={state?.mods.map(mod => mod.folder) ?? []} strategy={verticalListSortingStrategy}>
+      {state?.mods.map((mod, index) => <SortableMod key={mod.folder} mod={mod} disabled={busy || !!state.gameRunning}>
+        <div className="flex items-center justify-between gap-3">
+        <label className="flex items-center gap-2">
+          <input type="checkbox" checked={mod.enabled} disabled={busy} onChange={e => void save(state.mods.map(m => m.folder === mod.folder ? { ...m, enabled: e.target.checked } : m))} />
+          <span>{mod.name} {mod.version && <span className="text-text-muted">{mod.version}</span>}</span>
+        </label>
+        <button className="btn-secondary" aria-label={`Delete ${mod.name}`} disabled={busy || state.gameRunning} onClick={() => setDeleting(mod)}>Delete</button>
+        </div>
+        <div className="flex gap-2 mt-2">
+          <button className="btn-secondary" aria-label={`Move ${mod.name} up`} disabled={busy || index === 0} onClick={() => move(index, -1)}>Move Up</button>
+          <button className="btn-secondary" aria-label={`Move ${mod.name} down`} disabled={busy || index === state.mods.length - 1} onClick={() => move(index, 1)}>Move Down</button>
+        </div>
+        {mod.errors.map((message, i) => <p className="text-danger text-sm mt-1" key={i}>{message}</p>)}
+        {mod.id === 'dst-regis-tanks' && mod.warnings?.map((message, i) => <p className="text-text-muted text-sm mt-1" key={`warning-${i}`}>{message}</p>)}
+      </SortableMod>)}
+      </SortableContext>
+      {createPortal(<DragOverlay>{dragged && <div className="border border-border rounded p-3 bg-surface shadow-lg flex items-center gap-3"><Icon name="GripVertical" size={14} />{state?.mods.find(mod => mod.folder === dragged)?.name}</div>}</DragOverlay>, document.body)}
+      </DndContext>
+      {state && !state.mods.length && <p className="text-sm text-text-muted">No mods installed.</p>}
+
+      <p className="text-xs text-text-muted">Launch Solo includes built-in Tank support. Launch with Mods also loads your enabled mods. DST supports the mod-loading framework only. For individual mod issues, contact the author or community.</p>
+      <a className="text-xs text-accent-bright underline" href="https://discord.com/channels/1517599283757453333/1558246888967245957" target="_blank" rel="noopener noreferrer">Solo mod discussion</a>
+      {log && <ConfirmationModal title="UE4SS Log" description={log.available ? 'Current or most recent Solo launch.' : 'No log yet. Launch Solo from DST, then check here.'} confirmLabel="Close" onCancel={() => setLog(null)} onConfirm={() => setLog(null)}>
+        {log.available && <><pre className="text-xs whitespace-pre-wrap break-words max-h-96 overflow-auto">{log.content || 'The log is empty.'}</pre><button className="btn-secondary mt-3" onClick={downloadLog}>Download UE4SS.log</button></>}
+      </ConfirmationModal>}
+    </div>
+  </CollapsibleCard>
+}

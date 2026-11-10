@@ -1,0 +1,1215 @@
+﻿# BackupSchedule.ps1
+# Manage a configurable battlegroup-backup cron entry on the Dune VM.
+#
+# Source of truth is a single block in the VM's root crontab, delimited by:
+#   # DST-BACKUP BEGIN
+#   # DST-BACKUP-PRESET: <name>
+#   # DST-BACKUP-KEEP-LAST: <count>
+#   <preset cron line(s)>
+#   <keep-last cron line, if count > 0>
+#   # DST-BACKUP END
+#
+# Markers are ASCII-only on purpose — they have to round-trip through
+# PowerShell → SSH → BusyBox crontab without encoding surprises.
+#
+# All edits go through one SSH command that takes a VM-side mkdir lock, so
+# two concurrent Save Schedule calls (or a console operator running
+# `sudo crontab -e`) can't lose each other's edits in the middle of our
+# read-modify-write. The lock is per-VM and only held for the duration of
+# the SSH command — never for the lifetime of a request.
+#
+# Loaded by app/DuneServer.ps1's lib-dot-sourcing. Depends on Invoke-V6Ssh
+# from app/lib/Db-Postgres.ps1 (loaded lazily here if it's not already in
+# scope, mirroring Broadcast.ps1).
+
+$script:DuneDbPostgresPathForBackup = $null
+foreach ($candidate in @(
+    (Join-Path $PSScriptRoot '..\..\lib\Db-Postgres.ps1'),
+    (Join-Path (Split-Path -Parent $PSScriptRoot) '..\lib\Db-Postgres.ps1')
+)) {
+    $full = $null
+    try { $full = (Resolve-Path -LiteralPath $candidate -ErrorAction Stop).Path } catch {}
+    if ($full) { $script:DuneDbPostgresPathForBackup = $full; break }
+}
+if ($script:DuneDbPostgresPathForBackup -and -not (Get-Command Invoke-V6Ssh -ErrorAction SilentlyContinue)) {
+    . $script:DuneDbPostgresPathForBackup
+}
+
+# -----------------------------------------------------------------------------
+# Preset definitions. Cron expressions assume the VM's local timezone, which
+# defaults to UTC on Alpine — Get-DuneBackupSchedule returns the detected
+# timezone separately so the UI can label accurately rather than assume.
+# -----------------------------------------------------------------------------
+$script:DuneBackupPresets = @{
+    'Off'             = @{ label='Disabled';                       crons=@() }
+    'Hourly'          = @{ label='Every hour (on the hour)';       crons=@('0 * * * *') }
+    'Every6Hours'     = @{ label='Every 6 hours';                  crons=@('0 */6 * * *') }
+    'DailyUtc04'      = @{ label='Daily at 04:00';                 crons=@('0 4 * * *') }
+    'TwiceDailyUtc'   = @{ label='Twice daily (04:00 and 16:00)';  crons=@('0 4 * * *','0 16 * * *') }
+    'WeeklyMonUtc04'  = @{ label='Weekly, Monday 04:00';           crons=@('0 4 * * 1') }
+}
+
+# Default retention for the auto-prune. The user-configurable value lives in
+# the BackupSchedule and is rendered into the cron command at Save time so the
+# tick honors whatever was last saved. Used when no override is supplied.
+$script:DuneBackupPodPruneKeepLastDefault = 10
+$script:DuneBackupPodPruneKeepDaysDefault = 0
+
+# Build the cron-embedded pod-prune snippet for a given keepLast value.
+# Auto-prune the `*-dump-YYYYMMDD-HHMMSS-pod` objects Funcom's backup job
+# leaves behind on every run. Keeps the most recent N pods; deletes older
+# ones. Runs right after every backup invocation so accumulation can't
+# outpace the cron cadence (issue #363). One-line BusyBox-safe pipeline so
+# the whole backup command stays a single crontab entry:
+#   - kubectl jsonpath -> "ns|name|phase" per pod
+#   - awk filter to terminal (Succeeded or Failed/Evicted) dump-* pods
+#   - sort by name (timestamp embedded, newest first), keep first N, delete rest
+# keepDays is intentionally NOT folded into the cron snippet — keeping the
+# crontab one-line + BusyBox-safe rules out the age math here. The cron tick
+# uses count-only; the manual Prune button on the Database card honors both
+# thresholds via Remove-DuneBackupDumpPods (PowerShell-side filtering).
+function New-DuneBackupPodPruneSnippet {
+    param([int]$KeepLast = 10)
+    if ($KeepLast -lt 0)   { $KeepLast = 0 }
+    if ($KeepLast -gt 100) { $KeepLast = 100 }
+    $skip = $KeepLast + 1
+    # Emit "<embedded-timestamp>|ns|name|phase" so we can sort the COMBINED
+    # dump+import pool by real time (the pod-name prefix differs — 'dump' vs
+    # 'import' — so a plain name sort would group by type, not chronology and
+    # keep-last would cut the wrong ones). Sort by the extracted key desc, drop
+    # it, then keep the newest N.
+    return "sudo kubectl get pods --all-namespaces -o jsonpath='{range .items[*]}{.metadata.namespace}|{.metadata.name}|{.status.phase}{`"\n`"}{end}' 2>/dev/null | awk -F'|' '(`$3==`"Succeeded`" || `$3==`"Failed`") && `$2 ~ /-(dump|import)-[0-9]{8}-[0-9]{6}-pod`$/ { k=`$2; sub(/.*-(dump|import)-/,`"`",k); sub(/-pod`$/,`"`",k); print k`"|`"`$0 }' | sort -t'|' -k1 -r | cut -d'|' -f2- | tail -n +$skip | while IFS='|' read ns nm phase; do echo `"`$(date) dst: prune backup/restore pod `$ns/`$nm`" >> /var/log/dune-backup.log; sudo kubectl delete pod -n `"`$ns`" `"`$nm`" --ignore-not-found >> /var/log/dune-backup.log 2>&1; done"
+}
+
+# Build the cron-embedded file-retention prune snippet for a given keepLast.
+# Deletes /funcom/artifacts/database-dumps/*/ dump files beyond the newest N,
+# keying on filename (embedded UTC timestamp = newest-first). Two globs:
+#   (i)  Funcom-native `-YYYYMMDD-HHMMSS.backup` files (DST's scheduled backups
+#        now use this same shape — see New-DuneBackupCmd)
+#   (ii) LEGACY DST scheduled files (extension-less `dst-scheduled-<ts>`) still
+#        pruned so pre-existing ones from older DST builds aren't orphaned
+# Both dump + its `.yaml` sidecar are deleted together. Manually named
+# snapshots like 'pre-patch-1_4_10_1.backup' (no timestamp tail) never match
+# either glob, so they're never pruned by accident.
+#
+# KeepLast=0 returns an empty string — the "keep forever" opt-out — so callers
+# can splice the result unconditionally.
+#
+# This snippet is spliced into New-DuneBackupCmd so file-retention fires on the
+# SAME tick as every backup (a bare `; find | rm` chain, sharing the parent's
+# restart-window guard). Historically DST wrote a separate `15 5 * * *` daily
+# line for this, which let an hourly preset accumulate up to 24 files between
+# sweeps and skipped the sweep entirely if the VM was off at 05:15 UTC.
+function New-DuneBackupFilePruneSnippet {
+    param([int]$KeepLast = 0)
+    if ($KeepLast -le 0) { return '' }
+    $namePat  = '*-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9].backup'
+    $schedPat = $script:DuneBackupScheduledFindGlob
+    $skip = $KeepLast + 1
+    return "ls -t $script:DuneBackupDumpDir/*/$namePat $script:DuneBackupDumpDir/*/$schedPat 2>/dev/null | tail -n +$skip | while IFS= read -r f; do rm -f `"`$f`" `"`$f.yaml`"; done"
+}
+
+# Build the full backup cron command for a given keepLast value.
+# The scheduled backup is wrapped in a guard that skips it when a DST-driven
+# battlegroup restart is in progress: RestartSchedule.ps1 touches
+# /tmp/dst-restart-active just before (and during) the restart, and `find -mmin
+# -30` here treats a marker touched within the last 30 minutes as "active". The
+# guard fails safe - any error in the check falls through to running the backup
+# normally - and contains no literal '%' so it is crontab-safe.
+#
+# After a successful backup we also run the dump-pod pruner — same cadence as
+# backups, so the pod count stays bounded automatically (issue #363). The
+# pruner is skipped during the restart window too: a kubectl-delete storm
+# while k3s is restarting would just compete for the API server.
+# Reconstructs EXACTLY what New-DuneBackupCmd rendered before the 2026-09-22
+# pg_dump-backfill fix — used only to recognize an already-installed cron
+# block as "stale from before this fix", so Get-DuneBackupSchedule can
+# reconcile it automatically without also silently clobbering a genuine
+# operator hand-edit it can't otherwise tell apart from "just old". Every
+# pre-fix install is missing the # DST-BACKUP-CMD-VERSION marker entirely
+# (this is the first version to write one), so a missing marker + an exact
+# match against this legacy shape is the only reliable signal available at
+# this transition. Do not "clean up" or remove this once the fix has been out
+# for a while — every pre-existing installed server needs it to self-heal the
+# very first time DST touches its schedule after upgrading, however long that
+# takes for that particular operator.
+function New-DuneBackupCmdLegacyV1 {
+    param(
+        [int]$KeepLastPods = 10,
+        [int]$KeepLast = 0
+    )
+    $podSnippet  = New-DuneBackupPodPruneSnippet -KeepLast $KeepLastPods
+    $fileSnippet = New-DuneBackupFilePruneSnippet -KeepLast $KeepLast
+    $tail = $podSnippet
+    if ($fileSnippet) { $tail = "$podSnippet; $fileSnippet" }
+    return "if [ -f /var/lib/dune-server/dst-world-restart-recovery-required ] || find /tmp/dst-restart-active -mmin -30 2>/dev/null | grep -q .; then echo `"`$(date) dst: backup skipped - BG restart or recovery window active`" >> /var/log/dune-backup.log; else /home/dune/.dune/bin/battlegroup backup >> /var/log/dune-backup.log 2>&1; $tail; fi"
+}
+
+# Bump whenever New-DuneBackupCmd's rendered command changes in a way that
+# already-installed crontabs need to pick up automatically (see
+# Get-DuneBackupSchedule's self-heal below) — not for cosmetic/comment-only
+# changes.
+$script:DuneBackupCmdVersion = 4
+
+function New-DuneBackupCmdLegacyV2 {
+    param(
+        [int]$KeepLastPods = 10,
+        [int]$KeepLast = 0
+    )
+    $podSnippet  = New-DuneBackupPodPruneSnippet -KeepLast $KeepLastPods
+    $fileSnippet = New-DuneBackupFilePruneSnippet -KeepLast $KeepLast
+    $tail = $podSnippet
+    if ($fileSnippet) { $tail = "$podSnippet; $fileSnippet" }
+    $dbPort = 15432
+    try { if (Get-Command Get-V6DbPort -ErrorAction SilentlyContinue) { $dbPort = Get-V6DbPort } } catch {}
+    $fallback = (
+        '_bk=$(/home/dune/.dune/bin/battlegroup backup 2>&1); ' +
+        'printf "%s\n" "$_bk" >> /var/log/dune-backup.log; ' +
+        '_bf=$(printf "%s\n" "$_bk" | sed -n "s/^Backup file (on this host): //p" | tail -1); ' +
+        'if [ -n "$_bf" ] && [ ! -s "$_bf" ]; then ' +
+            '_dbl=$(sudo kubectl get pods --all-namespaces --no-headers 2>/dev/null | grep "db-dbdepl-sts.*Running" | head -1); ' +
+            '_ns=$(echo "$_dbl" | awk "{print \$1}"); ' +
+            '_pn=$(echo "$_dbl" | awk "{print \$2}"); ' +
+            'if [ -n "$_pn" ]; then ' +
+                "if sudo kubectl exec -i -n `"`$_ns`" `"`$_pn`" -- pg_dump -U dune -d dune -p $dbPort -F custom --no-owner > `"`$_bf`" 2>>/var/log/dune-backup.log && [ -s `"`$_bf`" ]; then " +
+                    'echo "$(date) dst: battlegroup backup dump file missing (Funcom pod-write regression) - backfilled via direct pg_dump: $_bf" >> /var/log/dune-backup.log; ' +
+                'else ' +
+                    'echo "$(date) dst: pg_dump backfill FAILED for $_bf" >> /var/log/dune-backup.log; ' +
+                    'rm -f "$_bf"; ' +
+                'fi; ' +
+            'else ' +
+                'echo "$(date) dst: pg_dump backfill skipped - no running db pod found" >> /var/log/dune-backup.log; ' +
+            'fi; ' +
+        'fi'
+    )
+    return "if [ -f /var/lib/dune-server/dst-world-restart-recovery-required ] || find /tmp/dst-restart-active -mmin -30 2>/dev/null | grep -q .; then echo `"`$(date) dst: backup skipped - BG restart or recovery window active`" >> /var/log/dune-backup.log; else $fallback; $tail; fi"
+}
+
+function New-DuneBackupCmd {
+    param(
+        [int]$KeepLastPods = 10,
+        [int]$KeepLast = 0
+    )
+    $podSnippet  = New-DuneBackupPodPruneSnippet -KeepLast $KeepLastPods
+    $fileSnippet = New-DuneBackupFilePruneSnippet -KeepLast $KeepLast
+    # File-retention prune (issue: hourly backups accumulated up to 24 files
+    # before the old daily `15 5 * * *` line ran once). Fire the prune on the
+    # SAME tick as the backup that just wrote the file, so keep-last-N is
+    # enforced continuously instead of once a day. KeepLast=0 emits an empty
+    # snippet, preserving the "keep forever" opt-out. The prune runs AFTER the
+    # backup + pod-prune succeed and shares the same restart-window guard, so
+    # a mid-restart tick still skips everything.
+    $tail = $podSnippet
+    if ($fileSnippet) { $tail = "$podSnippet; $fileSnippet" }
+    $dbPort = 15432
+    try { if (Get-Command Get-V6DbPort -ErrorAction SilentlyContinue) { $dbPort = Get-V6DbPort } } catch {}
+    # Use only the path reported by this successful invocation. Verification
+    # must succeed before retention runs; the shared verifier scopes the DB
+    # pod to that artifact's battlegroup and recovers missing payload/spec.
+    if (-not (Get-Command New-DuneBackupVerifyScript -ErrorAction SilentlyContinue)) {
+        . (Join-Path $PSScriptRoot 'BackupVerify.ps1')
+    }
+    $verification = (New-DuneBackupVerifyScript -DbPort $dbPort) -replace '\r?\n', ' '
+    $fallback = '_bk=$(/home/dune/.dune/bin/battlegroup backup 2>&1); _br=$?; ' +
+        'printf "%s\n" "$_bk" >> /var/log/dune-backup.log; ' +
+        'if [ "$_br" = 0 ]; then { ' + $verification + '; } >> /var/log/dune-backup.log 2>&1; else echo "[dst] backup command failed" >> /var/log/dune-backup.log; false; fi'
+
+    return "if [ -f /var/lib/dune-server/dst-world-restart-recovery-required ] || find /tmp/dst-restart-active -mmin -30 2>/dev/null | grep -q .; then echo `"`$(date) dst: backup skipped - BG restart or recovery window active`" >> /var/log/dune-backup.log; else $fallback && { $tail; }; fi"
+}
+$script:DuneBackupBeginMarker = '# DST-BACKUP BEGIN'
+$script:DuneBackupEndMarker   = '# DST-BACKUP END'
+$script:DuneBackupDumpDir     = '/funcom/artifacts/database-dumps'
+
+# DST's scheduled backups are now written by a bare `battlegroup backup` (no
+# name argument — see New-DuneBackupCmd), so Funcom names them with its own
+# convention `sh-<hostid>-<suffix>-<utc-ts>.backup`, exactly like a manual or
+# default backup, self-labeled by battlegroup. OLDER DST builds passed an
+# explicit `dst-scheduled-<utc-ts>` name, which Funcom wrote VERBATIM with NO
+# trailing `.backup` extension (e.g. `dst-scheduled-20260710-050000`). To keep
+# those pre-existing files first-class (listed, prunable, downloadable,
+# deletable) these two shared matchers recognize BOTH shapes while excluding the
+# `.yaml` sidecars:
+#   * a find(1) -name glob for listing + pruning. The `dst-scheduled-` prefix is
+#     followed by a FIXED 8-digit date, a dash, and 6 digits of time; the
+#     `<name>.yaml` sidecar is longer than the glob so it can never match.
+#   * a PowerShell regex for path validation on download/delete. `$` anchors to
+#     the bare scheduled name so the `.yaml` sidecar (and a `.backup.yaml`
+#     sidecar) are both rejected.
+$script:DuneBackupScheduledFindGlob = 'dst-scheduled-????????-??????'
+$script:DuneBackupPathRegex         = '(?:\.backup|/dst-scheduled-[0-9]{8}-[0-9]{6})$'
+
+function Get-DuneBackupPresetNames {
+    return @($script:DuneBackupPresets.Keys | Sort-Object)
+}
+
+# Map a set of cron expressions back to a preset id, or $null if no match.
+# Comparison is order-insensitive on the expressions themselves but exact on
+# the time fields — anything unusual stays "Custom".
+function Get-DuneBackupPresetForCronExprs {
+    param([string[]]$Exprs)
+    if (-not $Exprs -or $Exprs.Count -eq 0) { return $null }
+    $sorted = ($Exprs | Sort-Object) -join '|'
+    foreach ($name in $script:DuneBackupPresets.Keys) {
+        $candidate = $script:DuneBackupPresets[$name].crons
+        if (-not $candidate -or $candidate.Count -eq 0) { continue }
+        if (($candidate | Sort-Object) -join '|' -eq $sorted) { return $name }
+    }
+    return $null
+}
+
+# Extract the 5-field cron expression from a crontab line that runs our
+# backup command. Returns $null if the line doesn't look like a managed
+# backup invocation (i.e. doesn't reference the battlegroup-backup binary).
+function Get-DuneBackupCronExprFromLine {
+    param([string]$Line)
+    if (-not $Line) { return $null }
+    if ($Line -notmatch 'battlegroup\s+backup') { return $null }
+    $trimmed = $Line.Trim()
+    if ($trimmed.StartsWith('#')) { return $null }
+    # First 5 whitespace-separated fields = the cron schedule. BusyBox cron
+    # doesn't support @yearly/@daily/@hourly shortcuts in /etc/crontabs, so
+    # we only worry about the standard 5-field form.
+    $parts = $trimmed -split '\s+', 6
+    if ($parts.Count -lt 6) { return $null }
+    return ($parts[0..4] -join ' ')
+}
+
+function Get-DuneBackupContext {
+    if($env:DST_HOSTING_BACKEND -eq 'docker'){return Get-DuneDockerBackupContext}
+    if (-not (Get-Command Invoke-V6Ssh -ErrorAction SilentlyContinue)) {
+        return @{ ok=$false; status=503; message='SSH helper unavailable (Db-Postgres.ps1 not loaded).' }
+    }
+    if (-not (Get-Command Get-DuneVmStatus -ErrorAction SilentlyContinue)) {
+        return @{ ok=$false; status=503; message='VM status helper unavailable.' }
+    }
+    $vm = Get-DuneVmStatus
+    if (-not $vm)         { return @{ ok=$false; status=503; message='VM status unavailable.' } }
+    if (-not $vm.exists)  { return @{ ok=$false; status=503; message='VM does not exist on this host.' } }
+    if (-not $vm.running) { return @{ ok=$false; status=503; message='VM is not running. Start the battlegroup first.' } }
+    if (-not $vm.ip)      { return @{ ok=$false; status=503; message='VM has no IP yet - wait for it to finish booting.' } }
+    return @{ ok=$true; ip=$vm.ip; vm=$vm }
+}
+
+# -----------------------------------------------------------------------------
+# Run a shell script on the VM and return @{ rc; out } even when the underlying
+# Invoke-V6Ssh helper swallows stderr. We base64-encode the script (so embedded
+# newlines/quotes survive), append an explicit RC marker line, then peel that
+# marker back off the output. Returns rc=-1 if the marker is missing (e.g. SSH
+# failed before our wrapper ran).
+# -----------------------------------------------------------------------------
+function Invoke-DuneBackupShell {
+    param(
+        [Parameter(Mandatory)][string]$Ip,
+        [Parameter(Mandatory)][string]$Script,
+        [int]$TimeoutSec = 30
+    )
+    # Run the caller's script in a subshell so its exit code is observable
+    # even if the script uses `exit N` (the parent shell still gets to print
+    # the __DST_RC sentinel). `sudo bash 2>&1` merges remote stderr into
+    # stdout so Invoke-V6Ssh's local-stderr redirect doesn't eat it.
+    $clean = $Script -replace "`r",''
+    $wrapped = "( $clean`n)`n__dst_rc=`$?`nprintf '\n__DST_RC:%s\n' `"`$__dst_rc`""
+    $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($wrapped))
+    # Feed the base64 payload over ssh STDIN, not the command line. Embedding a
+    # large script as an ssh command-line argument hits a length ceiling — the
+    # remote rejects it with "Connection closed by remote host" once the batch
+    # grows (slowdesolation, v12.18.5: a multi-file delete failed on select-all
+    # but worked in batches up to ~8). Keeping the remote command tiny
+    # (`base64 -d | sudo bash`) and streaming the payload through stdin removes
+    # that ceiling entirely, so a delete/prune of any size runs in one round-trip.
+    $cmd = 'base64 -d | sudo bash 2>&1'
+    $stdin = $b64 + "`n"
+    # A missing __DST_RC sentinel (rc stays -1) means the SSH channel dropped or
+    # timed out before the wrapped script finished — usually a transient hiccup
+    # (a cold connection, or a collision with the ~60s background health poller
+    # that also SSHes to the VM). slowdesolation hit exactly this on a multi-file
+    # delete that then succeeded on the very next click. Retry once before giving
+    # up so callers don't surface a false failure for an action that would work.
+    $rc = -1
+    $body = ''
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+        $out = Invoke-V6Ssh -Ip $Ip -Cmd $cmd -TimeoutSec $TimeoutSec -StdinData $stdin
+        $joined = if ($null -eq $out) { '' } else { ($out -join "`n") }
+        $body = $joined
+        $m = [regex]::Match($joined, '(?ms)\r?\n?__DST_RC:(\d+)\r?\n?\s*$')
+        if ($m.Success) {
+            $rc = [int]$m.Groups[1].Value
+            $body = $joined.Substring(0, $m.Index)
+            break
+        }
+        $rc = -1
+        if ($attempt -lt 2) { Start-Sleep -Milliseconds 750 }
+    }
+    return @{ rc = $rc; out = $body }
+}
+
+# -----------------------------------------------------------------------------
+# Build the rendered crontab block from a preset + keepLast. Returns either
+# a string (the block, including trailing newline) or $null for 'Off'.
+# -----------------------------------------------------------------------------
+function New-DuneBackupBlock {
+    param(
+        [Parameter(Mandatory)][string]$Preset,
+        [int]$KeepLast = 0,
+        [Nullable[int]]$KeepLastPods = $null,
+        [Nullable[int]]$KeepDaysPods = $null
+    )
+    if (-not $script:DuneBackupPresets.ContainsKey($Preset)) {
+        throw "Unknown preset: $Preset"
+    }
+    if ($Preset -eq 'Off') { return $null }
+    if ($null -eq $KeepLastPods -or $KeepLastPods -lt 0) { $KeepLastPods = $script:DuneBackupPodPruneKeepLastDefault }
+    if ($KeepLastPods -gt 100) { $KeepLastPods = 100 }
+    if ($null -eq $KeepDaysPods -or $KeepDaysPods -lt 0) { $KeepDaysPods = $script:DuneBackupPodPruneKeepDaysDefault }
+    if ($KeepDaysPods -gt 365) { $KeepDaysPods = 365 }
+
+    # BusyBox crond passes escaped percent through to the shell. Inside the
+    # verifier's single-quoted printf formats that changes the actual output.
+    # Encode the complete command so neither cron implementation sees percent.
+    $payload = New-DuneBackupCmd -KeepLastPods $KeepLastPods -KeepLast $KeepLast
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($payload))
+    $cmd = "echo '$encoded' | base64 -d | /bin/sh"
+
+    $lines = @()
+    $lines += $script:DuneBackupBeginMarker
+    $lines += "# DST-BACKUP-PRESET: $Preset"
+    $lines += "# DST-BACKUP-KEEP-LAST: $KeepLast"
+    $lines += "# DST-BACKUP-KEEP-LAST-PODS: $KeepLastPods"
+    $lines += "# DST-BACKUP-KEEP-DAYS-PODS: $KeepDaysPods"
+    $lines += "# DST-BACKUP-CMD-VERSION: $script:DuneBackupCmdVersion"
+    foreach ($cronExpr in $script:DuneBackupPresets[$Preset].crons) {
+        $lines += "$cronExpr $cmd"
+    }
+    # File-retention prune is spliced INTO $cmd (see New-DuneBackupCmd), so it
+    # fires on the same tick as each backup. No separate daily line is written.
+    $lines += $script:DuneBackupEndMarker
+    return (($lines -join "`n") + "`n")
+}
+
+# -----------------------------------------------------------------------------
+# Parse a crontab string into managed-block + leftover lines.
+# Returns @{ block = <hashtable or $null>; outsideText = string; hasUnmanagedBackupLines = bool }.
+# Block hashtable has: preset, keepLast, raw, looksTampered.
+# -----------------------------------------------------------------------------
+function ConvertFrom-DuneBackupCrontab {
+    param([string]$CrontabText)
+    if ($null -eq $CrontabText) { $CrontabText = '' }
+    $lines = ($CrontabText -replace "`r",'') -split "`n"
+    $outside = New-Object System.Collections.Generic.List[string]
+    $blockLines = New-Object System.Collections.Generic.List[string]
+    $inBlock = $false
+    foreach ($ln in $lines) {
+        if (-not $inBlock -and $ln -eq $script:DuneBackupBeginMarker) {
+            $inBlock = $true
+            continue
+        }
+        if ($inBlock -and $ln -eq $script:DuneBackupEndMarker) {
+            $inBlock = $false
+            continue
+        }
+        if ($inBlock) {
+            $blockLines.Add($ln) | Out-Null
+        } else {
+            $outside.Add($ln) | Out-Null
+        }
+    }
+    $blockInfo = $null
+    if ($blockLines.Count -gt 0 -or $CrontabText -match [regex]::Escape($script:DuneBackupBeginMarker)) {
+        $preset = $null
+        $keepLast = 0
+        $keepLastPods = $script:DuneBackupPodPruneKeepLastDefault
+        $keepDaysPods = $script:DuneBackupPodPruneKeepDaysDefault
+        # $null = no version marker at all, i.e. installed before the marker
+        # existed. Never assume that means "version 1" — a genuinely
+        # hand-edited block also has no marker, and the two must stay
+        # distinguishable (see Get-DuneBackupSchedule's legacy-shape check).
+        $cmdVersion = $null
+        foreach ($bl in $blockLines) {
+            if ($bl -match '^# DST-BACKUP-PRESET:\s*(\S+)') { $preset = $Matches[1] }
+            elseif ($bl -match '^# DST-BACKUP-KEEP-LAST-PODS:\s*(\d+)') { $keepLastPods = [int]$Matches[1] }
+            elseif ($bl -match '^# DST-BACKUP-KEEP-DAYS-PODS:\s*(\d+)') { $keepDaysPods = [int]$Matches[1] }
+            elseif ($bl -match '^# DST-BACKUP-CMD-VERSION:\s*(\d+)') { $cmdVersion = [int]$Matches[1] }
+            elseif ($bl -match '^# DST-BACKUP-(?:KEEP-LAST|RETENTION):\s*(\d+)') { $keepLast = [int]$Matches[1] }
+        }
+        if (-not $preset) { $preset = 'Custom' }
+        $blockInfo = @{
+            preset       = $preset
+            keepLast     = $keepLast
+            keepLastPods = $keepLastPods
+            keepDaysPods = $keepDaysPods
+            cmdVersion   = $cmdVersion
+            raw          = ($blockLines -join "`n")
+        }
+    }
+
+    # Detect user-managed cron lines outside our block that still call the
+    # backup command — surfaces as a warning in the UI. Also collect their
+    # cron expressions so the caller can try to reverse-map to a preset
+    # (the most common case is the hardcoded `0 4 * * *` line that early
+    # adopters installed by hand before this card existed).
+    $unmanagedExprs = New-Object System.Collections.Generic.List[string]
+    foreach ($ln in $outside) {
+        $expr = Get-DuneBackupCronExprFromLine -Line $ln
+        if ($expr) { $unmanagedExprs.Add($expr) | Out-Null }
+    }
+    $unmanaged = ($unmanagedExprs.Count -gt 0)
+
+    return @{
+        block                    = $blockInfo
+        outsideText              = ($outside -join "`n").TrimEnd("`n")
+        hasUnmanagedBackupLines  = $unmanaged
+        unmanagedBackupCronExprs = @($unmanagedExprs)
+    }
+}
+
+# -----------------------------------------------------------------------------
+# Public: read the current schedule from the VM.
+# -----------------------------------------------------------------------------
+function Get-DuneBackupSchedule {
+    param(
+        [Parameter(Mandatory)][string]$Ip,
+        # Internal recursion guard for the one-time self-heal below — callers
+        # never need to pass this.
+        [switch]$SkipReconcile
+    )
+    if($env:DST_HOSTING_BACKEND -eq 'docker'){return Get-DuneDockerBackupData -Request @{action='backups.schedule.get'}}
+    # crond status + timezone probe + crontab fetch in a single SSH round-trip.
+    $script = @'
+echo "__DST_SECTION:TZ"
+date +%Z
+echo "__DST_SECTION:DATE"
+date -u +%Y-%m-%dT%H:%M:%SZ
+echo "__DST_SECTION:CROND"
+if command -v rc-service >/dev/null 2>&1; then
+  rc-service crond status 2>&1 || true
+elif command -v service >/dev/null 2>&1; then
+  service crond status 2>&1 || service cron status 2>&1 || true
+else
+  ps -A 2>/dev/null | grep -E "[c]rond?" | head -1 || true
+fi
+echo "__DST_SECTION:CRONTAB"
+sudo crontab -l 2>&1 || true
+'@
+    $r = Invoke-DuneBackupShell -Ip $Ip -Script $script -TimeoutSec 20
+    if ($r.rc -lt 0) { throw "SSH to VM failed (no exit code returned)." }
+
+    $sections = @{}
+    $current = $null
+    foreach ($ln in ($r.out -split "`n")) {
+        if ($ln -match '^__DST_SECTION:(\w+)') { $current = $Matches[1]; $sections[$current] = New-Object System.Collections.Generic.List[string]; continue }
+        if ($current) { $sections[$current].Add($ln) | Out-Null }
+    }
+    $tz       = if ($sections.ContainsKey('TZ'))       { ($sections['TZ']       -join '').Trim() } else { 'UTC' }
+    $vmNowUtc = if ($sections.ContainsKey('DATE'))     { ($sections['DATE']     -join '').Trim() } else { '' }
+    $crondTxt = if ($sections.ContainsKey('CROND'))    { ($sections['CROND']    -join "`n") } else { '' }
+    $cronText = if ($sections.ContainsKey('CRONTAB'))  { ($sections['CRONTAB']  -join "`n") } else { '' }
+
+    # `crontab -l` returns 1 + "no crontab for ..." on stderr when none exists;
+    # we already merged stderr->stdout above, so just normalize that case.
+    if ($cronText -match '^no crontab for') { $cronText = '' }
+
+    $crondRunning = ($crondTxt -match 'status:\s*started' -or $crondTxt -match 'is running' -or $crondTxt -match '\bcrond?\b')
+
+    $parsed = ConvertFrom-DuneBackupCrontab -CrontabText $cronText
+
+    $enabled = $false
+    $preset = 'Off'
+    $keepLast = 0
+    $keepLastPods = $script:DuneBackupPodPruneKeepLastDefault
+    $keepDaysPods = $script:DuneBackupPodPruneKeepDaysDefault
+    $looksTampered = $false
+    $inferredFromUnmanaged = $false
+    if ($parsed.block) {
+        $preset       = $parsed.block.preset
+        $keepLast     = $parsed.block.keepLast
+        $keepLastPods = $parsed.block.keepLastPods
+        $keepDaysPods = $parsed.block.keepDaysPods
+        $enabled      = ($preset -ne 'Off')
+        # If the rendered block doesn't match the stored knobs any more, the
+        # operator likely edited it by hand. Surface that to the UI.
+        $expected = (New-DuneBackupBlock -Preset $preset -KeepLast $keepLast -KeepLastPods $keepLastPods -KeepDaysPods $keepDaysPods)
+        if ($expected) {
+            $expectedInner = ($expected.TrimEnd("`n") -split "`n" | Select-Object -Skip 1 | Select-Object -SkipLast 1) -join "`n"
+            if ($expectedInner -ne $parsed.block.raw) {
+                $looksTampered = $true
+                # Self-heal an already-installed schedule that's just stale
+                # from before a New-DuneBackupCmd fix (e.g. 2026-09-22's
+                # pg_dump backfill for Funcom's dump-pod regression) — every
+                # server that saved a schedule before that fix shipped is
+                # stuck running the old, silently-broken command until this
+                # runs, since nothing else rewrites an already-installed
+                # crontab block. Only auto-reconcile when the installed block
+                # exactly matches a KNOWN prior rendering (unversioned v1, v2 or v3) — never a block whose command
+                # version marker is present but simply unrecognized, and
+                # never on a block that doesn't match anything we know how to
+                # produce, which stays flagged as tampered exactly as before.
+                if (-not $SkipReconcile -and ($null -eq $parsed.block.cmdVersion -or $parsed.block.cmdVersion -in @(2,3))) {
+                    $legacyCmd = if ($parsed.block.cmdVersion -eq 3) { (New-DuneBackupCmd -KeepLastPods $keepLastPods -KeepLast $keepLast) -replace '%', '\%' } elseif ($parsed.block.cmdVersion -eq 2) { New-DuneBackupCmdLegacyV2 -KeepLastPods $keepLastPods -KeepLast $keepLast } else { New-DuneBackupCmdLegacyV1 -KeepLastPods $keepLastPods -KeepLast $keepLast }
+                    $legacyInner = (@(
+                        "# DST-BACKUP-PRESET: $preset"
+                        "# DST-BACKUP-KEEP-LAST: $keepLast"
+                        "# DST-BACKUP-KEEP-LAST-PODS: $keepLastPods"
+                        "# DST-BACKUP-KEEP-DAYS-PODS: $keepDaysPods"
+                    ) + @($script:DuneBackupPresets[$preset].crons | ForEach-Object { "$_ $legacyCmd" })) -join "`n"
+                    if ($parsed.block.cmdVersion -in @(2,3)) {
+                        $legacyInner = $legacyInner -replace "(# DST-BACKUP-KEEP-DAYS-PODS: [0-9]+)", "`$1`n# DST-BACKUP-CMD-VERSION: $($parsed.block.cmdVersion)"
+                    }
+                    # Earlier v3 releases predate the empty-archive replacement
+                    # repair. Recognize only that exact shipped command variant;
+                    # all other edits must remain protected from reconciliation.
+                    $legacyBeforeEmptyArchiveFix = $null
+                    if ($parsed.block.cmdVersion -eq 3) {
+                        $replacement = 'if sudo test -e "$_bf" && ! sudo test -s "$_bf"; then sudo mv "$_dt" "$_bf" || _ok=0; else sudo mv -n "$_dt" "$_bf" || _ok=0; fi;'
+                        $legacyBeforeEmptyArchiveFix = $legacyInner.Replace($replacement, 'sudo mv -n "$_dt" "$_bf" || _ok=0;')
+                    }
+                    $knownLegacyBlocks = @($legacyInner)
+                    if ($null -ne $legacyBeforeEmptyArchiveFix) { $knownLegacyBlocks += $legacyBeforeEmptyArchiveFix }
+                    if ($parsed.block.cmdVersion -eq 3) {
+                        # Recovery progress messages were added after v3 shipped.
+                        # Derive exact historical renderings from our generated
+                        # candidates; never strip text from the installed block.
+                        $knownLegacyBlocks += @($knownLegacyBlocks | ForEach-Object {
+                            $_.Replace("echo '[dst] battlegroup spec was not saved; recovering the matching YAML now...'; ", '').Replace("echo '[dst] database archive was not saved; creating and verifying a recovery dump now...'; ", '')
+                        })
+                    }
+                    if ($parsed.block.raw -in $knownLegacyBlocks) {
+                        $reconciled = Set-DuneBackupSchedule -Ip $Ip -Preset $preset -KeepLast $keepLast -KeepLastPods $keepLastPods -KeepDaysPods $keepDaysPods
+                        if ($reconciled.ok) {
+                            return Get-DuneBackupSchedule -Ip $Ip -SkipReconcile
+                        }
+                        # Reconcile attempt failed (e.g. lock held by a
+                        # concurrent save) — fall through and report the
+                        # pre-reconcile state honestly rather than hide it.
+                    }
+                }
+            }
+        }
+    } elseif ($parsed.hasUnmanagedBackupLines) {
+        # No managed block, but a hand-installed `battlegroup backup` cron
+        # exists outside the block (e.g. the legacy `0 4 * * *` line from
+        # the miniature-disco docs). If the schedule matches a known preset
+        # exactly, infer it so the UI shows the right preselected option and
+        # the user just clicks Save to migrate it into our managed block.
+        $inferred = Get-DuneBackupPresetForCronExprs -Exprs $parsed.unmanagedBackupCronExprs
+        if ($inferred) {
+            $preset    = $inferred
+            $enabled   = $true
+            $inferredFromUnmanaged = $true
+        }
+    }
+
+    return @{
+        enabled                   = $enabled
+        preset                    = $preset
+        keepLast                  = $keepLast
+        keepLastPods              = $keepLastPods
+        keepDaysPods              = $keepDaysPods
+        vmTimezone                = $tz
+        vmNowUtc                  = $vmNowUtc
+        crondRunning              = [bool]$crondRunning
+        crondStatusRaw            = $crondTxt.Trim()
+        hasUnmanagedBackupLines   = $parsed.hasUnmanagedBackupLines
+        managedBlockLooksTampered = $looksTampered
+        inferredFromUnmanaged     = $inferredFromUnmanaged
+        presets                   = @(Get-DuneBackupPresetNames | ForEach-Object {
+            @{ id=$_; label=$script:DuneBackupPresets[$_].label }
+        })
+    }
+}
+
+# -----------------------------------------------------------------------------
+# Public: write the schedule. Locks per-VM and verifies by reading the
+# crontab back after the write.
+# -----------------------------------------------------------------------------
+function Set-DuneBackupSchedule {
+    param(
+        [Parameter(Mandatory)][string]$Ip,
+        [Parameter(Mandatory)][string]$Preset,
+        [int]$KeepLast = 0,
+        [Nullable[int]]$KeepLastPods = $null,
+        [Nullable[int]]$KeepDaysPods = $null
+    )
+    if($env:DST_HOSTING_BACKEND -eq 'docker'){
+        $request=@{action='backups.schedule.set';preset=$Preset;keepLast=$KeepLast}
+        if($null -ne $KeepLastPods){$request.keepLastPods=[int]$KeepLastPods}
+        if($null -ne $KeepDaysPods){$request.keepDaysPods=[int]$KeepDaysPods}
+        $reply=Invoke-DuneDockerManager -Request $request
+        if(-not $reply.ok){return @{ok=$false;status=400;message=$reply.error}}
+        return @{ok=$true}
+    }
+    if (-not $script:DuneBackupPresets.ContainsKey($Preset)) {
+        return @{ ok=$false; status=400; message="Unknown preset: $Preset" }
+    }
+    if ($KeepLast -lt 0 -or $KeepLast -gt 1000) {
+        return @{ ok=$false; status=400; message="keepLast must be 0..1000 (got $KeepLast)." }
+    }
+    if ($null -ne $KeepLastPods -and ($KeepLastPods -lt 0 -or $KeepLastPods -gt 100)) {
+        return @{ ok=$false; status=400; message="keepLastPods must be 0..100 (got $KeepLastPods)." }
+    }
+    if ($null -ne $KeepDaysPods -and ($KeepDaysPods -lt 0 -or $KeepDaysPods -gt 365)) {
+        return @{ ok=$false; status=400; message="keepDaysPods must be 0..365 (got $KeepDaysPods)." }
+    }
+
+    $newBlock = New-DuneBackupBlock -Preset $Preset -KeepLast $KeepLast -KeepLastPods $KeepLastPods -KeepDaysPods $KeepDaysPods
+    $newBlockB64 = if ($newBlock) { [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($newBlock)) } else { '' }
+
+    # Whole RMW (read existing crontab, strip our block, append new block,
+    # install via `crontab -`) happens inside a VM-side mkdir lock so two
+    # concurrent saves serialize cleanly. We also ensure the backup log file
+    # exists with a sane owner/perms before installing, otherwise the first
+    # scheduled run's `>> /var/log/dune-backup.log` would create it owned
+    # by root only.
+    $script = @"
+set +e
+LOCK=/tmp/dst-backup-schedule.lock
+if ! sudo mkdir "`$LOCK" 2>/dev/null; then
+  echo "__DST_LOCK_HELD"
+  exit 75
+fi
+trap 'sudo rmdir "`$LOCK" 2>/dev/null' EXIT
+
+sudo touch /var/log/dune-backup.log 2>/dev/null || true
+sudo chmod 0644 /var/log/dune-backup.log 2>/dev/null || true
+
+existing=`$(sudo crontab -l 2>/dev/null || true)
+# Drop any prior managed block (inclusive of markers) AND any stray cron
+# line that calls `battlegroup backup` outside the block — otherwise an
+# old hand-installed line (e.g. the legacy `0 4 * * *` from the docs)
+# would coexist with our new managed block and run a second time.
+# awk is BusyBox-safe.
+stripped=`$(printf '%s\n' "`$existing" | awk '
+  /^# DST-BACKUP BEGIN`$/ { in_block=1; next }
+  /^# DST-BACKUP END`$/   { in_block=0; next }
+  in_block                { next }
+  /^[[:space:]]*#/        { print; next }
+  /battlegroup[[:space:]]+backup/ { next }
+  { print }
+')
+
+newblock=''
+if [ -n "$newBlockB64" ]; then
+  newblock=`$(echo "$newBlockB64" | base64 -d)
+fi
+
+# Compose final crontab: stripped content + blank separator + new block.
+final=`$(printf '%s' "`$stripped" | sed -e :a -e '/^\n*`$/{`$d;N;ba' -e '}')
+if [ -n "`$newblock" ]; then
+  if [ -n "`$final" ]; then
+    final="`$final
+`$newblock"
+  else
+    final="`$newblock"
+  fi
+fi
+
+printf '%s' "`$final" | sudo crontab -
+inst_rc=`$?
+echo "__DST_SECTION:INSTALL_RC"
+echo "`$inst_rc"
+echo "__DST_SECTION:VERIFY"
+sudo crontab -l 2>&1 || true
+"@
+
+    $r = Invoke-DuneBackupShell -Ip $Ip -Script $script -TimeoutSec 25
+    if ($r.rc -lt 0) {
+        return @{ ok=$false; status=502; message='SSH to VM failed (no exit code returned).' }
+    }
+    if ($r.out -match '__DST_LOCK_HELD') {
+        return @{ ok=$false; status=409; message='Another schedule save is in progress. Try again in a moment.' }
+    }
+    if ($r.rc -ne 0) {
+        return @{ ok=$false; status=502; message="Schedule install failed (rc=$($r.rc)): $($r.out.Trim())" }
+    }
+
+    # Parse install_rc + verification to confirm the new block landed.
+    $installRc = -1
+    $verifyText = ''
+    $sect = $null
+    foreach ($ln in ($r.out -split "`n")) {
+        if ($ln -match '^__DST_SECTION:(\w+)') { $sect = $Matches[1]; continue }
+        if ($sect -eq 'INSTALL_RC') { if ($ln.Trim()) { $installRc = [int]$ln.Trim() } }
+        elseif ($sect -eq 'VERIFY') { $verifyText += $ln + "`n" }
+    }
+    if ($installRc -ne 0) {
+        return @{ ok=$false; status=502; message="crontab install returned rc=$installRc. Output: $($r.out.Trim())" }
+    }
+    $parsed = ConvertFrom-DuneBackupCrontab -CrontabText $verifyText
+    if ($Preset -eq 'Off') {
+        if ($parsed.block) {
+            return @{ ok=$false; status=502; message='Crontab still contains a DST-BACKUP block after Off save.' }
+        }
+    } else {
+        if (-not $parsed.block) {
+            return @{ ok=$false; status=502; message='Crontab does not contain a DST-BACKUP block after save.' }
+        }
+        if ($parsed.block.preset -ne $Preset -or $parsed.block.keepLast -ne $KeepLast) {
+            return @{ ok=$false; status=502; message="Verification mismatch: got preset=$($parsed.block.preset), keepLast=$($parsed.block.keepLast)." }
+        }
+        $expectedKeepLastPods = if ($null -ne $KeepLastPods) { [int]$KeepLastPods } else { $script:DuneBackupPodPruneKeepLastDefault }
+        $expectedKeepDaysPods = if ($null -ne $KeepDaysPods) { [int]$KeepDaysPods } else { $script:DuneBackupPodPruneKeepDaysDefault }
+        if ($parsed.block.keepLastPods -ne $expectedKeepLastPods -or $parsed.block.keepDaysPods -ne $expectedKeepDaysPods) {
+            return @{ ok=$false; status=502; message="Verification mismatch: got keepLastPods=$($parsed.block.keepLastPods), keepDaysPods=$($parsed.block.keepDaysPods)." }
+        }
+    }
+
+    return @{ ok=$true }
+}
+
+# -----------------------------------------------------------------------------
+# Public: list recent backup files + tail the backup log.
+# -----------------------------------------------------------------------------
+function Get-DuneBackupHistory {
+    param(
+        [Parameter(Mandatory)][string]$Ip,
+        [int]$Recent = 10,
+        [int]$LogLines = 50
+    )
+    if($env:DST_HOSTING_BACKEND -eq 'docker'){return Get-DuneDockerBackupData -Request @{action='backups.history';recent=$Recent}}
+    if ($Recent -lt 1)   { $Recent = 1 }
+    if ($Recent -gt 1000) { $Recent = 1000 }
+    if ($LogLines -lt 1)    { $LogLines = 1 }
+    if ($LogLines -gt 500)  { $LogLines = 500 }
+
+    # Stat every backup file (bounded to 5000 so xargs stays sane), sort newest-
+    # first, THEN cap to $Recent. The old code capped BEFORE stat/sort, so a
+    # dump dir with more files than the cap returned an arbitrary slice instead
+    # of the newest N. The manager UI requests a high $Recent to list them all;
+    # emit the true total so the UI can show "showing N of M".
+    $script = @"
+echo '__DST_SECTION:COUNT'
+sudo find $script:DuneBackupDumpDir -maxdepth 3 -type f \( -name '*.backup' -o -name '$script:DuneBackupScheduledFindGlob' \) 2>/dev/null | wc -l
+echo '__DST_SECTION:FILES'
+sudo find $script:DuneBackupDumpDir -maxdepth 3 -type f \( -name '*.backup' -o -name '$script:DuneBackupScheduledFindGlob' \) 2>/dev/null \
+  | head -5000 \
+  | xargs -r -I{} sudo stat -c '%Y|%s|%n' '{}' 2>/dev/null \
+  | sort -rn \
+  | head -$Recent
+echo '__DST_SECTION:LOG'
+sudo tail -$LogLines /var/log/dune-backup.log 2>/dev/null || true
+echo '__DST_SECTION:DISK'
+sudo du -sh $script:DuneBackupDumpDir 2>/dev/null | awk '{print `$1}' || true
+"@
+
+    $r = Invoke-DuneBackupShell -Ip $Ip -Script $script -TimeoutSec 30
+    if ($r.rc -lt 0) { throw 'SSH to VM failed (no exit code returned).' }
+
+    $sections = @{}
+    $current = $null
+    foreach ($ln in ($r.out -split "`n")) {
+        if ($ln -match '^__DST_SECTION:(\w+)') { $current = $Matches[1]; $sections[$current] = New-Object System.Collections.Generic.List[string]; continue }
+        if ($current) { $sections[$current].Add($ln) | Out-Null }
+    }
+
+    $files = @()
+    if ($sections.ContainsKey('FILES')) {
+        foreach ($row in $sections['FILES']) {
+            if (-not $row) { continue }
+            $parts = $row -split '\|', 3
+            if ($parts.Count -ne 3) { continue }
+            $epoch = 0
+            $size = 0
+            try { $epoch = [long]$parts[0] } catch { continue }
+            try { $size  = [long]$parts[1] } catch { $size = 0 }
+            $path = $parts[2]
+            $files += @{
+                path       = $path
+                sizeBytes  = $size
+                mtimeEpoch = $epoch
+                mtimeIso   = (([datetimeoffset]::FromUnixTimeSeconds($epoch)).UtcDateTime.ToString('yyyy-MM-ddTHH:mm:ssZ'))
+            }
+        }
+    }
+    $logTail = if ($sections.ContainsKey('LOG'))  { ($sections['LOG']  -join "`n").TrimEnd("`n") } else { '' }
+    $diskUse = if ($sections.ContainsKey('DISK')) { ($sections['DISK'] -join '').Trim() } else { '' }
+
+    $total = $files.Count
+    if ($sections.ContainsKey('COUNT')) {
+        $countStr = ($sections['COUNT'] -join '').Trim()
+        $parsed = 0
+        if ([int]::TryParse($countStr, [ref]$parsed)) { $total = $parsed }
+    }
+
+    return @{
+        recent        = $files
+        total         = $total
+        logTail       = $logTail
+        dumpDirPath   = $script:DuneBackupDumpDir
+        dumpDirSize   = $diskUse
+        logPath       = '/var/log/dune-backup.log'
+    }
+}
+
+# -----------------------------------------------------------------------------
+# Public: delete one or more `.backup` files from the VM's dump directory (plus
+# each file's `.yaml` sidecar, which Funcom writes alongside every dump). Every
+# path is validated HARD before any rm runs so this can only ever touch a
+# genuine backup file inside the dump dir:
+#   - must be an absolute path under $script:DuneBackupDumpDir
+#   - must end in `.backup`
+#   - must not contain `..` (no path traversal)
+# Returns @{ ok; deleted=@(); failed=@(@{path;reason}); message }.
+# -----------------------------------------------------------------------------
+function Remove-DuneBackupFiles {
+    param(
+        [Parameter(Mandatory)][string]$Ip,
+        [Parameter(Mandatory)][string[]]$Paths
+    )
+    if($env:DST_HOSTING_BACKEND -eq 'docker'){return Remove-DuneDockerBackupFiles -Paths $Paths}
+    # NOTE: $failed is List[object] (holds @{path;reason} hashtables). Do NOT
+    # wrap a List[object] variable with @(...) — the array-subexpression operator
+    # throws `ArgumentException: Argument types do not match` on a bare
+    # List[object] (both Windows PowerShell 5.1 and PS7). `rm`/`kubectl delete`
+    # would already have run, so the caller sees a 502 while the file/pod was in
+    # fact deleted. Always normalize via .ToArray() before returning. Same rule
+    # applies to every List[object] in Remove-DuneBackupDumpPods below.
+    $deleted = New-Object System.Collections.Generic.List[string]
+    $failed  = New-Object System.Collections.Generic.List[object]
+    $valid   = New-Object System.Collections.Generic.List[string]
+
+    $root = $script:DuneBackupDumpDir
+    foreach ($p in $Paths) {
+        $path = if ($null -eq $p) { '' } else { ([string]$p).Trim() }
+        if (-not $path) {
+            $failed.Add(@{ path = $p; reason = 'Empty path.' }); continue
+        }
+        if ($path -match '\.\.') {
+            $failed.Add(@{ path = $path; reason = 'Path traversal not allowed.' }); continue
+        }
+        if ($path -notlike "$root/*") {
+            $failed.Add(@{ path = $path; reason = "Path must be inside $root." }); continue
+        }
+        if ($path -notmatch $script:DuneBackupPathRegex) {
+            $failed.Add(@{ path = $path; reason = 'Path must be a .backup file or a dst-scheduled-<ts> backup.' }); continue
+        }
+        $valid.Add($path) | Out-Null
+    }
+
+    if ($valid.Count -eq 0) {
+        return @{ ok = $false; status = 400; deleted = @(); failed = @($failed.ToArray()); message = 'No valid backup paths to delete.' }
+    }
+
+    # Build a shell script that removes each validated file + its sidecar and
+    # prints a per-path result marker we can parse back. Single-quote each path
+    # for the shell (backups never contain single quotes; guard anyway).
+    $sb = New-Object System.Text.StringBuilder
+    foreach ($path in $valid) {
+        if ($path.Contains("'")) {
+            $failed.Add(@{ path = $path; reason = 'Path contains a single quote.' }); continue
+        }
+        $q = "'" + $path + "'"
+        # Only report OK when the .backup itself is gone after rm. The .yaml
+        # sidecar is best-effort (may not exist for manually-uploaded files).
+        # No inner `sudo`: the whole script already runs under `sudo bash` (root),
+        # so per-file `sudo` was a redundant fork per file — on a large select-all
+        # delete against a memory-pressured VM those extra forks add up and could
+        # push the batch past the SSH timeout. Plain `rm` under the root shell is
+        # equivalent and much cheaper.
+        [void]$sb.AppendLine("if rm -f $q && rm -f ${q}.yaml 2>/dev/null; then if [ ! -e $q ]; then echo `"__DEL_OK:$path`"; else echo `"__DEL_FAIL:$path|still present`"; fi; else echo `"__DEL_FAIL:$path|rm failed`"; fi")
+    }
+
+    if ($sb.Length -eq 0) {
+        return @{ ok = $false; status = 400; deleted = @(); failed = @($failed.ToArray()); message = 'No valid backup paths to delete.' }
+    }
+
+    $r = Invoke-DuneBackupShell -Ip $Ip -Script $sb.ToString() -TimeoutSec 60
+    if ($r.rc -lt 0) { throw 'SSH to VM failed (no exit code returned).' }
+
+    foreach ($ln in ($r.out -split "`n")) {
+        $line = $ln.Trim()
+        if ($line -like '__DEL_OK:*') {
+            $deleted.Add($line.Substring(9)) | Out-Null
+        } elseif ($line -like '__DEL_FAIL:*') {
+            $rest = $line.Substring(11)
+            $bar = $rest.IndexOf('|')
+            if ($bar -ge 0) {
+                $failed.Add(@{ path = $rest.Substring(0, $bar); reason = $rest.Substring($bar + 1) })
+            } else {
+                $failed.Add(@{ path = $rest; reason = 'Delete failed.' })
+            }
+        }
+    }
+
+    $ok = ($deleted.Count -gt 0) -and ($failed.Count -eq 0)
+    $msg = if ($failed.Count -eq 0) {
+        "Deleted $($deleted.Count) backup file(s)."
+    } elseif ($deleted.Count -gt 0) {
+        "Deleted $($deleted.Count); $($failed.Count) failed."
+    } else {
+        "Delete failed for all $($failed.Count) file(s)."
+    }
+    return @{ ok = $ok; deleted = @($deleted.ToArray()); failed = @($failed.ToArray()); message = $msg }
+}
+
+# -----------------------------------------------------------------------------
+# Public: list `*-dump-YYYYMMDD-HHMMSS-pod` pods left behind by Funcom's database-
+# backup jobs. They finish Succeeded (or Failed/Evicted when the node was low on
+# memory) but are never garbage-collected by k8s, so they pile up over time
+# (issue #363) — and survive restarts/reboots because they live in the k3s
+# datastore, not as live processes. Returned newest-first by the timestamp baked
+# into the pod name (kubectl creationTimestamp would work too, but the embedded
+# timestamp is naturally sortable as a string and survives clock drift).
+# -----------------------------------------------------------------------------
+$script:DuneBackupDumpPodNameRegex = '^[a-z0-9.-]+-(dump|import)-[0-9]{8}-[0-9]{6}-pod$'
+
+function Get-DuneBackupDumpPods {
+    param([Parameter(Mandatory)][string]$Ip)
+    if($env:DST_HOSTING_BACKEND -eq 'docker'){return @(Get-DuneDockerBackupJobs)}
+    # Stream namespace|name|startTime|phase|ownerKind|ownerName|controller via
+    # jsonpath. Avoids needing jq on the VM. We filter by phase + name regex
+    # here so callers always get a canonical list (terminal dump-* pods only:
+    # Completed/Succeeded plus Failed/Evicted).
+    #
+    # Owner reference info is included because "pod survives a force-delete"
+    # means an owner controller is re-creating it with the same name — we
+    # need to surface WHICH owner so the user can decide whether to delete
+    # that instead. Only the first ownerReference is captured (Kubernetes
+    # allows multiple but a controller-owner is typically singular).
+    #
+    # NOTE: in Kubernetes the actual `.status.phase` value for a finished pod
+    # is "Succeeded" — what kubectl displays as "Completed" in the STATUS
+    # column is a container reason, not the pod phase. We keep the
+    # ==="Completed" check defensively in case Funcom's CRD ever sets it.
+    $jp = '{range .items[*]}{.metadata.namespace}|{.metadata.name}|{.status.startTime}|{.status.phase}|{.metadata.ownerReferences[0].kind}|{.metadata.ownerReferences[0].name}|{.metadata.ownerReferences[0].controller}{"\n"}{end}'
+    $cmd = "sudo kubectl get pods --all-namespaces -o jsonpath='$jp' 2>/dev/null"
+    $raw = $null
+    try {
+        $raw = Invoke-V6Ssh -Ip $Ip -Cmd $cmd -TimeoutSec 25
+    } catch {
+        throw "kubectl get pods failed: $($_.Exception.Message)"
+    }
+    $rows = if ($raw) { (($raw -join "`n") -replace "`r",'') -split "`n" } else { @() }
+    $nowUtc = [datetime]::UtcNow
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($r in $rows) {
+        if (-not $r) { continue }
+        $parts = $r -split '\|', 7
+        if ($parts.Count -lt 4) { continue }
+        $ns    = $parts[0]
+        $name  = $parts[1]
+        $start = $parts[2]
+        $phase = $parts[3]
+        $ownerKind = if ($parts.Count -gt 4) { [string]$parts[4] } else { '' }
+        $ownerName = if ($parts.Count -gt 5) { [string]$parts[5] } else { '' }
+        $ownerCtrl = if ($parts.Count -gt 6) { [string]$parts[6] } else { '' }
+        if ($name -notmatch $script:DuneBackupDumpPodNameRegex) { continue }
+        # Terminal dump-job pods only. "Succeeded"/"Completed" = the dump ran
+        # cleanly; "Failed" = the dump pod was Evicted or errored (e.g. OOM-killed
+        # during a VM memory-pressure event) — those are the leftovers that pile
+        # up worst and were previously left behind by this pruner. Running/Pending
+        # (an in-progress backup) are deliberately excluded so we never delete a
+        # live dump.
+        if ($phase -ne 'Succeeded' -and $phase -ne 'Completed' -and $phase -ne 'Failed') { continue }
+
+        # Parse the timestamp baked into the name (authoritative — survives
+        # status.startTime being cleared on terminal pods) and compute age.
+        $nameTs = Get-DuneBackupDumpPodTimestamp -Name $name
+        $ageMin = if ($nameTs) { [int]($nowUtc - $nameTs).TotalMinutes } else { $null }
+
+        $out.Add([pscustomobject]@{
+            namespace          = $ns
+            name               = $name
+            startTime          = $start
+            phase              = $phase
+            nameTimestamp      = if ($nameTs) { $nameTs.ToString('yyyy-MM-ddTHH:mm:ssZ') } else { $null }
+            ageMinutes         = $ageMin
+            ownerKind          = $ownerKind
+            ownerName          = $ownerName
+            ownerIsController  = ($ownerCtrl -eq 'true')
+        }) | Out-Null
+    }
+    # Sort by the embedded YYYYMMDD-HHMMSS timestamp (newest first). The pool
+    # mixes 'dump' and 'import' pods whose name PREFIX differs, so a plain name
+    # sort would order by type before time — sort on the parsed timestamp so
+    # keep-last-N is chronological across both. Pods with an unparseable name
+    # (shouldn't happen — the regex guarantees the suffix) sort last.
+    return @($out | Sort-Object -Property @{ Expression = { $_.nameTimestamp }; Descending = $true })
+}
+
+# -----------------------------------------------------------------------------
+# Parse the YYYYMMDD-HHMMSS that's baked into every Funcom dump-pod name. Used
+# as the authoritative age signal — the pod name is the only timestamp that
+# survives even when k8s status.startTime is missing/cleared (which happens
+# on some terminal pods). Returns $null if the regex doesn't match.
+# -----------------------------------------------------------------------------
+function Get-DuneBackupDumpPodTimestamp {
+    param([string]$Name)
+    if (-not $Name) { return $null }
+    if ($Name -notmatch '-(?:dump|import)-([0-9]{8})-([0-9]{6})-pod$') { return $null }
+    $date = $Matches[1]; $time = $Matches[2]
+    try {
+        return [datetime]::ParseExact("$date$time", 'yyyyMMddHHmmss', [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeUniversal -bor [System.Globalization.DateTimeStyles]::AdjustToUniversal)
+    } catch {
+        return $null
+    }
+}
+
+# -----------------------------------------------------------------------------
+# Public: prune terminal dump-* pods (Succeeded/Completed + Failed/Evicted).
+# Two independent thresholds:
+#   -KeepLast N   : keep at most the N most-recent pods (0 = no count cap)
+#   -KeepDays D   : also delete anything older than D days (0 = no age cap)
+# A pod survives only if it passes BOTH filters — exceeding either threshold
+# makes it a prune candidate. 0 on a threshold disables that axis (matches
+# the keep-forever convention used by the file-retention setting above).
+#
+# Returns @{ ok; deleted; kept; remaining; output }. Never touches the live
+# DB StatefulSet, util/mon/pghero, file-browser pods, or any pod whose name
+# doesn't match the canonical dump-* shape — the name regex check is
+# authoritative and re-checked before each kubectl delete.
+# -----------------------------------------------------------------------------
+function Remove-DuneBackupDumpPods {
+    param(
+        [Parameter(Mandatory)][string]$Ip,
+        [int]$KeepLast = 5,
+        [int]$KeepDays = 0
+    )
+    if($env:DST_HOSTING_BACKEND -eq 'docker'){return Remove-DuneDockerBackupJobs -KeepLast $KeepLast -KeepDays $KeepDays}
+    if ($KeepLast -lt 0)   { $KeepLast = 0 }
+    if ($KeepLast -gt 100) { $KeepLast = 100 }
+    if ($KeepDays -lt 0)   { $KeepDays = 0 }
+    if ($KeepDays -gt 365) { $KeepDays = 365 }
+
+    $pods = Get-DuneBackupDumpPods -Ip $Ip
+    $total = @($pods).Count
+
+    # Age-filter cutoff. If KeepDays=0 we don't compute a cutoff; nothing is
+    # age-eligible for prune.
+    $ageCutoff = if ($KeepDays -gt 0) { [datetime]::UtcNow.AddDays(-$KeepDays) } else { $null }
+
+    # Walk the list (already sorted newest-first by name) and mark each pod
+    # as kept or to-delete based on both filters.
+    $kept     = New-Object System.Collections.Generic.List[object]
+    $toDelete = New-Object System.Collections.Generic.List[object]
+    $idx = 0
+    foreach ($p in $pods) {
+        $idx++
+        $exceededCount = ($KeepLast -gt 0 -and $idx -gt $KeepLast)
+        $exceededAge = $false
+        if ($ageCutoff) {
+            $ts = Get-DuneBackupDumpPodTimestamp -Name $p.name
+            if ($ts -and $ts -lt $ageCutoff) { $exceededAge = $true }
+        }
+        if ($exceededCount -or $exceededAge) {
+            $toDelete.Add($p) | Out-Null
+        } else {
+            $kept.Add($p) | Out-Null
+        }
+    }
+
+    if ($toDelete.Count -eq 0) {
+        $why = if ($KeepLast -eq 0 -and $KeepDays -eq 0) { 'no limits set' }
+               elseif ($KeepLast -gt 0 -and $KeepDays -gt 0) { "keep last $KeepLast, max age $KeepDays day(s)" }
+               elseif ($KeepLast -gt 0) { "keep last $KeepLast" }
+               else { "max age $KeepDays day(s)" }
+        return @{
+            ok        = $true
+            deleted   = @()
+            kept      = @($kept.ToArray())
+            remaining = @($kept.ToArray())
+            message   = "Found $total backup/restore pod(s); nothing to prune ($why)."
+            output    = ''
+        }
+    }
+
+    # Re-validate every namespace/name we're about to interpolate. Defence in
+    # depth — the jsonpath output should already be clean, but a stale CRD or
+    # webhook could in principle return surprises and we're about to embed
+    # these values into a shell command.
+    #
+    # Each delete prints a status marker so we can tell which actually ran
+    # (and which kubectl rejected, which was a no-op due to --ignore-not-found,
+    # etc.). Markers are easy to parse without changing the existing rc model.
+    $cmds = New-Object System.Collections.Generic.List[string]
+    foreach ($p in $toDelete) {
+        $ns = [string]$p.namespace
+        $nm = [string]$p.name
+        if ($ns -notmatch '^[a-z0-9][a-z0-9.-]{0,253}$') { continue }
+        if ($nm -notmatch $script:DuneBackupDumpPodNameRegex) { continue }
+        $cmds.Add("out=`$(sudo kubectl delete pod -n '${ns}' '${nm}' --ignore-not-found 2>&1); rc=`$?; echo __DST_POD_DEL__:`${rc}:${ns}/${nm}:`${out}") | Out-Null
+    }
+    if ($cmds.Count -eq 0) {
+        return @{
+            ok        = $true
+            deleted   = @()
+            kept      = @($pods)
+            remaining = @($pods)
+            message   = "Found $total backup/restore pod(s); $($kept.Count) retained, $($toDelete.Count) skipped after name validation."
+            output    = ''
+        }
+    }
+    # First pass: graceful delete. Then settle briefly inside the same SSH
+    # session so the API server has propagated the deletes to etcd. Then re-
+    # read to find any that survived (owner-controller recreated, RBAC denied,
+    # stuck-terminating, etc.) and force-delete those.
+    $shellScript = ($cmds -join "`n") + "`nsleep 1`n"
+    $r = Invoke-DuneBackupShell -Ip $Ip -Script $shellScript -TimeoutSec 90
+    if ($r.rc -lt 0) {
+        return @{ ok=$false; status=502; message='SSH to VM failed (no exit code).' }
+    }
+    $firstPassOutput = $r.out
+
+    # Refresh from authoritative source. Retry once if the API hasn't indexed
+    # the deletes yet (count didn't drop at all).
+    $remaining = Get-DuneBackupDumpPods -Ip $Ip
+    if (@($remaining).Count -ge $total) {
+        Start-Sleep -Milliseconds 1500
+        $remaining = Get-DuneBackupDumpPods -Ip $Ip
+    }
+
+    # If pods we tried to delete are STILL in the remaining list, the first
+    # pass failed for those (owner-recreated / stuck terminating / RBAC). Try
+    # a force delete (--force --grace-period=0) which bypasses graceful drain
+    # and finalizers — the only thing that won't bypass is a still-running
+    # controller that re-creates the pod with the same name, which is rare.
+    $remainingNames = @{}
+    foreach ($p in $remaining) { $remainingNames[$p.name] = $true }
+    $survivors = New-Object System.Collections.Generic.List[object]
+    foreach ($p in $toDelete) {
+        if ($remainingNames.ContainsKey($p.name)) { $survivors.Add($p) | Out-Null }
+    }
+    $forceOutput = ''
+    if ($survivors.Count -gt 0) {
+        $forceCmds = New-Object System.Collections.Generic.List[string]
+        foreach ($p in $survivors) {
+            $ns = [string]$p.namespace
+            $nm = [string]$p.name
+            if ($ns -notmatch '^[a-z0-9][a-z0-9.-]{0,253}$') { continue }
+            if ($nm -notmatch $script:DuneBackupDumpPodNameRegex) { continue }
+            $forceCmds.Add("out=`$(sudo kubectl delete pod -n '${ns}' '${nm}' --ignore-not-found --force --grace-period=0 2>&1); rc=`$?; echo __DST_POD_FORCE__:`${rc}:${ns}/${nm}:`${out}") | Out-Null
+        }
+        if ($forceCmds.Count -gt 0) {
+            $forceScript = ($forceCmds -join "`n") + "`nsleep 1`n"
+            $rf = Invoke-DuneBackupShell -Ip $Ip -Script $forceScript -TimeoutSec 90
+            if ($rf.rc -ge 0) {
+                $forceOutput = $rf.out
+                $remaining = Get-DuneBackupDumpPods -Ip $Ip
+            }
+        }
+    }
+
+    # Compare intent vs reality: which intended deletes actually disappeared.
+    $remainingNames = @{}
+    foreach ($p in $remaining) { $remainingNames[$p.name] = $true }
+    $actuallyDeleted = New-Object System.Collections.Generic.List[object]
+    $stillPresent    = New-Object System.Collections.Generic.List[object]
+    foreach ($p in $toDelete) {
+        if ($remainingNames.ContainsKey($p.name)) { $stillPresent.Add($p) | Out-Null }
+        else                                      { $actuallyDeleted.Add($p) | Out-Null }
+    }
+
+    $msg = "Deleted $($actuallyDeleted.Count) of $($toDelete.Count) backup/restore pod(s); $($kept.Count) kept."
+    if ($stillPresent.Count -gt 0) {
+        $names = ($stillPresent | ForEach-Object { $_.name }) -join ', '
+        $msg += " $($stillPresent.Count) survived both delete passes (likely owner-recreated or RBAC-denied): $names. Check kubectl describe."
+    }
+    return @{
+        ok              = $true
+        deleted         = @($actuallyDeleted.ToArray())
+        attempted       = @($toDelete.ToArray())
+        kept            = @($kept.ToArray())
+        remaining       = @($remaining)
+        survivors       = @($stillPresent.ToArray())
+        message         = $msg
+        output          = ($firstPassOutput + "`n" + $forceOutput).Trim()
+    }
+}

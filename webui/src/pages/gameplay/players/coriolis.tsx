@@ -1,0 +1,275 @@
+// CoriolisAdmin — v11.5.7 storm seed inspector + editor.
+//
+// Lives in the Server Overview pane (Players tab, no player selected) so admins
+// can see + override the world-reset seed at three scopes:
+//   - farm   (cascades to every map + partition)
+//   - map    (cascades to that map's partitions)
+//   - partition (single partition only)
+//
+// Backed by /api/gameplay/coriolis/* which wraps Postgres dune.debug_set_*
+// functions. Read endpoint returns 'source: demo' when the live DB is offline
+// or the debug_get_coriolis_seeds() routine isn't available.
+
+import { useEffect, useState } from 'react'
+import { Icon } from '../../../components/Icon'
+import {
+  getCoriolisSeeds, setCoriolisFarmSeed, setCoriolisMapSeed, setCoriolisPartitionSeed,
+  type CoriolisMap, type CoriolisPartition, type DataSource,
+} from '../../../api/gameplay'
+
+type Flash = (msg: string, kind?: 'ok' | 'err') => void
+
+export function CoriolisAdmin({ flash }: { flash: Flash }) {
+  const [loading, setLoading]   = useState(true)
+  const [err, setErr]           = useState<string | null>(null)
+  const [source, setSource]     = useState<DataSource>('demo')
+  const [farmSeed, setFarmSeed] = useState(0)
+  const [maps, setMaps]         = useState<CoriolisMap[]>([])
+  const [parts, setParts]       = useState<CoriolisPartition[]>([])
+  const [busy, setBusy]         = useState(false)
+  const [tick, setTick]         = useState(0)
+  const [unlocked, setUnlocked] = useState(false)
+
+  // Per-scope draft inputs.
+  const [farmDraft, setFarmDraft]               = useState('')
+  const [mapDrafts, setMapDrafts]               = useState<Record<string, string>>({})
+  const [partDrafts, setPartDrafts]             = useState<Record<number, string>>({})
+
+  useEffect(() => {
+    let alive = true
+    setLoading(true); setErr(null)
+    getCoriolisSeeds()
+      .then(r => {
+        if (!alive) return
+        setSource(r.source)
+        setFarmSeed(r.farm_seed)
+        setMaps(r.maps || [])
+        setParts(r.partitions || [])
+        setFarmDraft(String(r.farm_seed))
+        const md: Record<string, string> = {}
+        for (const m of r.maps || []) md[m.map] = String(m.seed)
+        setMapDrafts(md)
+        const pd: Record<number, string> = {}
+        for (const p of r.partitions || []) pd[p.partition_id] = String(p.seed)
+        setPartDrafts(pd)
+      })
+      .catch(e => { if (alive) setErr(e instanceof Error ? e.message : String(e)) })
+      .finally(() => { if (alive) setLoading(false) })
+    return () => { alive = false }
+  }, [tick])
+
+  const run = async (fn: () => Promise<{ message: string }>, label: string) => {
+    setBusy(true)
+    try {
+      const r = await fn()
+      flash(r.message || `${label} done.`, 'ok')
+      setTick(t => t + 1)
+    } catch (e) {
+      flash(e instanceof Error ? e.message : String(e), 'err')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const applyFarm = () => {
+    const seed = Number(farmDraft)
+    if (!Number.isFinite(seed) || seed < -1 || seed > 11) return flash('Farm seed must be -1 (auto) or 0-11.', 'err')
+    if (!confirm(`Set FARM coriolis seed to ${seed}?\n\nThis cascades to every map + partition and (when changed) cleans up corpses / coriolis-affected loose state.`)) return
+    run(() => setCoriolisFarmSeed(seed), 'Set farm seed')
+  }
+  const applyMap = (map: string) => {
+    const seed = Number(mapDrafts[map])
+    if (!Number.isFinite(seed) || seed < -1 || seed > 11) return flash(`Map seed for ${map} must be -1 (auto) or 0-11.`, 'err')
+    if (!confirm(`Set MAP "${map}" coriolis seed to ${seed}?\n\nCascades to that map's partitions.`)) return
+    run(() => setCoriolisMapSeed(map, seed), `Set ${map} seed`)
+  }
+  const applyPart = (p: CoriolisPartition) => {
+    const seed = Number(partDrafts[p.partition_id])
+    if (!Number.isFinite(seed) || seed < -1 || seed > 11) return flash(`Partition seed must be -1 (auto) or 0-11.`, 'err')
+    if (!confirm(`Set PARTITION ${p.partition_id} (${p.map}) coriolis seed to ${seed}?`)) return
+    run(() => setCoriolisPartitionSeed(p.partition_id, seed), `Set partition ${p.partition_id} seed`)
+  }
+  const reroll = () => {
+    const seed = Math.floor(Math.random() * 12)
+    setFarmDraft(String(seed))
+  }
+  const stay = () => setFarmDraft(String(farmSeed))
+  // Revert every scope (farm + all maps + all partitions) to the game default
+  // (-1 = no forced seed / auto). The farm write already cascades to every map
+  // and partition, so a single -1 farm apply clears them all.
+  const resetAllDefault = () => {
+    if (!confirm('Reset ALL Coriolis seeds — farm, every map, and every partition — to game default (-1 = auto)?\n\nThis clears every forced seed so the game picks layouts on its own. Where a seed actually changes, the next storm tick runs the usual cleanup. No undo.')) return
+    run(() => setCoriolisFarmSeed(-1), 'Reset all seeds to game default')
+  }
+
+  if (loading) {
+    return (
+      <div className="card p-4 text-sm text-text-dim flex items-center gap-2">
+        <Icon name="Loader2" size={13} className="animate-spin" /> Loading coriolis storm seeds…
+      </div>
+    )
+  }
+  if (err) {
+    return <div className="card p-3 text-sm text-danger">Coriolis: {err}</div>
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2 text-xs uppercase tracking-wider text-text-dim">
+          {source === 'demo' && (
+            <span className="ml-2 px-1.5 py-0.5 rounded bg-warning/10 text-warning text-[10px] uppercase">demo</span>
+          )}
+        </div>
+        <button className="btn-secondary text-[11px]" disabled={busy} onClick={() => setTick(t => t + 1)}>
+          <Icon name="RefreshCw" size={11} /> Refresh
+        </button>
+      </div>
+
+      <p className="text-xs text-text-dim">
+        These rows are the game's <strong>output</strong>, not its input. When a map loads, the game
+        writes its own derived seed over the farm, map and partition rows — so a value recorded here
+        survives only until that map next loads. To pin a layout for good, use{' '}
+        <strong>Game Config → Storm Cycle → Forced Coriolis World Seed</strong> (-1 = automatic, a new
+        layout each Coriolis cycle; 0–11 = pin one of the twelve fixed layouts, server-wide). Values
+        recorded below are still useful for a map that is not currently running. Valid seeds are
+        <strong>0–11</strong>; enter <strong>-1</strong> to clear a recorded seed.
+      </p>
+
+      {/* Severe-consequences warning + lock gate. These settings rewrite world-reset
+          generation and cascade cleanup of corpses / loose loot — there is no undo. */}
+      <div className="rounded-lg border border-danger/40 bg-danger/10 p-3 text-xs space-y-1.5">
+        <div className="flex items-center gap-2 font-semibold text-danger">
+          <Icon name="AlertTriangle" size={14} /> Advanced — world-altering. Severe consequences if misused.
+        </div>
+        <p className="text-text-dim">
+          These are <strong className="text-text">world-reset (Coriolis storm) seed records</strong>. A
+          recorded seed is not applied on its own — the game replaces it with its own layout when the
+          map next loads. Where a seed does take effect, the world regenerates and{' '}
+          <strong className="text-text">corpses and loose loot are cleared</strong>; farm scope touches
+          every map and partition. There is <strong className="text-text">no undo</strong>. To pin a
+          layout deliberately, set <strong className="text-text">Forced Coriolis World Seed</strong> in
+          Game Config instead. If you don't know exactly what these do, leave them alone.
+        </p>
+        {unlocked ? (
+          <button className="btn-secondary text-xs" disabled={busy} onClick={() => setUnlocked(false)}>
+            <Icon name="Lock" size={12} /> Lock controls
+          </button>
+        ) : (
+          <button
+            className="btn-secondary text-xs text-danger border-danger/50"
+            disabled={busy}
+            onClick={() => {
+              if (confirm('Unlock Coriolis storm seed controls?\n\nThese rewrite world-reset generation and wipe corpses / loose loot when a seed changes. There is no undo. Only continue if you fully understand the consequences.')) {
+                setUnlocked(true)
+              }
+            }}
+          >
+            <Icon name="Unlock" size={12} /> I understand the risks — unlock controls
+          </button>
+        )}
+      </div>
+
+      {unlocked && (<>
+      {/* Farm scope — applies to every map + partition at once */}
+      <div className="rounded-lg border border-border bg-surface-2/40 p-3 space-y-2">
+        <div className="flex items-center justify-between">
+          <div className="text-sm font-medium text-text">Farm — all maps + partitions</div>
+          <div className="font-mono text-xs text-text-dim">current: {farmSeed}</div>
+        </div>
+        <div className="flex items-center gap-2">
+          <input
+            type="number"
+            min={-1}
+            max={11}
+            value={farmDraft}
+            onChange={e => setFarmDraft(e.target.value)}
+            disabled={busy}
+            className="flex-1 px-3 py-2 rounded-lg bg-surface border border-border text-text text-sm font-mono focus:outline-none focus:ring-2 focus:ring-ibad focus:border-ibad/50"
+            placeholder="seed"
+          />
+          <button className="btn-secondary text-xs" disabled={busy} onClick={reroll} title="Pick a fresh random seed">
+            <Icon name="Shuffle" size={12} /> Reroll
+          </button>
+          <button className="btn-secondary text-xs" disabled={busy} onClick={stay} title="Reset draft to current seed (no change on apply)">
+            <Icon name="Lock" size={12} /> Stay
+          </button>
+          <button className="btn-primary text-xs" disabled={busy || farmDraft === ''} onClick={applyFarm} title="Stamp this seed onto every map and partition">
+            <Icon name="Check" size={12} /> Apply to all
+          </button>
+        </div>
+        <div className="flex items-center justify-between gap-2 pt-1 border-t border-border/60">
+          <p className="text-[11px] text-text-dim">
+            Clear every forced seed (farm + all maps + all partitions) back to the game default.
+          </p>
+          <button
+            className="btn-secondary text-xs text-warning border-warning/40"
+            disabled={busy}
+            onClick={resetAllDefault}
+            title="Set farm, every map, and every partition back to -1 (auto)"
+          >
+            <Icon name="RotateCcw" size={12} /> Reset all to game default
+          </button>
+        </div>
+      </div>
+
+      {/* Per-map scope */}
+      {maps.length > 0 && (
+        <div className="rounded-lg border border-border bg-surface-2/40 p-3 space-y-2">
+          <div className="text-sm font-medium text-text">Per map</div>
+          <div className="space-y-2">
+            {maps.map(m => (
+              <div key={m.map} className="flex items-center gap-2">
+                <div className="w-32 text-xs text-text truncate" title={m.map}>{m.map}</div>
+                <span className="font-mono text-[11px] text-text-dim w-24">cur: {m.seed}</span>
+                <input
+                  type="number"
+                  min={-1}
+                  max={11}
+                  value={mapDrafts[m.map] ?? ''}
+                  onChange={e => setMapDrafts(d => ({ ...d, [m.map]: e.target.value }))}
+                  disabled={busy}
+                  className="flex-1 px-3 py-1.5 rounded-lg bg-surface border border-border text-text text-sm font-mono focus:outline-none focus:ring-2 focus:ring-ibad focus:border-ibad/50"
+                />
+                <button className="btn-secondary text-xs" disabled={busy} onClick={() => applyMap(m.map)}>
+                  <Icon name="Check" size={11} /> Apply
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Per-partition scope */}
+      {parts.length > 0 && (
+        <details className="rounded-lg border border-border bg-surface-2/40 p-3">
+          <summary className="text-sm font-medium text-text cursor-pointer select-none">
+            Per partition ({parts.length})
+          </summary>
+          <div className="mt-2 space-y-2 max-h-72 overflow-y-auto pr-1">
+            {parts.map(p => (
+              <div key={p.partition_id} className="flex items-center gap-2">
+                <div className="w-12 text-xs text-text-dim font-mono">#{p.partition_id}</div>
+                <div className="w-28 text-xs text-text truncate" title={p.map}>{p.map}</div>
+                <span className="font-mono text-[11px] text-text-dim w-24">cur: {p.seed}</span>
+                <input
+                  type="number"
+                  min={-1}
+                  max={11}
+                  value={partDrafts[p.partition_id] ?? ''}
+                  onChange={e => setPartDrafts(d => ({ ...d, [p.partition_id]: e.target.value }))}
+                  disabled={busy}
+                  className="flex-1 px-3 py-1.5 rounded-lg bg-surface border border-border text-text text-sm font-mono focus:outline-none focus:ring-2 focus:ring-ibad focus:border-ibad/50"
+                />
+                <button className="btn-secondary text-xs" disabled={busy} onClick={() => applyPart(p)}>
+                  <Icon name="Check" size={11} /> Apply
+                </button>
+              </div>
+            ))}
+          </div>
+        </details>
+      )}
+      </>)}
+    </div>
+  )
+}

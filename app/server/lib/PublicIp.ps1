@@ -1,0 +1,1704 @@
+﻿# PublicIp - Settings-driven public IP / DDNS switch.
+
+# Server dir captured at lib load time so the async apply runspace (and the API
+# pool runspaces) don't depend on $script:DuneServerDir being set in their
+# runspace. $PSScriptRoot here is server/lib, so server/ is one level up. Same
+# pattern as GameplayBot.ps1.
+$script:DunePublicIpServerDir = $null
+try {
+    if ($PSScriptRoot -and (Test-Path -LiteralPath $PSScriptRoot)) {
+        $candidate = Split-Path -Parent $PSScriptRoot
+        if ($candidate -and (Test-Path -LiteralPath $candidate)) { $script:DunePublicIpServerDir = $candidate }
+    }
+} catch {}
+
+# ----------------------------------------------------------------------------
+# Apply progress state file. The apply is a multi-minute, destructive operation
+# (rewrites VM network config, settings.conf, K3s node, NAT, restarts the
+# battlegroup). It runs in a dedicated background runspace and streams its
+# per-step progress to this file so the UI can poll it without holding the
+# request open. Surviving on disk also means a browser reload / force-close /
+# brief disconnect mid-apply resumes showing live progress instead of a dead
+# spinner.
+# ----------------------------------------------------------------------------
+function Get-DunePublicIpApplyStatePath {
+    Join-Path $env:APPDATA 'DuneServer\public-ip-apply-state.json'
+}
+
+function New-DunePublicIpApplyIdleState {
+    return @{ phase = 'idle'; running = $false; steps = @(); updated = (Get-Date).ToUniversalTime().ToString('o') }
+}
+
+function Read-DunePublicIpApplyState {
+    $path = Get-DunePublicIpApplyStatePath
+    if (-not (Test-Path -LiteralPath $path)) { return (New-DunePublicIpApplyIdleState) }
+    try {
+        $raw = Get-Content -LiteralPath $path -Raw -ErrorAction Stop
+        if ([string]::IsNullOrWhiteSpace($raw)) { return (New-DunePublicIpApplyIdleState) }
+        return ($raw | ConvertFrom-Json)
+    } catch {
+        return (New-DunePublicIpApplyIdleState)
+    }
+}
+
+function Save-DunePublicIpApplyState {
+    param([Parameter(Mandatory)]$State)
+    $path = Get-DunePublicIpApplyStatePath
+    $dir  = Split-Path -Parent $path
+    try { if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null } } catch {}
+    $json = $State | ConvertTo-Json -Depth 8
+    $tmp  = "$path.tmp"
+    $write = {
+        Set-Content -LiteralPath $tmp -Value $json -Encoding UTF8 -Force
+        Move-Item -LiteralPath $tmp -Destination $path -Force
+    }
+    # Serialize concurrent writers (worker + a stop request) when the named-lock
+    # helper is available; otherwise best-effort direct write.
+    if (Get-Command Invoke-WithDuneLock -ErrorAction SilentlyContinue) {
+        try { Invoke-WithDuneLock -Name 'public-ip-apply-state' -TimeoutSec 5 -Script $write } catch { & $write }
+    } else { & $write }
+}
+
+function Get-DunePublicIpApplyStatus {
+    # Self-heal a stale 'running' flag: if the worker crashed hard (or the tool
+    # was killed) the file can be stuck running. Treat a run with no update for
+    # >15 min as failed so the UI's Apply button re-enables.
+    $st = Read-DunePublicIpApplyState
+    try {
+        $running = $false
+        if ($st -is [hashtable]) { $running = [bool]$st['running'] } else { $running = [bool]$st.running }
+        if ($running) {
+            $updated = if ($st -is [hashtable]) { $st['updated'] } else { $st.updated }
+            $dtu = $null
+            if ($updated -is [datetime]) {
+                $dtu = if (([datetime]$updated).Kind -eq [System.DateTimeKind]::Utc) { [datetime]$updated } else { ([datetime]$updated).ToUniversalTime() }
+            } elseif ($updated) {
+                $parsed = [datetime]::MinValue
+                if ([datetime]::TryParse([string]$updated, $null, [System.Globalization.DateTimeStyles]::RoundtripKind, [ref]$parsed)) {
+                    $dtu = if ($parsed.Kind -eq [System.DateTimeKind]::Utc) { $parsed } else { $parsed.ToUniversalTime() }
+                }
+            }
+            if ($dtu -and (((Get-Date).ToUniversalTime() - $dtu).TotalMinutes -gt 15)) {
+                    $st = @{
+                        phase = 'error'; running = $false
+                        steps = @(if ($st -is [hashtable]) { $st['steps'] } else { $st.steps })
+                        error = 'Apply stalled (no progress for over 15 minutes). It may have crashed; re-check the server before retrying.'
+                        updated = (Get-Date).ToUniversalTime().ToString('o')
+                        finished = (Get-Date).ToUniversalTime().ToString('o')
+                    }
+                    Save-DunePublicIpApplyState -State $st
+                }
+            }
+    } catch {}
+    return $st
+}
+
+function Test-DuneIPv4Literal {
+    param([string]$Ip)
+    if ([string]::IsNullOrWhiteSpace($Ip)) { return $false }
+    if ($Ip -notmatch '^(?:\d{1,3}\.){3}\d{1,3}$') { return $false }
+    foreach ($p in @($Ip -split '\.')) {
+        if ($p -notmatch '^\d+$') { return $false }
+        $n = [int]$p
+        if ($n -lt 0 -or $n -gt 255) { return $false }
+    }
+    return $true
+}
+
+function Test-DunePublicIPv4 {
+    param([string]$Ip)
+    if (-not (Test-DuneIPv4Literal -Ip $Ip)) {
+        return @{ ok = $false; status = 400; message = 'Enter a valid IPv4 address, for example 8.8.8.8.' }
+    }
+    $parts = @($Ip -split '\.' | ForEach-Object { [int]$_ })
+    $a = $parts[0]; $b = $parts[1]
+    if ($a -eq 0 -or $a -eq 255) { return @{ ok=$false; status=400; message='Public IP cannot be unspecified, broadcast, or reserved.' } }
+    if ($a -eq 10 -or ($a -eq 172 -and $b -ge 16 -and $b -le 31) -or ($a -eq 192 -and $b -eq 168)) {
+        return @{ ok=$false; status=400; message='Public IP cannot be a private LAN address.' }
+    }
+    if ($a -eq 127) { return @{ ok=$false; status=400; message='Public IP cannot be a loopback address.' } }
+    if ($a -eq 169 -and $b -eq 254) { return @{ ok=$false; status=400; message='Public IP cannot be a link-local address.' } }
+    if ($a -eq 100 -and $b -ge 64 -and $b -le 127) { return @{ ok=$false; status=400; message='Public IP cannot be a carrier-grade NAT address.' } }
+    if ($a -ge 224) { return @{ ok=$false; status=400; message='Public IP cannot be multicast or reserved.' } }
+    if (($a -eq 192 -and $b -eq 0) -or ($a -eq 198 -and ($b -eq 18 -or $b -eq 19)) -or ($a -eq 198 -and $b -eq 51) -or ($a -eq 203 -and $b -eq 0)) {
+        return @{ ok=$false; status=400; message='Public IP cannot be documentation, benchmark, or reserved address space.' }
+    }
+    return @{ ok = $true; ip = $Ip }
+}
+
+function Test-DunePublicIpUnchanged {
+    param([string]$PublicIp)
+    $cfg = Read-DuneConfig
+    if ($cfg.LastAppliedPublicIp -and $cfg.LastAppliedPublicIp -eq $PublicIp) {
+        return @{ ok=$false; status=409; message="Target IP is unchanged ($PublicIp)." }
+    }
+    return @{ ok=$true }
+}
+
+function Assert-DuneManualPublicIp {
+    param([string]$PublicIp, [switch]$AllowUnchanged)
+    $ip = ([string]$PublicIp).Trim()
+    $v = Test-DunePublicIPv4 -Ip $ip
+    if (-not $v.ok) { return $v }
+    if (-not $AllowUnchanged.IsPresent) {
+        $u = Test-DunePublicIpUnchanged -PublicIp $ip
+        if (-not $u.ok) { return $u }
+    }
+    return @{ ok=$true; publicIp=$ip }
+}
+
+function Test-DuneDdnsHostname {
+    param([string]$Hostname)
+    $h = ([string]$Hostname).Trim().ToLowerInvariant()
+    if ([string]::IsNullOrWhiteSpace($h)) { return @{ ok=$false; status=400; message='Enter a DDNS hostname.' } }
+    if ($h.Length -gt 253 -or $h -notmatch '^[a-z0-9][a-z0-9.-]*[a-z0-9]$' -or $h -match '\.\.' -or $h -notmatch '\.') {
+        return @{ ok=$false; status=400; message='Enter a valid hostname, for example your-server.ddns.net.' }
+    }
+    foreach ($label in @($h -split '\.')) {
+        if ($label.Length -lt 1 -or $label.Length -gt 63 -or $label -notmatch '^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$') {
+            return @{ ok=$false; status=400; message='Enter a valid hostname. Labels may contain letters, numbers, and hyphens.' }
+        }
+    }
+    return @{ ok=$true; hostname=$h }
+}
+
+# Gather A records for a hostname using whichever method first yields an
+# answer. The system resolver is tried first, then direct queries to public
+# resolvers (1.1.1.1 / 8.8.8.8). Querying a specific -Server bypasses the
+# Windows DNS Client cache, so a momentary negative answer cached right after
+# a network/IP change (DDNS providers like No-IP use very low TTLs and lag a
+# few seconds to propagate) cannot keep poisoning subsequent lookups. A final
+# .NET GetHostAddresses pass covers hosts-file / odd-resolver setups.
+function Get-DuneHostnameIPv4Records {
+    param([string]$Name)
+    $sources = @(
+        { Resolve-DnsName -Name $Name -Type A -DnsOnly -NoHostsFile -ErrorAction Stop }
+        { Resolve-DnsName -Name $Name -Type A -Server '1.1.1.1' -DnsOnly -NoHostsFile -ErrorAction Stop }
+        { Resolve-DnsName -Name $Name -Type A -Server '8.8.8.8' -DnsOnly -NoHostsFile -ErrorAction Stop }
+    )
+    foreach ($src in $sources) {
+        try {
+            $ips = @(& $src |
+                Where-Object { $_.IPAddress } |
+                Select-Object -ExpandProperty IPAddress -Unique)
+            if ($ips.Count -gt 0) { return $ips }
+        } catch { }
+    }
+    try {
+        return @([System.Net.Dns]::GetHostAddresses($Name) |
+            Where-Object { $_.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork } |
+            ForEach-Object { $_.ToString() } |
+            Select-Object -Unique)
+    } catch { return @() }
+}
+
+function Resolve-DunePublicIpHostname {
+    param([string]$Hostname)
+    $hv = Test-DuneDdnsHostname -Hostname $Hostname
+    if (-not $hv.ok) { return $hv }
+    # Retry a few times: a lookup fired immediately after an IP/network change
+    # can briefly return nothing before the DDNS record propagates. Without the
+    # retry the user sees a spurious "did not resolve" until the answer settles.
+    $records = @()
+    for ($attempt = 1; $attempt -le 4; $attempt++) {
+        $records = @(Get-DuneHostnameIPv4Records -Name $hv.hostname)
+        if ($records.Count -gt 0) { break }
+        if ($attempt -lt 4) { Start-Sleep -Milliseconds 1200 }
+    }
+    if ($records.Count -lt 1) {
+        return @{ ok=$false; status=400; message="Could not resolve hostname '$($hv.hostname)' to an IPv4 address." }
+    }
+    $public = @()
+    foreach ($r in $records) {
+        $v = Test-DunePublicIPv4 -Ip ([string]$r)
+        if ($v.ok) { $public += $v.ip }
+    }
+    $public = @($public | Select-Object -Unique)
+    if ($public.Count -lt 1) {
+        return @{ ok=$false; status=400; message="Hostname '$($hv.hostname)' did not resolve to a usable public IPv4 address."; candidates=@($records) }
+    }
+    return @{ ok=$true; hostname=$hv.hostname; publicIp=$public[0]; candidates=@($public) }
+}
+
+function Save-DunePublicIpHostname {
+    param([string]$Hostname)
+    $hv = Test-DuneDdnsHostname -Hostname $Hostname
+    if (-not $hv.ok) { return $hv }
+
+    $save = {
+        Save-DuneConfig -Config @{
+            PublicIpMode = 'ddns'
+            DdnsHostname = $hv.hostname
+        } | Out-Null
+    }
+    if (Get-Command Invoke-WithDuneLock -ErrorAction SilentlyContinue) {
+        Invoke-WithDuneLock -Name 'config' -Script $save | Out-Null
+    } else {
+        & $save
+    }
+    return @{ ok=$true; hostname=$hv.hostname }
+}
+
+function New-DuneSettingsConfText {
+    param(
+        [Parameter(Mandatory)][string]$Battlegroup,
+        [Parameter(Mandatory)][string]$Image,
+        [Parameter(Mandatory)][string]$VmIp,
+        [Parameter(Mandatory)][string]$PublicIp
+    )
+    $bg = $Battlegroup.Trim()
+    $img = $Image.Trim()
+    $vm = $VmIp.Trim()
+    $pub = $PublicIp.Trim()
+    if (-not $bg) { throw 'Battlegroup name is empty.' }
+    if ($img -notmatch '^registry\.funcom\.com/funcom/self-hosting/seabass-server:[^\s]+$') {
+        throw "Funcom image is not a single seabass-server image string: $img"
+    }
+    if (-not (Test-DuneIPv4Literal -Ip $vm)) { throw "VM IP is invalid: $vm" }
+    $pv = Test-DunePublicIPv4 -Ip $pub
+    if (-not $pv.ok) { throw $pv.message }
+    return "$bg`n$img`n$vm`n$pub`n"
+}
+
+function Test-DuneAdminElevated {
+    try {
+        $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+        $principal = [Security.Principal.WindowsPrincipal]::new($id)
+        return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    } catch { return $false }
+}
+
+function ConvertTo-DuneBashSingleQuoted {
+    param([AllowNull()][string]$Value)
+    if ($null -eq $Value) { $Value = '' }
+    return "'" + ([string]$Value -replace "'", "'\''") + "'"
+}
+
+function Invoke-DunePublicIpRemoteScript {
+    param([string]$Ip, [string]$Script, [string[]]$Arguments = @(), [int]$TimeoutSec = 120)
+    $argText = (@($Arguments) | ForEach-Object { ConvertTo-DuneBashSingleQuoted $_ }) -join ' '
+    $cmd = "tmp=/tmp/dst-public-ip-`$`$-`$RANDOM.sh; cat > `$tmp; chmod 700 `$tmp; /bin/sh `$tmp $argText 2>&1; code=`$?; echo __DST_EXIT__:`$code; rm -f `$tmp; exit 0"
+    $out = Invoke-V6Ssh -Ip $Ip -Cmd $cmd -StdinData ($Script -replace "`r`n","`n") -TimeoutSec $TimeoutSec
+    $text = (($out -join "`n")).Trim()
+    if ($text -notmatch '(?m)^__DST_EXIT__:(\d+)\s*$') {
+        throw "Remote script did not report an exit code. Output: $text"
+    }
+    $code = [int]$Matches[1]
+    $clean = (($text -split "`n") | Where-Object { $_ -notmatch '^__DST_EXIT__:\d+\s*$' }) -join "`n"
+    $clean = $clean.Trim()
+    if ($code -ne 0) { throw "Remote script failed with exit $code. Output: $clean" }
+    return $clean
+}
+
+function Invoke-DunePublicIpWatchdogRefresh {
+    param([Parameter(Mandatory)][string]$Ip)
+    $installerPath = Join-Path $PSScriptRoot '..\..\resources\remote-scripts\dune-dnat-watch-install.sh'
+    if (-not (Test-Path -LiteralPath $installerPath -PathType Leaf)) {
+        throw 'Bundled forwarding helper is missing. Repair the DST installation before updating the IP.'
+    }
+    $installer = [IO.File]::ReadAllText($installerPath) -replace "`r", ''
+    $payload = "sudo -n sh -s <<'DST_DNAT_INSTALLER'`n" + $installer + "`nDST_DNAT_INSTALLER`n"
+    $raw = Invoke-DunePublicIpRemoteScript -Ip $Ip -Script $payload -TimeoutSec 45
+    if ($raw -notmatch '(?m)^DUNE_DNAT_WATCH_OK\s*$') {
+        throw 'Forwarding helper refresh did not verify healthy. The IP update was stopped before changing network settings.'
+    }
+    return $raw
+}
+
+function New-DunePublicIpStepResult {
+    param([string]$Id, [string]$Label, [string]$Status, [string]$Detail = '', [string]$Raw = '')
+    return @{ id=$Id; label=$Label; status=$Status; detail=$Detail; raw=$Raw }
+}
+
+function Get-DunePublicIpStatus {
+    $cfg = Read-DuneConfig
+    $vm = $null
+    try { $vm = Get-DuneVmStatus } catch {}
+    $status = @{
+        mode                = if ($cfg.PublicIpMode -eq 'manual') { 'manual' } else { 'ddns' }
+        hostname            = [string]$cfg.DdnsHostname
+        manualPublicIp      = [string]$cfg.ManualPublicIp
+        lastResolvedPublicIp= [string]$cfg.LastResolvedPublicIp
+        lastAppliedPublicIp = [string]$cfg.LastAppliedPublicIp
+        hostRouteEnabled    = Get-DunePublicIpHostRouteEnabled
+        currentPublicIp     = $null
+        vmIp                = if ($vm) { [string]$vm.ip } else { '' }
+        k3sExternalIp       = ''
+    }
+    try { $status.currentPublicIp = Get-DunePublicIp } catch {}
+    if ($vm -and $vm.running -and $vm.ip) {
+        try {
+            $raw = Invoke-V6Ssh -Ip $vm.ip -Cmd "sudo kubectl get node -o jsonpath='{range .items[0].status.addresses[?(@.type==`"ExternalIP`")]}{.address}{end}' 2>/dev/null" -TimeoutSec 15
+            $status.k3sExternalIp = (($raw -join '').Trim())
+        } catch {}
+    }
+    return $status
+}
+
+function Resolve-DunePublicIpDiagnosticTarget {
+    param(
+        $Config,
+        [string]$VmDetectedIp = '',
+        [string]$HostDetectedIp = ''
+    )
+    # Diagnose against a live observation, not the saved value being checked.
+    if ($VmDetectedIp -and (Test-DunePublicIPv4 -Ip $VmDetectedIp).ok) { return @{ ip = $VmDetectedIp; source = 'vm' } }
+    if ($HostDetectedIp -and (Test-DunePublicIPv4 -Ip $HostDetectedIp).ok) { return @{ ip = $HostDetectedIp; source = 'host' } }
+    $manualIp = ''
+    try {
+        if ($Config.PublicIpMode -eq 'manual') { $manualIp = ([string]$Config.ManualPublicIp).Trim() }
+    } catch {}
+    if ($manualIp -and (Test-DunePublicIPv4 -Ip $manualIp).ok) {
+        return @{ ip = $manualIp; source = 'manual' }
+    }
+    $lastApplied = ''
+    try { $lastApplied = ([string]$Config.LastAppliedPublicIp).Trim() } catch {}
+    if ($lastApplied) { return @{ ip = $lastApplied; source = 'last-applied' } }
+    return @{ ip = ''; source = $null }
+}
+
+# ----------------------------------------------------------------------------
+# P34 connectivity diagnostic.
+# "P34 / Connection Request Timed Out" AFTER the server is visible in the
+# in-game browser (FLS auth fine, no 403002) is, on self-hosted servers, almost
+# always a STALE PUBLIC IP: the game servers advertise an old external IPv4 to
+# clients in dune.farm_state.game_addr, so clients dial the wrong address and
+# time out. This compares the VM's real current public IP (ipify, from inside
+# the VM) against what the maps actually advertise (farm_state) and the K3s
+# ExternalIP, and names the mismatch. The fix is the Public IP apply flow in
+# this same Settings card, which rewrites the battlegroup CR + K3s ExternalIP
+# and restarts the servers so they re-register farm_state with the right IP.
+# ----------------------------------------------------------------------------
+function Get-DuneWidgetStatus {
+    # One narrow game-state read shared by all widget viewers. No diagnostics,
+    # inventory projection or autonomous refresh worker.
+    Invoke-DunePlatformSingleFlight -Key 'widget:status' -ResultReuseSec 15 -TimeoutSec 15 -Script {
+        $ctx = Get-DuneDbContext -SkipGuestRecovery
+        if (-not $ctx.ok) { throw $ctx.message }
+        $csv = Invoke-DuneSqlRaw -Ip $ctx.ip -Sql 'SELECT map, ready, alive, server_id IN (SELECT * FROM dune.active_server_ids) AS is_current FROM dune.farm_state ORDER BY map;' -Csv -TimeoutSec 10
+        if (Test-DunePsqlError -Output $csv) { throw (Get-DunePsqlErrorMessage -Output $csv) }
+        $rows = @($csv -split "`r?`n" | Where-Object { $_ -ne '' } | ConvertFrom-Csv)
+        $maps = @(foreach ($group in ($rows | Group-Object map)) {
+            $current = @($group.Group | Where-Object { [string]$_.is_current -eq 't' })
+            if (-not $current.Count) {
+                # Retired instances are history, not additional live maps. Keep
+                # core-map outages visible even when their DB session is gone.
+                if ($group.Name -in @('DeepDesert_1', 'Overmap', 'Survival_1')) {
+                    @{ map = [string]$group.Name; ready = $false; alive = $false }
+                }
+                continue
+            }
+            # Prefer a healthy current instance, without combining readiness
+            # from one server with liveness from a different server.
+            $chosen = $current | Sort-Object @{ Expression = { [string]$_.alive -eq 't' }; Descending = $true }, @{ Expression = { [string]$_.ready -eq 't' }; Descending = $true } | Select-Object -First 1
+            @{ map = [string]$group.Name; ready = ([string]$chosen.ready -eq 't'); alive = ([string]$chosen.alive -eq 't') }
+        })
+        return @{ observedAt = [DateTime]::UtcNow.ToString('o'); maps = $maps }
+    }
+}
+
+function Get-DuneP34Diagnostic {
+    $result = [ordered]@{
+        ok             = $false
+        reachable      = $false
+        vmIp           = $null
+        vmPublicIp     = $null
+        publicIpSource = $null
+        k3sExternalIp  = $null
+        datacenterIps      = @()
+        datacenterPrivate  = $false
+        datacenterStale    = $false
+        maps           = @()
+        advertisedIps  = @()
+        igwAddrs       = @()
+        igwSuspect     = $false
+        staleFarmIp    = $false
+        staleK3sIp     = $false
+        vmPublicIpUsable = $false
+        serversReady   = $true
+        verdict        = 'unknown'
+        summary        = $null
+        error          = $null
+    }
+
+    if (-not (Get-Command Get-DuneDbContext -ErrorAction SilentlyContinue) -or
+        -not (Get-Command Invoke-DuneSqlRaw -ErrorAction SilentlyContinue) -or
+        -not (Get-Command Invoke-V6Ssh -ErrorAction SilentlyContinue)) {
+        $result.error = 'Server/DB helpers unavailable.'
+        $result.summary = $result.error
+        return $result
+    }
+
+    $ctx = $null
+    try { $ctx = Get-DuneDbContext } catch { $result.error = $_.Exception.Message; $result.summary = $result.error; return $result }
+    if (-not $ctx.ok) {
+        $result.error = $ctx.message
+        $result.summary = $ctx.message
+        return $result
+    }
+    $result.reachable = $true
+    $result.vmIp = [string]$ctx.ip
+
+    $cfg = $null
+    try { $cfg = Read-DuneConfig } catch {}
+
+    # 1) VM-side egress IP + K3s ExternalIP, one SSH round trip. A saved manual
+    # address must not hide a changed internet IP from this diagnostic.
+    $probe = @'
+get_ip() {
+  for url in https://api.ipify.org https://checkip.amazonaws.com https://ifconfig.me https://icanhazip.com; do
+    ip=$(wget -qO- --timeout=6 "$url" 2>/dev/null | tr -d "[:space:]")
+    [ -z "$ip" ] && ip=$(curl -fsS --max-time 6 "$url" 2>/dev/null | tr -d "[:space:]")
+    case "$ip" in
+      [0-9]*.[0-9]*.[0-9]*.[0-9]*) echo "$ip"; return 0 ;;
+    esac
+  done
+}
+PUB=$(get_ip)
+EXT=$(sudo kubectl get node -o jsonpath='{range .items[0].status.addresses[?(@.type=="ExternalIP")]}{.address}{end}' 2>/dev/null)
+echo "PUB=$PUB"
+echo "EXT=$EXT"
+# HOST_DATACENTER_IP_ADDRESS = the address the director advertises to clients on
+# every boot. It is pinned into the battlegroup CR at setup ("Private" vs
+# "External"); if it is a private/LAN address, outside players are handed an
+# unreachable address and time out into P34. Read every distinct value from the
+# CR so we can flag a pinned-private / stale datacenter IP independently of the
+# game DB (works even when the servers are down or farm_state is empty).
+BG=$(sudo kubectl get battlegroup -A --no-headers -o custom-columns=:metadata.name 2>/dev/null | head -1)
+NS=$(sudo kubectl get battlegroup -A --no-headers -o custom-columns=:metadata.namespace 2>/dev/null | head -1)
+if [ -n "$BG" ] && [ -n "$NS" ] && command -v jq >/dev/null 2>&1; then
+  DC=$(sudo kubectl get battlegroup "$BG" -n "$NS" -o json 2>/dev/null | jq -r '[.. | objects | select(.name=="HOST_DATACENTER_IP_ADDRESS") | .value] | map(select(. != null and . != "")) | unique | join(",")' 2>/dev/null)
+  echo "DC=$DC"
+fi
+'@ -replace "`r", ''
+    $vmDetectedIp = ''
+    try {
+        $raw = Invoke-V6Ssh -Ip $ctx.ip -Cmd $probe -TimeoutSec 35
+        $rawText = ($raw -join "`n")
+        $mp = [regex]::Match($rawText, 'PUB=([0-9.]+)')
+        if ($mp.Success) { $vmDetectedIp = $mp.Groups[1].Value.Trim() }
+        $me = [regex]::Match($rawText, 'EXT=([0-9.]+)')
+        if ($me.Success) { $result.k3sExternalIp = $me.Groups[1].Value.Trim() }
+        $md = [regex]::Match($rawText, 'DC=([0-9.,]+)')
+        if ($md.Success) {
+            $result.datacenterIps = @(
+                $md.Groups[1].Value.Trim() -split ',' |
+                    ForEach-Object { $_.Trim() } |
+                    Where-Object { $_ -match '^\d{1,3}(\.\d{1,3}){3}$' } |
+                    Select-Object -Unique
+            )
+        }
+    } catch {
+        # Non-fatal: a failed probe just means we lean on the host-side fallback
+        # below. Only the farm_state query (next) is essential.
+    }
+
+    $hostIp = ''
+    if (-not (Test-DunePublicIPv4 -Ip $vmDetectedIp).ok -and (Get-Command Get-DunePublicIp -ErrorAction SilentlyContinue)) {
+        try { $hostIp = [string](Get-DunePublicIp) } catch {}
+    }
+    $target = Resolve-DunePublicIpDiagnosticTarget -Config $cfg -VmDetectedIp $vmDetectedIp -HostDetectedIp $hostIp
+    $result.vmPublicIp = [string]$target.ip
+    $result.publicIpSource = $target.source
+
+    # 2) farm_state — the address/port each map advertises to clients, plus its
+    #    readiness. game_addr is the client-facing game port; igw_addr is the
+    #    inter-game-world gateway used during sector handover / map travel. Both
+    #    are stored as "1.2.3.4/0"; strip the suffix.
+    $sql = "SELECT map, server_id, split_part(game_addr::text,'/',1) AS ip, game_port, split_part(igw_addr::text,'/',1) AS igw_ip, igw_port, ready, alive FROM dune.farm_state ORDER BY map;"
+    $maps = @()
+    try {
+        $csv = Invoke-DuneSqlRaw -Ip $ctx.ip -Sql $sql -Csv -TimeoutSec 30
+        if (Test-DunePsqlError -Output $csv) {
+            $result.error = "farm_state query failed: $(Get-DunePsqlErrorMessage -Output $csv)"
+            $result.summary = $result.error
+            return $result
+        }
+        $lines = @(($csv -split "`r?`n") | Where-Object { $_ -ne '' })
+        if ($lines.Count -ge 2) {
+            $rows = $lines | ConvertFrom-Csv
+            foreach ($r in $rows) {
+                $maps += [ordered]@{
+                    map      = [string]$r.map
+                    serverId = [string]$r.server_id
+                    ip       = ([string]$r.ip).Trim()
+                    port     = [string]$r.game_port
+                    igwIp    = ([string]$r.igw_ip).Trim()
+                    igwPort  = [string]$r.igw_port
+                    ready    = ([string]$r.ready -eq 't')
+                    alive    = ([string]$r.alive -eq 't')
+                }
+            }
+        }
+    } catch {
+        $result.error = "farm_state query failed: $($_.Exception.Message)"
+        $result.summary = $result.error
+        return $result
+    }
+
+    $result.maps = @($maps)
+    $advertised = @($maps | ForEach-Object { $_.ip } | Where-Object { $_ } | Select-Object -Unique)
+    $result.advertisedIps = @($advertised)
+    $result.igwAddrs = @($maps | ForEach-Object { $_.igwIp } | Where-Object { $_ } | Select-Object -Unique)
+    $result.serversReady = -not [bool](@($maps | Where-Object { -not $_.ready -or -not $_.alive }).Count)
+
+    $pub = [string]$result.vmPublicIp
+    $looksPublic = ($pub -match '^\d{1,3}(\.\d{1,3}){3}$') -and ($pub -notmatch '^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|127\.|0\.)')
+    $result.vmPublicIpUsable = [bool]$looksPublic
+    if ($looksPublic) {
+        $result.staleFarmIp = [bool](@($advertised | Where-Object { $_ -ne $pub }).Count)
+        if ($result.k3sExternalIp) { $result.staleK3sIp = ($result.k3sExternalIp -ne $pub) }
+    }
+
+    # HOST_DATACENTER_IP_ADDRESS sanity (the persistent address the director
+    # advertises to clients on every boot, pinned into the BG CR at setup).
+    # This is read straight from the CR, so it works even when the servers are
+    # down / farm_state is empty — unlike the advertised-IP checks above.
+    #   * datacenterPrivate: a value is an RFC1918 private/LAN address. That is
+    #     the signature of choosing "Private" (not "External") at VM setup — the
+    #     director then hands every outside player an unreachable private address
+    #     and they time out into P34, on every boot.
+    #   * datacenterStale: a value is a real public IP but NOT this server's
+    #     current public IP (a pinned old IP after a network change).
+    $privateRe = '^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|127\.|0\.|169\.254\.)'
+    $result.datacenterPrivate = [bool](@($result.datacenterIps | Where-Object { $_ -match $privateRe }).Count)
+    if ($looksPublic) {
+        $result.datacenterStale = [bool](@($result.datacenterIps | Where-Object {
+            ($_ -notmatch $privateRe) -and ($_ -ne $pub)
+        }).Count)
+    }
+
+    # IGW (inter-game-world) gateway sanity. During sector handover / map travel
+    # clients are pointed at igw_addr. A LAN address there is normal for DST hosts
+    # (the public path reaches it via the node's DNAT/ExternalIP), so we do NOT
+    # treat "igw != public IP" as wrong. The genuinely broken case is an igw_addr
+    # that is a POD/CONTAINER-private address (e.g. the k3s pod CIDR 10.42.x.x or a
+    # docker bridge 172.16-31.x) which is unreachable even on the LAN — that
+    # advertises an address no client can dial, so travel stalls on an infinite
+    # loading screen. Flag only when igw is RFC1918-private AND is neither the VM's
+    # own LAN IP nor this server's public IP, which keeps healthy LAN-IGW hosts
+    # (the common case) from false-positiving.
+    $vmLan = [string]$result.vmIp
+    $suspectIgw = @($result.igwAddrs | Where-Object {
+        ($_ -match '^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)') -and
+        ($_ -ne $vmLan) -and ($_ -ne $pub)
+    } | Select-Object -Unique)
+    $result.igwSuspect = [bool]$suspectIgw.Count
+    $suspectIgwIp = if ($result.igwSuspect) { @($suspectIgw)[0] } else { $null }
+    $igwNote = if ($result.igwSuspect) {
+        " Also, the inter-world gateway is advertising a private container address ($suspectIgwIp) that players can't reach, so map travel / sector handover will stall on an infinite loading screen. Restart the battlegroup so the maps re-register the gateway with the node's address."
+    } else { '' }
+
+    # Where the public IP came from, for an honest summary. The host-detected IP
+    # is behind the same router/WAN as the VM so it's a reliable stand-in, but we
+    # say so rather than implying we read it from the server itself.
+    $srcNote = switch ($result.publicIpSource) {
+        'manual'       { ' (your saved manual public IP; the current internet IP could not be detected)' }
+        'host'         { ' (detected from the DST host, since the VM could not reach an IP-check service)' }
+        'last-applied' { ' (your last-applied public IP, since neither the VM nor the DST host could detect a current one)' }
+        default        { '' }
+    }
+
+    # Login log distribution does not establish router forwarding rules.
+    # Diagnose only the advertised addresses and readiness observed above.
+    if ($result.datacenterPrivate) {
+        # The persistent root: the director is pinned to advertise a private/LAN
+        # address to every client. Ranked first because it's actionable even when
+        # the servers look "down" from outside, and it's the explanation behind a
+        # server that's healthy internally but unreachable for outside players.
+        $dcTxt = (@($result.datacenterIps) -join ', ')
+        $result.verdict = 'datacenter-private'
+        $result.summary = "Your server is pinned to advertise a private address ($dcTxt) to players (HOST_DATACENTER_IP_ADDRESS). This is what happens when ""Private"" is chosen instead of ""External"" during VM setup: the server re-announces that private address on every boot, so players on your own network can connect but anyone outside times out into P34. Apply your current public IP ($pub)$srcNote below — that rewrites the advertised address to your public IP and restarts the battlegroup.$igwNote"
+    }
+    elseif ($result.datacenterStale -and -not ($result.staleFarmIp -or $result.staleK3sIp)) {
+        # Public-but-wrong datacenter IP (pinned to an old public IP) that the
+        # farm_state checks didn't already surface (e.g. servers not yet up).
+        $dcTxt = (@($result.datacenterIps) -join ', ')
+        $result.verdict = 'stale-ip'
+        $result.staleFarmIp = $true
+        $result.summary = "Your server advertises $dcTxt to players (HOST_DATACENTER_IP_ADDRESS), but this server's public IP is $pub$srcNote. Players are being sent to the wrong address, which causes P34 / connection timeouts. Apply your current public IP below to fix it.$igwNote"
+    }
+    elseif (@($maps).Count -eq 0) {
+        $result.verdict = 'servers-down'
+        $result.summary = 'No map servers are registered yet. Start or restart the battlegroup, then re-check.'
+    }
+    elseif ($result.staleFarmIp -or $result.staleK3sIp) {
+        $result.verdict = 'stale-ip'
+        $advTxt = (@($advertised) -join ', ')
+        $parts = @()
+        if ($result.staleFarmIp) { $parts += "your maps advertise $advTxt to players" }
+        if ($result.staleK3sIp)  { $parts += "the K3s ExternalIP is $($result.k3sExternalIp)" }
+        $result.summary = "Stale public IP detected: $($parts -join ' and '), but this server's public IP is $pub$srcNote. Players are being sent to the wrong address, which causes P34 / connection timeouts. Apply your current public IP below to fix it.$igwNote"
+    }
+    elseif (-not $result.serversReady) {
+        $result.verdict = 'servers-not-ready'
+        $result.summary = "Public IP looks correct, but one or more map servers are not ready/alive yet. Wait for them to finish booting, or restart the battlegroup.$igwNote"
+    }
+    elseif ($result.igwSuspect) {
+        $result.verdict = 'igw-private'
+        $result.summary = "Your map servers advertise the correct public game address, but the inter-world gateway is advertising a private container address ($suspectIgwIp) that players can't reach. Joining the world works, but travelling between maps (sector handover) will stall on an infinite loading screen. Restart the battlegroup so the maps re-register the gateway with the node's address; if it persists, the IGW is binding to a pod IP instead of the node."
+    }
+    elseif (-not $looksPublic) {
+        # No usable public IP from the VM, the DST host, or config. We can still
+        # compare what the maps advertise against the K3s ExternalIP — if those
+        # two disagree, the IP is almost certainly stale even without an egress
+        # reading; if they agree, fall back to honest guidance.
+        if ($result.k3sExternalIp -and @($advertised | Where-Object { $_ -ne $result.k3sExternalIp }).Count) {
+            $result.verdict = 'stale-ip'
+            $result.staleFarmIp = $true
+            $advTxt = (@($advertised) -join ', ')
+            $result.summary = "Your maps advertise $advTxt to players, but the K3s ExternalIP is $($result.k3sExternalIp) — they don't match, which causes P34 / connection timeouts. (Couldn't read this server's live public IP to confirm which is current.) Apply your current public IP below to reconcile them."
+        } else {
+            $result.verdict = 'unknown'
+            $result.summary = 'Could not determine this server''s public IP from the VM or the DST host, and your maps/K3s agree on one address, so nothing looks stale. If players still get P34, verify the VM has internet access and that UDP 7777-7810 is port-forwarded to this server.'
+        }
+    }
+    elseif ($result.publicIpSource -in @('manual', 'last-applied')) {
+        $result.verdict = 'unknown'
+        $result.summary = 'The maps match the saved public IP, but the current internet IP could not be detected. Check the current internet IP and run this check again before retrying the game.'
+    }
+    else {
+        $result.verdict = 'healthy'
+        $result.summary = "All $(@($maps).Count) map server(s) advertise the correct public IP ($pub$srcNote) and are ready. If players still get P34, check that UDP 7777-7810 is port-forwarded to this server."
+    }
+
+    $result.ok = $true
+    return $result
+}
+
+function Invoke-DunePublicIpHostRoute {
+    param([string]$PublicIp, [string]$VmIp)
+    if (-not (Test-DuneAdminElevated)) { throw 'DST is not elevated. Restart Dune Server Tool as administrator before applying a public IP change.' }
+    $route = $null
+    try { $route = Find-NetRoute -RemoteIPAddress $VmIp -ErrorAction Stop | Select-Object -First 1 } catch {}
+    if (-not $route) { throw "Could not find a Windows route to VM IP $VmIp." }
+    $iface = [int]$route.InterfaceIndex
+    $existing = @(Get-NetRoute -DestinationPrefix "$PublicIp/32" -ErrorAction SilentlyContinue)
+    foreach ($r in $existing) {
+        if ($r.NextHop -ne $VmIp -or [int]$r.InterfaceIndex -ne $iface) {
+            throw "A host route for $PublicIp/32 already exists but does not point to $VmIp. Remove it manually before applying."
+        }
+    }
+    if (-not $existing) {
+        New-NetRoute -DestinationPrefix "$PublicIp/32" -InterfaceIndex $iface -NextHop $VmIp -RouteMetric 1 -ErrorAction Stop | Out-Null
+    }
+    return "Route $PublicIp/32 via $VmIp is present."
+}
+
+function Remove-DunePublicIpHostRoute {
+    param([string]$PublicIp, [string]$VmIp)
+    if (-not (Test-DuneAdminElevated)) { throw 'DST is not elevated. Restart Dune Server Tool as administrator before applying a public IP change.' }
+    $route = $null
+    try { $route = Find-NetRoute -RemoteIPAddress $VmIp -ErrorAction Stop | Select-Object -First 1 } catch {}
+    if (-not $route) { throw "Could not find a Windows route to VM IP $VmIp." }
+    $iface = [int]$route.InterfaceIndex
+    $matching = @(
+        Get-NetRoute -DestinationPrefix "$PublicIp/32" -ErrorAction SilentlyContinue |
+            Where-Object { $_.NextHop -eq $VmIp -and [int]$_.InterfaceIndex -eq $iface }
+    )
+    if ($matching.Count -gt 0) {
+        Remove-NetRoute -DestinationPrefix "$PublicIp/32" -InterfaceIndex $iface -NextHop $VmIp -Confirm:$false -ErrorAction Stop
+        return "Removed route $PublicIp/32 via $VmIp from interface $iface."
+    }
+    return "No matching DST host route for $PublicIp/32 via $VmIp was present; unrelated routes were left unchanged."
+}
+
+function Invoke-DunePublicIpApply {
+    param([Parameter(Mandatory)][string]$PublicIp, [string]$Mode = 'manual', [string]$Hostname = '')
+
+    $steps = [System.Collections.Generic.List[object]]::new()
+    $state = @{
+        phase = 'running'; running = $true
+        mode = $Mode; hostname = $Hostname; publicIp = ([string]$PublicIp).Trim()
+        steps = @(); started = (Get-Date).ToUniversalTime().ToString('o')
+        updated = (Get-Date).ToUniversalTime().ToString('o'); finished = $null; error = ''
+    }
+    # Persist the current step list to the on-disk state file so the UI poll
+    # streams progress live. Reads $steps/$state from the enclosing scope.
+    $pub = {
+        param([string]$Phase)
+        if ($Phase) { $state.phase = $Phase }
+        $state.steps = @($steps)
+        $state.updated = (Get-Date).ToUniversalTime().ToString('o')
+        try { Save-DunePublicIpApplyState -State $state } catch {}
+    }
+
+    try {
+        $applyWork = {
+            $target = ([string]$PublicIp).Trim()
+            $steps.Add((New-DunePublicIpStepResult 'validate' 'Validate target IP' 'running' "Checking $target.")) | Out-Null
+            & $pub 'running'
+            # Re-assert WITH -AllowUnchanged: by the time we're inside the apply
+            # pipeline the user has explicitly confirmed they want to (re)apply,
+            # and a deliberate re-apply of the *same* IP is the whole point of the
+            # repair flow (e.g. rewriting host NAT / K3s ExternalIP after an
+            # unclean shutdown). Without this the internal step rejected an
+            # unchanged IP with "Target IP is unchanged" and aborted the apply,
+            # leaving no way to re-apply the current IP from the UI.
+            $valid = Assert-DuneManualPublicIp -PublicIp $target -AllowUnchanged
+            if (-not $valid.ok) { throw $valid.message }
+            $steps[$steps.Count - 1] = New-DunePublicIpStepResult 'validate' 'Validate target IP' 'done' "Target $target accepted."
+            & $pub
+
+            $steps.Add((New-DunePublicIpStepResult 'preflight' 'Preflight host and VM' 'running' 'Checking VM and SSH.')) | Out-Null
+            & $pub
+            $vm = Get-DuneVmStatus
+            if (-not $vm.exists) { throw "VM '$($vm.name)' does not exist." }
+            if (-not $vm.running) { throw "VM '$($vm.name)' is not running." }
+            if (-not $vm.ip) { throw 'VM is running but has no IP yet.' }
+            $cfg = Read-DuneConfig
+            if (-not $cfg.SshKey -or -not (Test-Path -LiteralPath $cfg.SshKey)) { throw 'SSH key is not configured in Settings.' }
+            $ssh = Invoke-DuneSshHidden -Ip $vm.ip -KeyPath $cfg.SshKey -TimeoutSec 12 -SshOptions @(
+                '-o','StrictHostKeyChecking=no','-o','LogLevel=ERROR','-o','ConnectTimeout=8','-o','BatchMode=yes'
+            ) -RemoteCommand 'echo DST_SSH_OK'
+            if ($ssh.Exit -ne 0 -or ($ssh.Stdout -notmatch 'DST_SSH_OK')) {
+                $reason = Get-DuneSshFailureReason -Stderr $ssh.Stderr -ExitCode $ssh.Exit -KeyPath $cfg.SshKey
+                if (-not $reason) { $reason = 'SSH reachability check failed.' }
+                throw $reason
+            }
+            $steps[$steps.Count - 1] = New-DunePublicIpStepResult 'preflight' 'Preflight host and VM' 'done' "VM $($vm.ip) reachable."
+            & $pub
+
+            # Upgrade stale helpers before changing any IP surfaces. The worker
+            # follows subsequent ExternalIP changes and newly bound game ports.
+            $steps.Add((New-DunePublicIpStepResult 'forwarding' 'Prepare game connection forwarding' 'running' 'Refreshing game connection forwarding.')) | Out-Null
+            & $pub
+            $rawForwarding = Invoke-DunePublicIpWatchdogRefresh -Ip $vm.ip
+            $steps[$steps.Count - 1] = New-DunePublicIpStepResult 'forwarding' 'Prepare game connection forwarding' 'done' 'Game connection forwarding is ready for the IP update.' $rawForwarding
+            & $pub
+
+            $hostRouteEnabled = Get-DunePublicIpHostRouteEnabled
+            $hostRouteAction = if ($hostRouteEnabled) { "Adding route for $target." } else { "Removing the matching DST route for $target." }
+            $steps.Add((New-DunePublicIpStepResult 'host-route' 'Reconcile Windows host route' 'running' $hostRouteAction)) | Out-Null
+            & $pub
+            # The host route is ONLY a NAT-loopback convenience so this Windows host
+            # can reach the server by its public IP; outside players never use it. A
+            # failure here (e.g. a stale conflicting /32 route from a previous IP, or
+            # DST not elevated) must NOT abort the apply -- otherwise the critical step
+            # below (rewriting HOST_DATACENTER_IP_ADDRESS off a private/127.0.0.1 value
+            # and restarting the battlegroup) never runs and the user's P34 stays
+            # broken. So we degrade a host-route failure to a non-blocking warning.
+            try {
+                $routeMsg = if ($hostRouteEnabled) {
+                    Invoke-DunePublicIpHostRoute -PublicIp $target -VmIp $vm.ip
+                } else {
+                    Remove-DunePublicIpHostRoute -PublicIp $target -VmIp $vm.ip
+                }
+                $steps[$steps.Count - 1] = New-DunePublicIpStepResult 'host-route' 'Reconcile Windows host route' 'done' $routeMsg
+            } catch {
+                $steps[$steps.Count - 1] = New-DunePublicIpStepResult 'host-route' 'Reconcile Windows host route' 'warning' "Skipped (non-blocking): $($_.Exception.Message) This route only controls whether this PC reaches the server by its own public IP; outside players are unaffected and the IP change still applied."
+            }
+            & $pub
+
+            # --- Phase 1: VM network + persistent files + K3s --------------------
+            # FAILSAFES baked into the bash: abort BEFORE writing settings.conf if
+            # the battlegroup/VM/image can't be discovered (the blank-settings.conf
+            # brick), assert all 4 settings.conf lines are non-blank after writing,
+            # and patch the legacy dune-network-local-external.start boot script
+            # that hardcodes an old public IP and silently re-adds it on reboot.
+            $remoteNetwork = @'
+set -eu
+NEW_IP="$1"
+VM_IP="$2"
+step() { printf '\n=== %s ===\n' "$1"; }
+
+step discover
+BG_NS=$(sudo kubectl get battlegroups -A --no-headers -o custom-columns=':metadata.namespace' 2>/dev/null | head -1 | tr -d ' ')
+BG_NAME=$(sudo kubectl get battlegroups -A --no-headers -o custom-columns=':metadata.name' 2>/dev/null | head -1 | tr -d ' ')
+IMAGE=$(sudo kubectl get battlegroup "$BG_NAME" -n "$BG_NS" -o jsonpath='{.spec.serverGroup.template.spec.sets[0].image}' 2>/dev/null || true)
+if [ -z "$IMAGE" ]; then IMAGE=$(sed -n '2p' /home/dune/.dune/settings.conf 2>/dev/null | tr -d ' \r'); fi
+# Hard abort if anything essential is missing -- NEVER write a blank settings.conf.
+[ -n "$BG_NS" ]   || { echo "DISCOVER_FAIL: battlegroup namespace not found"; exit 2; }
+[ -n "$BG_NAME" ] || { echo "DISCOVER_FAIL: battlegroup name not found"; exit 2; }
+[ -n "$VM_IP" ]   || { echo "DISCOVER_FAIL: VM IP is empty"; exit 2; }
+case "$IMAGE" in registry.funcom.com/funcom/self-hosting/seabass-server:*) ;; *) echo "DISCOVER_FAIL: no valid seabass-server image (got '$IMAGE')"; exit 2;; esac
+printf 'BG=%s NS=%s IMAGE=%s\n' "$BG_NAME" "$BG_NS" "$IMAGE"
+
+step alias
+for addr in $(/sbin/ip -4 -o addr show dev eth0 | awk '{print $4}' | cut -d/ -f1); do
+  if [ "$addr" != "$VM_IP" ] && [ "$addr" != "$NEW_IP" ]; then
+    sudo ip addr del "$addr/32" dev eth0 2>/dev/null || true
+  fi
+done
+if ! /sbin/ip -4 addr show dev eth0 | grep -q " $NEW_IP/32"; then
+  sudo ip addr add "$NEW_IP/32" dev eth0 label eth0:1
+fi
+/sbin/ip -4 -o addr show dev eth0
+
+step interfaces
+# Determine the default gateway WITHOUT ever hardcoding a foreign subnet, and
+# recover the user's REAL gateway even if a previous (buggy) run already wrote a
+# wrong one. A gateway on a different /24 than the VM leaves it with no working
+# default route, which silently kills ALL outbound traffic -- the game server
+# can no longer reach Funcom's matchmaker to register, so it drops off the
+# server browser even though it is otherwise healthy.
+#
+# We gather candidate gateways in priority order and pick the FIRST one that
+# sits on the VM's own /24:
+#   1. the live default route (the gateway actually working right now)
+#   2. the current interfaces 'gateway' line
+#   3. the gateway from each interfaces.bak.* we've made -- the oldest backup
+#      holds the pristine ORIGINAL gateway from before any DST rewrite, so this
+#      recovers a network whose real gateway is not .1 (e.g. .254) even after a
+#      prior run wrote a wrong value into the live route and current file.
+# Only if NO candidate is on the VM's subnet do we fall back to the subnet's .1.
+# This lets a re-run self-heal a VM previously broken by a wrong gateway.
+VM_PREFIX=$(echo "$VM_IP" | awk -F. '{print $1"."$2"."$3}')
+GW=""
+add_gw_candidate() {
+  cand="$1"
+  if [ -n "$GW" ]; then return 0; fi
+  if [ -z "$cand" ]; then return 0; fi
+  cpfx=$(echo "$cand" | awk -F. '{print $1"."$2"."$3}')
+  if [ "$cpfx" = "$VM_PREFIX" ]; then GW="$cand"; fi
+  return 0
+}
+add_gw_candidate "$(/sbin/ip route show default 2>/dev/null | awk '/^default/ {print $3; exit}')"
+add_gw_candidate "$(awk '/^[[:space:]]*gateway[[:space:]]+/ {print $2; exit}' /etc/network/interfaces 2>/dev/null)"
+for bak in $(ls -1tr /etc/network/interfaces.bak.* 2>/dev/null); do
+  add_gw_candidate "$(awk '/^[[:space:]]*gateway[[:space:]]+/ {print $2; exit}' "$bak" 2>/dev/null)"
+done
+if [ -z "$GW" ]; then
+  GW=$(echo "$VM_IP" | awk -F. '{print $1"."$2"."$3".1"}')
+fi
+echo "interfaces gateway -> $GW (VM $VM_IP)"
+sudo cp /etc/network/interfaces "/etc/network/interfaces.bak.$(date -u +%Y%m%d%H%M%S)" 2>/dev/null || true
+cat > /tmp/dst-interfaces <<EOF
+auto lo
+iface lo inet loopback
+
+auto eth0
+iface eth0 inet static
+    address $VM_IP/24
+    gateway $GW
+
+auto eth0:1
+iface eth0:1 inet static
+    address $NEW_IP
+    netmask 255.255.255.255
+EOF
+sudo install -m 0644 /tmp/dst-interfaces /etc/network/interfaces
+rm -f /tmp/dst-interfaces
+
+step settings
+sudo -u dune mkdir -p /home/dune/.dune
+if [ -f /home/dune/.dune/settings.conf ]; then sudo cp /home/dune/.dune/settings.conf "/home/dune/.dune/settings.conf.bak.$(date -u +%Y%m%d%H%M%S)"; fi
+printf '%s\n%s\n%s\n%s\n' "$BG_NAME" "$IMAGE" "$VM_IP" "$NEW_IP" | sudo tee /home/dune/.dune/settings.conf >/dev/null
+sudo chown dune:dune /home/dune/.dune/settings.conf
+# FAILSAFE: every line must be present AND non-blank (not just a line count of 4).
+S1=$(sed -n '1p' /home/dune/.dune/settings.conf); S2=$(sed -n '2p' /home/dune/.dune/settings.conf)
+S3=$(sed -n '3p' /home/dune/.dune/settings.conf); S4=$(sed -n '4p' /home/dune/.dune/settings.conf)
+{ [ -n "$S1" ] && [ -n "$S2" ] && [ -n "$S3" ] && [ -n "$S4" ]; } || { echo "SETTINGS_FAIL: settings.conf has a blank line ($S1|$S2|$S3|$S4)"; exit 3; }
+case "$S2" in registry.funcom.com/funcom/self-hosting/seabass-server:*) ;; *) echo "SETTINGS_FAIL: line 2 is not a seabass-server image"; exit 3;; esac
+sed -n '1,4p' /home/dune/.dune/settings.conf
+
+step bootscript
+F=/etc/local.d/dune-network-local-external.start
+if [ -f "$F" ]; then
+  sudo cp "$F" "$F.bak.$(date -u +%Y%m%d%H%M%S)"
+  sudo sed -i "s/^PUBLIC_IP=.*/PUBLIC_IP='$NEW_IP'/" "$F"
+  grep -n "^PUBLIC_IP=" "$F" || true
+else
+  echo "no legacy external boot script (ok)"
+fi
+
+step runner
+runner=/usr/local/bin/k3s-custom-runner.sh
+# Keep the node/control-plane address on the VM's LAN. The public or relay
+# address belongs only to the external advertisement, including after reboot.
+target="dynamic_ip=$VM_IP"
+external_target="external_ip=$NEW_IP # DST_MANAGED_EXTERNAL_IP"
+if [ -f "$runner" ]; then
+  sudo cp "$runner" "$runner.bak.$(date -u +%Y%m%d%H%M%S)"
+  # DST_K3S_RUNNER_AWK_BEGIN
+  awk -v target="$target" -v external_target="$external_target" '
+    BEGIN { dynamic_done=0; exec_done=0 }
+    /^dynamic_ip=/ {
+      print target
+      dynamic_done=1
+      next
+    }
+    /# DST_MANAGED_EXTERNAL_IP$/ { next }
+    /^exec[[:space:]]+\/usr\/local\/bin\/k3s[[:space:]]+server/ {
+      if (!dynamic_done) {
+        print target
+        dynamic_done=1
+      }
+      print external_target
+      print
+      exec_done=1
+      next
+    }
+    { print }
+    END {
+      if (!exec_done) exit 4
+    }
+  ' "$runner" > /tmp/dst-runner
+  # DST_K3S_RUNNER_AWK_END
+  sudo install -m 0755 /tmp/dst-runner "$runner"
+  rm -f /tmp/dst-runner
+  grep -F "$target" "$runner"
+  grep -F "$external_target" "$runner"
+fi
+
+step k3s
+NODE=$(sudo kubectl get nodes --no-headers -o custom-columns=':metadata.name' | head -1 | tr -d ' ')
+sudo kubectl annotate node "$NODE" "k3s.io/external-ip=$NEW_IP" --overwrite
+sudo kubectl patch node "$NODE" --subresource=status --type=merge -p "{\"status\":{\"addresses\":[{\"type\":\"InternalIP\",\"address\":\"$VM_IP\"},{\"type\":\"ExternalIP\",\"address\":\"$NEW_IP\"},{\"type\":\"Hostname\",\"address\":\"$NODE\"}]}}" >/dev/null
+sudo kubectl get node "$NODE" -o wide
+
+step nat
+# Write the boot script. Bake NEW_IP (public) + VM_IP (LAN) at the top via a
+# tiny prelude, then a QUOTED heredoc for the body so nothing needs \$ escaping
+# and the bind-detection logic stays readable. The game-UDP bridge here is
+# bind-detected (mirrors dune-dnat-watch.sh) -- NEVER add it unconditionally:
+# on a host whose game binds 0.0.0.0/the LAN IP a VM_IP->public rewrite
+# black-holes remote AND same-LAN joins (the v12.16.9 regression).
+{
+  printf '#!/bin/sh\n'
+  printf '# Restore DNAT rules for Dune Awakening server on boot.\n'
+  printf '# NEW_IP (public) and VM_IP (LAN) are baked in by the Public IP apply.\n'
+  printf 'NEW_IP=%s\n' "$NEW_IP"
+  printf 'VM_IP=%s\n' "$VM_IP"
+  cat <<'DUNEBOOT'
+RABBIT_PORT=31982
+GAME_PORTS=7777:7810
+GAME_LO=7777
+GAME_HI=7810
+LOG=/var/log/dune-dnat-watch.log
+ts() { date "+%Y-%m-%d %H:%M:%S"; }
+log() { echo "[$(ts)] boot: $*" >> "$LOG" 2>/dev/null; }
+
+sleep 30
+
+# RabbitMQ login: public:31982/tcp -> mq-game pod:5672 (idempotent).
+# kubectl prints the literal string "<none>" (not empty) when the service has no
+# endpoint yet -- that string must NOT be fed to iptables ("Bad IP address").
+POD_IP=$(k3s kubectl get endpoints --all-namespaces -o wide 2>/dev/null | grep mq-game | awk '{print $3}' | cut -d, -f1 | cut -d: -f1 | head -1)
+if [ -n "$POD_IP" ] && [ "$POD_IP" != "<none>" ]; then
+    iptables -t nat -C PREROUTING -d "$NEW_IP" -p tcp --dport "$RABBIT_PORT" -j DNAT --to-destination "${POD_IP}:5672" 2>/dev/null || \
+      iptables -t nat -I PREROUTING 1 -d "$NEW_IP" -p tcp --dport "$RABBIT_PORT" -j DNAT --to-destination "${POD_IP}:5672"
+fi
+
+# Game-UDP bridge: <VM_IP>:7777-7810/udp -> NEW_IP, bind-detected per port.
+# Funcom can mix public-only and LAN-bound listeners within the dynamic range.
+udp_listeners() {
+    _o=""
+    if command -v ss >/dev/null 2>&1; then _o=$(ss -H -u -l -n -4 2>/dev/null | awk '{print $4}'); fi
+    [ -n "$_o" ] || _o=$(netstat -uln 2>/dev/null | awk '$1=="udp"{print $4}')
+    printf '%s\n' "$_o"
+}
+game_port_state() {
+    _want_port="$1"; _pub=0; _lanwild=0
+    for _e in $_udp_snapshot; do
+        _port=${_e##*:}; _addr=${_e%:*}
+        [ "$_port" = "$_want_port" ] || continue
+        case "$_addr" in
+            "$NEW_IP")               _pub=1 ;;
+            "$VM_IP"|0.0.0.0|'*'|'') _lanwild=1 ;;
+        esac
+    done
+    if [ "$_pub" = 1 ]; then echo pub; elif [ "$_lanwild" = 1 ]; then echo lan; else echo none; fi
+}
+game_bridge_rules() {
+    iptables -t nat -S PREROUTING 2>/dev/null |
+        grep -F -- "-d ${VM_IP}/32" |
+        grep -F -- '-p udp' |
+        grep -F -- '-j DNAT'
+}
+purge_legacy_game_bridge() {
+    game_bridge_rules | grep -E -- "--dport[[:space:]]+${GAME_PORTS}([[:space:]]|$)" | sed 's/^-A/-D/' | while read -r _s; do
+        iptables -t nat $_s 2>/dev/null && log "removed legacy broad game-UDP bridge: $_s"
+    done
+}
+purge_game_bridge_port() {
+    _port="$1"
+    game_bridge_rules | grep -E -- "--dport[[:space:]]+${_port}([[:space:]]|$)" | sed 's/^-A/-D/' | while read -r _s; do
+        iptables -t nat $_s 2>/dev/null && log "removed game-UDP bridge for port ${_port}: $_s"
+    done
+}
+ensure_game_bridge_port() {
+    _port="$1"
+    if iptables -t nat -C PREROUTING -d "$VM_IP" -p udp --dport "$_port" -j DNAT --to-destination "$NEW_IP" 2>/dev/null; then return 0; fi
+    purge_game_bridge_port "$_port"
+    if iptables -t nat -I PREROUTING 1 -d "$VM_IP" -p udp --dport "$_port" -j DNAT --to-destination "$NEW_IP" 2>/dev/null; then
+        log "installed game-UDP bridge: ${VM_IP}:${_port} -> ${NEW_IP}:${_port}"
+    else
+        log "failed to install game-UDP bridge for port ${_port}"
+    fi
+}
+_udp_snapshot=$(udp_listeners)
+_legacy_reconciled=0
+_p="$GAME_LO"
+while [ "$_p" -le "$GAME_HI" ]; do
+    _state=$(game_port_state "$_p")
+    if [ "$_state" != none ] && [ "$_legacy_reconciled" = 0 ]; then
+        purge_legacy_game_bridge
+        _legacy_reconciled=1
+    fi
+    case "$_state" in
+        pub)  ensure_game_bridge_port "$_p" ;;
+        lan)  purge_game_bridge_port "$_p" ;;
+        none) : ;;
+    esac
+    _p=$((_p + 1))
+done
+DUNEBOOT
+} > /tmp/dune-iptables.start
+sudo install -m 0755 /tmp/dune-iptables.start /etc/local.d/dune-iptables.start
+rm -f /tmp/dune-iptables.start
+sh -n /etc/local.d/dune-iptables.start
+# mq-game endpoint may be the literal string "<none>" when the BG is Stopped /
+# the pod hasn't come up yet -- skip the immediate install in that case, the
+# supervised dune-dnat-watch service installs it once the pod is Ready. Feeding
+# "<none>" to iptables errors "Bad IP address" and fails the whole Apply step.
+MQ_IP=$(sudo kubectl get endpoints --all-namespaces -o wide 2>/dev/null | grep mq-game | awk '{print $3}' | cut -d, -f1 | cut -d: -f1 | head -1)
+if [ -n "$MQ_IP" ] && [ "$MQ_IP" != "<none>" ]; then
+  sudo iptables -t nat -C PREROUTING -d "$NEW_IP" -p tcp --dport 31982 -j DNAT --to-destination "${MQ_IP}:5672" 2>/dev/null || \
+    sudo iptables -t nat -I PREROUTING 1 -d "$NEW_IP" -p tcp --dport 31982 -j DNAT --to-destination "${MQ_IP}:5672"
+else
+  echo "mq-game endpoint not ready (got '${MQ_IP:-<empty>}'); rabbitmq DNAT deferred to dune-dnat-watch service"
+fi
+# Game-UDP bridge (bind-detected per port; mirrors the boot script and watchdog).
+# Monitor the full dynamic range, but do not let one LAN-bound port suppress a
+# different public-only port.
+GBLO=7777; GBHI=7810; GBPORTS=7777:7810
+gb_listeners() {
+  _o=""
+  if command -v ss >/dev/null 2>&1; then _o=$(ss -H -u -l -n -4 2>/dev/null | awk '{print $4}'); fi
+  [ -n "$_o" ] || _o=$(netstat -uln 2>/dev/null | awk '$1=="udp"{print $4}')
+  printf '%s\n' "$_o"
+}
+gb_port_state() {
+  gb_want_port="$1"; gb_pub=0; gb_lanwild=0
+  for gb_e in $gb_udp_snapshot; do
+    gb_port=${gb_e##*:}; gb_addr=${gb_e%:*}
+    [ "$gb_port" = "$gb_want_port" ] || continue
+    case "$gb_addr" in
+      "$NEW_IP")               gb_pub=1;;
+      "$VM_IP"|0.0.0.0|'*'|'') gb_lanwild=1;;
+    esac
+  done
+  if [ "$gb_pub" = 1 ]; then echo pub; elif [ "$gb_lanwild" = 1 ]; then echo lan; else echo none; fi
+}
+gb_bridge_rules() {
+  sudo iptables -t nat -S PREROUTING 2>/dev/null |
+    grep -F -- "-d ${VM_IP}/32" |
+    grep -F -- '-p udp' |
+    grep -F -- '-j DNAT'
+}
+gb_purge_legacy_bridge() {
+  gb_bridge_rules | grep -E -- "--dport[[:space:]]+${GBPORTS}([[:space:]]|$)" | sed 's/^-A/-D/' | while read -r gb_s; do sudo iptables -t nat $gb_s 2>/dev/null || true; done
+}
+gb_purge_port() {
+  gb_port="$1"
+  gb_bridge_rules | grep -E -- "--dport[[:space:]]+${gb_port}([[:space:]]|$)" | sed 's/^-A/-D/' | while read -r gb_s; do sudo iptables -t nat $gb_s 2>/dev/null || true; done
+}
+gb_ensure_port() {
+  gb_port="$1"
+  if sudo iptables -t nat -C PREROUTING -d "$VM_IP" -p udp --dport "$gb_port" -j DNAT --to-destination "$NEW_IP" 2>/dev/null; then
+    echo "game-UDP bridge: already correct (${VM_IP}:${gb_port} -> ${NEW_IP}:${gb_port})"
+    return 0
+  fi
+  gb_purge_port "$gb_port"
+  if sudo iptables -t nat -I PREROUTING 1 -d "$VM_IP" -p udp --dport "$gb_port" -j DNAT --to-destination "$NEW_IP" 2>/dev/null; then
+    echo "game-UDP bridge: installed ${VM_IP}:${gb_port} -> ${NEW_IP}:${gb_port} (game binds public IP only)"
+  else
+    echo "game-UDP bridge: insert failed for port ${gb_port} (non-fatal)"
+  fi
+}
+gb_udp_snapshot=$(gb_listeners)
+gb_legacy_reconciled=0
+gb_p="$GBLO"
+while [ "$gb_p" -le "$GBHI" ]; do
+  gb_state=$(gb_port_state "$gb_p")
+  if [ "$gb_state" != none ] && [ "$gb_legacy_reconciled" = 0 ]; then
+    gb_purge_legacy_bridge
+    gb_legacy_reconciled=1
+  fi
+  case "$gb_state" in
+    pub)  gb_ensure_port "$gb_p";;
+    lan)  gb_purge_port "$gb_p";;
+    none) :;;
+  esac
+  gb_p=$((gb_p + 1))
+done
+echo "NETWORK_DONE"
+'@
+            $steps.Add((New-DunePublicIpStepResult 'vm-network' 'Update VM network, settings.conf, K3s, NAT' 'running' 'Applying network + persistent-config changes over SSH.')) | Out-Null
+            & $pub
+            $rawNet = Invoke-DunePublicIpRemoteScript -Ip $vm.ip -Script $remoteNetwork -Arguments @($target, $vm.ip) -TimeoutSec 180
+            $steps[$steps.Count - 1] = New-DunePublicIpStepResult 'vm-network' 'Update VM network, settings.conf, K3s, NAT' 'done' 'eth0 alias, interfaces, settings.conf (validated), boot script, K3s ExternalIP, and NAT updated.' $rawNet
+            & $pub
+
+            # --- Phase 2: battlegroup IP propagation + restart + readiness ------
+            # Split into TWO halves so the wait-for-servers loop can tick a
+            # heartbeat back to the UI on every iteration. The bash script
+            # used to do change-ip + integrity + utilities + wait + verify in
+            # one SSH call, which stayed silent for 5-7 minutes and made the
+            # step look frozen. Now the bash does the fast "mutation" steps
+            # then exits; the wait loop runs in PowerShell, one short SSH
+            # call per tick, with a $pub heartbeat each time. Verify runs in
+            # a final short SSH call.
+            $remoteBgIp = @'
+set -eu
+NEW_IP="$1"
+VM_IP="$2"
+step() { printf '\n=== %s ===\n' "$1"; }
+BG_NS=$(sudo kubectl get battlegroups -A --no-headers -o custom-columns=':metadata.namespace' 2>/dev/null | head -1 | tr -d ' ')
+BG_NAME=$(sudo kubectl get battlegroups -A --no-headers -o custom-columns=':metadata.name' 2>/dev/null | head -1 | tr -d ' ')
+[ -n "$BG_NS" ] && [ -n "$BG_NAME" ] || { echo "DISCOVER_FAIL: battlegroup not found"; exit 2; }
+BGBIN=/home/dune/.dune/bin/battlegroup
+
+# ORDER MATTERS: everything that does NOT restart the battlegroup runs first,
+# so if the change-ip step at the bottom hangs (or Invoke-V6Ssh's async stdout
+# drain blocks on grand-child fds after the BG restart cycles pods), all the
+# CR-level patches / status-refresh / audit are already durably done on the
+# VM before we ever kick the BG. Historical root cause of the v12.16.11
+# propagate-hang partial-completion bug: change-ip ran FIRST, restarted the
+# BG mid-SSH, SSH hung, utilities-ip / refresh-status-pods / audit never
+# fired -> UI stuck 'Applying' + director/serverGateway/textRouter left on
+# the OLD HOST_DATACENTER_IP_ADDRESS.
+
+step utilities-ip
+# change-battlegroup-ip updates the game servers but NOT the utility pods'
+# HOST_DATACENTER_IP_ADDRESS (director / serverGateway / textRouter / etc.),
+# leaving them advertising the OLD public IP. Reconcile every utility's env to
+# NEW_IP so they relaunch correct. Requires jq (ships with the k3s tooling);
+# skipped gracefully if absent.
+if command -v jq >/dev/null 2>&1; then
+  for u in $(sudo kubectl get battlegroup "$BG_NAME" -n "$BG_NS" -o json 2>/dev/null | jq -r '.spec.utilities // {} | keys[]' 2>/dev/null); do
+    idx=$(sudo kubectl get battlegroup "$BG_NAME" -n "$BG_NS" -o json 2>/dev/null | jq -r --arg u "$u" '((.spec.utilities[$u].spec.envVars // []) | map(.name) | index("HOST_DATACENTER_IP_ADDRESS")) // -1' 2>/dev/null)
+    { [ -z "$idx" ] || [ "$idx" = "-1" ] || [ "$idx" = "null" ]; } && continue
+    cur=$(sudo kubectl get battlegroup "$BG_NAME" -n "$BG_NS" -o jsonpath="{.spec.utilities.$u.spec.envVars[$idx].value}" 2>/dev/null)
+    if [ -n "$cur" ] && [ "$cur" != "$NEW_IP" ]; then
+      sudo kubectl patch battlegroup "$BG_NAME" -n "$BG_NS" --type=json -p "[{\"op\":\"replace\",\"path\":\"/spec/utilities/$u/spec/envVars/$idx/value\",\"value\":\"$NEW_IP\"}]" >/dev/null 2>&1 && echo "reconciled utility '$u' HOST_DATACENTER_IP_ADDRESS: $cur -> $NEW_IP"
+    fi
+  done
+else
+  echo "jq not available; skipping utility HOST_DATACENTER_IP_ADDRESS reconcile"
+fi
+
+step settings-integrity
+need_fix=0
+for n in 1 2 3 4; do v=$(sed -n "${n}p" /home/dune/.dune/settings.conf 2>/dev/null); [ -z "$v" ] && need_fix=1; done
+L2=$(sed -n '2p' /home/dune/.dune/settings.conf 2>/dev/null | tr -d ' \r')
+case "$L2" in registry.funcom.com/funcom/self-hosting/seabass-server:*) ;; *) need_fix=1;; esac
+if [ "$need_fix" = "1" ]; then
+  echo "settings.conf was corrupted (blank/bad line) -- repairing from discovered values"
+  IMAGE=$(sudo kubectl get battlegroup "$BG_NAME" -n "$BG_NS" -o jsonpath='{.spec.serverGroup.template.spec.sets[0].image}' 2>/dev/null || true)
+  case "$IMAGE" in registry.funcom.com/funcom/self-hosting/seabass-server:*) ;; *) echo "REPAIR_FAIL: no valid image available to rewrite settings.conf"; exit 3;; esac
+  sudo cp /home/dune/.dune/settings.conf "/home/dune/.dune/settings.conf.bak.$(date -u +%Y%m%d%H%M%S)" 2>/dev/null || true
+  printf '%s\n%s\n%s\n%s\n' "$BG_NAME" "$IMAGE" "$VM_IP" "$NEW_IP" | sudo tee /home/dune/.dune/settings.conf >/dev/null
+  sudo chown dune:dune /home/dune/.dune/settings.conf
+  # NOTE: no `battlegroup restart` here -- change-ip below will restart. If the
+  # local settings.conf was really corrupt AND change-ip fails, the user's
+  # next explicit action will clear it.
+fi
+sed -n '1,4p' /home/dune/.dune/settings.conf
+
+step refresh-status-pods
+# status.database.address, status.database.pgHeroAddress, status.utilities.*.address,
+# and status.utilities.messageQueues.statuses.*.amqp/managementAddress are only
+# populated at POD-OBJECT CREATION (not on container restart). Container-only
+# restarts driven by the operator, `battlegroup change-battlegroup-ip`, or the
+# `step utilities-ip` CR-env patch above will NOT refresh these fields -- they
+# stay at whichever IP was current at last pod-object creation. Force-delete
+# the pods that own external-address status fields so the StatefulSet /
+# Deployment controllers recreate them and the operator repopulates status
+# with the CURRENT HOST_DATACENTER_IP_ADDRESS. Discovered 2026-07-01 after an
+# ISP IP change left status.database.address pointing at the pre-change IP
+# forever until the pods were manually kicked. Non-blocking; kube waits are
+# on the PowerShell side.
+STALE_STATUS_PATTERN="^${BG_NAME}-(db-dbdepl|db-util-|fb-deploy|mq-admin|mq-game)"
+for POD in $(sudo kubectl get pods -n "$BG_NS" --no-headers -o custom-columns=':metadata.name' 2>/dev/null | grep -E "$STALE_STATUS_PATTERN"); do
+  sudo kubectl delete pod -n "$BG_NS" "$POD" --wait=false 2>&1 | sed 's/^/  /'
+done
+
+step change-ip
+# LAST because this restarts the battlegroup, which cycles every game/gateway/
+# director/rmq pod and typically severs any stdio inherited from SSH. Firing
+# it as a fully-detached job (setsid + all fds closed) with an rc marker
+# means the SSH parent shell can exit cleanly the moment the job is launched;
+# the PowerShell wait loop then polls for the marker + BG phase separately.
+# Historical: pre-fix, running this synchronously caused Invoke-V6Ssh's async
+# stdout drain to block indefinitely on grand-child fds after the parent ssh
+# exited, wedging the UI on 'Applying' even though the work was done on the VM.
+rm -f /tmp/dst-cip.rc /tmp/dst-cip.log 2>/dev/null
+if [ -x "$BGBIN" ]; then
+  date -u +%Y-%m-%dT%H:%M:%SZ > /tmp/dst-cip.started
+  setsid sh -c "printf '1\n' | '$BGBIN' change-battlegroup-ip '$NEW_IP' >/tmp/dst-cip.log 2>&1; echo \$? >/tmp/dst-cip.rc" </dev/null >/dev/null 2>&1 &
+  disown 2>/dev/null || true
+  echo "change-battlegroup-ip launched detached (marker /tmp/dst-cip.rc); PowerShell will poll for completion."
+else
+  echo "battlegroup helper not found; falling back to detached restart"
+  date -u +%Y-%m-%dT%H:%M:%SZ > /tmp/dst-cip.started
+  setsid sh -c "'$BGBIN' restart >/tmp/dst-cip.log 2>&1; echo \$? >/tmp/dst-cip.rc" </dev/null >/dev/null 2>&1 &
+  disown 2>/dev/null || true
+fi
+
+# Echo BG namespace so the PowerShell-side wait loop can target it directly
+# without re-discovering on every poll.
+printf 'BG_NS=%s\nBG_NAME=%s\n' "$BG_NS" "$BG_NAME"
+echo "BGIP_MUTATE_DONE"
+'@
+            $steps.Add((New-DunePublicIpStepResult 'bg-ip' 'Propagate IP to battlegroup + restart' 'running' 'Running change-battlegroup-ip, repairing settings.conf if needed.')) | Out-Null
+            & $pub
+            # 90s is plenty now that the shell script fires change-battlegroup-ip
+            # detached (setsid) at the end -- no synchronous BG restart inside
+            # the SSH call. The old 300s was needed because change-ip ran
+            # inline and blocked the whole script; that's what caused the hang.
+            $rawMutate = Invoke-DunePublicIpRemoteScript -Ip $vm.ip -Script $remoteBgIp -Arguments @($target, $vm.ip) -TimeoutSec 90
+            $bgNs   = ''
+            $bgName = ''
+            if ($rawMutate -match '(?m)^BG_NS=(\S+)\s*$')   { $bgNs   = $Matches[1] }
+            if ($rawMutate -match '(?m)^BG_NAME=(\S+)\s*$') { $bgName = $Matches[1] }
+            if (-not $bgNs -or -not $bgName) {
+                throw "Could not determine battlegroup namespace/name from remote output: $rawMutate"
+            }
+            # Wait loop in PowerShell so each iteration can heartbeat the UI.
+            # Poll TWO things now (both are fast, one short SSH per tick):
+            #   1. /tmp/dst-cip.rc — written when the detached
+            #      change-battlegroup-ip job completes on the VM.
+            #   2. `.status.phase` on the battlegroup CR — "Healthy" once the
+            #      operator finishes reconciling all pods on the new IP.
+            # Used to poll `serverset .status.ready` via jsonpath, but that
+            # field returns EMPTY on healthy CRs (jsonpath doesn't render the
+            # int in some kubectl versions); use the BG phase directly instead
+            # — matches what the DST UI's Server Health card shows. Budget
+            # 60 x 5s = 5 min hard cap. See dst-public-ip-apply-propagate-
+            # step-hang-2-bugs-2026-07-05 for history.
+            $waitMax  = 60
+            $waitTick = 5
+            $ready    = $false
+            $lastRaw  = ''
+            for ($i = 1; $i -le $waitMax; $i++) {
+                $detail = "Waiting for change-battlegroup-ip + BG Healthy... ($i/$waitMax, up to $($waitMax * $waitTick)s)"
+                $steps[$steps.Count - 1] = New-DunePublicIpStepResult 'bg-ip' 'Propagate IP to battlegroup + restart' 'running' $detail $lastRaw
+                & $pub
+                try {
+                    $probe = Invoke-V6Ssh -Ip $vm.ip `
+                        -Cmd "cat /tmp/dst-cip.rc 2>/dev/null; echo '|'; sudo kubectl -n $bgNs get battlegroup $bgName -o jsonpath='{.status.phase}' 2>/dev/null" `
+                        -TimeoutSec 20
+                    $probeText = if ($probe) { (($probe -join "`n") -replace "`r",'') } else { '' }
+                    $lastRaw = $probeText
+                    $parts = ($probeText -split '\|', 2)
+                    $rcRaw = if ($parts.Count -gt 0) { ($parts[0] -replace "`n",'').Trim() } else { '' }
+                    $bgPhase = if ($parts.Count -gt 1) { ($parts[1] -replace "`n",'').Trim() } else { '' }
+                    # change-ip finished (rc present) AND BG operator settled
+                    if ($rcRaw -match '^\d+$' -and $bgPhase -eq 'Healthy') { $ready = $true; break }
+                } catch {
+                    # Don't treat a transient SSH/kubectl glitch as fatal — just
+                    # try again next tick. Worst case we run the full 5 min and
+                    # report "still coming up".
+                    $lastRaw = "probe error: $($_.Exception.Message)"
+                }
+                if ($i -lt $waitMax) { Start-Sleep -Seconds $waitTick }
+            }
+
+            # Verify in a final short SSH call (annotate node, read addresses).
+            $remoteVerify = @'
+set -eu
+NEW_IP="$1"
+VM_IP="$2"
+BG_NS="$3"
+BG_NAME="$4"
+NODE=$(sudo kubectl get nodes --no-headers -o custom-columns=':metadata.name' | head -1 | tr -d ' ')
+sudo kubectl annotate node "$NODE" "k3s.io/external-ip=$NEW_IP" --overwrite >/dev/null 2>&1 || true
+sudo kubectl patch node "$NODE" --subresource=status --type=merge -p "{\"status\":{\"addresses\":[{\"type\":\"InternalIP\",\"address\":\"$VM_IP\"},{\"type\":\"ExternalIP\",\"address\":\"$NEW_IP\"},{\"type\":\"Hostname\",\"address\":\"$NODE\"}]}}" >/dev/null 2>&1 || true
+EXT=$(sudo kubectl get node "$NODE" -o jsonpath='{range .status.addresses[?(@.type=="ExternalIP")]}{.address}{end}' 2>/dev/null || true)
+ALIAS_OK=no
+/sbin/ip -4 -o addr show dev eth0 | awk '{print $4}' | cut -d/ -f1 | grep -qx "$NEW_IP" && ALIAS_OK=yes
+BGPHASE=$(sudo kubectl -n "$BG_NS" get battlegroup "$BG_NAME" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+printf 'EXTERNALIP=%s\nALIAS_OK=%s\nBG_PHASE=%s\n' "$EXT" "$ALIAS_OK" "$BGPHASE"
+sudo kubectl -n "$BG_NS" get serverset 2>/dev/null | awk 'NR==1 || /survival-1|overmap|deepdesert-1/' || true
+# Audit the final advertised addresses after the detached restart has settled.
+if command -v jq >/dev/null 2>&1; then
+  AUDIT_MISMATCHES=0
+  AUDIT_REPORT=""
+
+  # Utility envs -- every HOST_DATACENTER_IP_ADDRESS should equal NEW_IP.
+  for u in director serverGateway textRouter; do
+    val=$(sudo kubectl get battlegroup "$BG_NAME" -n "$BG_NS" -o json 2>/dev/null | jq -r ".spec.utilities.$u.spec.envVars // [] | map(select(.name==\"HOST_DATACENTER_IP_ADDRESS\")) | .[0].value // \"MISSING\"")
+    if [ "$val" != "$NEW_IP" ]; then
+      AUDIT_REPORT="$AUDIT_REPORT  MISMATCH utilities.$u HOST_DATACENTER_IP_ADDRESS: got '$val' expected '$NEW_IP'\n"
+      AUDIT_MISMATCHES=$((AUDIT_MISMATCHES + 1))
+    fi
+  done
+
+  # amqpAddress (game + admin). host portion must equal NEW_IP.
+  for mq in game admin; do
+    val=$(sudo kubectl get battlegroup "$BG_NAME" -n "$BG_NS" -o json 2>/dev/null | jq -r ".status.utilities.messageQueues.statuses.$mq.amqpAddress // \"MISSING\"")
+    host=$(printf '%s' "$val" | cut -d: -f1)
+    if [ "$host" != "$NEW_IP" ]; then
+      AUDIT_REPORT="$AUDIT_REPORT  MISMATCH status.utilities.messageQueues.statuses.$mq.amqpAddress: got '$val' expected '$NEW_IP:*'\n"
+      AUDIT_MISMATCHES=$((AUDIT_MISMATCHES + 1))
+    fi
+    # Sora's rule: amqpAddress must be publicly routable (not private, not CGNAT).
+    case "$host" in
+      10.*|172.1[6-9].*|172.2[0-9].*|172.3[0-1].*|192.168.*)
+        AUDIT_REPORT="$AUDIT_REPORT  PRIVATE-AMQP-ADDR $mq.amqpAddress='$val' -- LAN address, players cannot join.\n"
+        AUDIT_MISMATCHES=$((AUDIT_MISMATCHES + 1))
+        ;;
+      100.6[4-9].*|100.[7-9][0-9].*|100.1[0-1][0-9].*|100.12[0-7].*)
+        AUDIT_REPORT="$AUDIT_REPORT  CGNAT-AMQP-ADDR $mq.amqpAddress='$val' -- behind Carrier-Grade NAT (100.64.0.0/10); contact ISP.\n"
+        AUDIT_MISMATCHES=$((AUDIT_MISMATCHES + 1))
+        ;;
+    esac
+  done
+
+  if [ "$AUDIT_MISMATCHES" -eq 0 ]; then
+    echo "AUDIT_OK all IP surfaces match $NEW_IP"
+  else
+    printf 'AUDIT_MISMATCH count=%d\n' "$AUDIT_MISMATCHES"
+    printf '%b' "$AUDIT_REPORT"
+  fi
+else
+  echo "AUDIT_SKIP jq not available"
+fi
+
+echo "BGIP_VERIFY_DONE"
+'@
+            $rawVerify = Invoke-DunePublicIpRemoteScript -Ip $vm.ip -Script $remoteVerify -Arguments @($target, $vm.ip, $bgNs, $bgName) -TimeoutSec 60
+            $extIp = ''
+            if ($rawVerify -match '(?m)^EXTERNALIP=([0-9.]+)\s*$') { $extIp = $Matches[1] }
+            $rawBg = ($rawMutate + "`n" + $lastRaw + "`n" + $rawVerify).Trim()
+            $bgDetail = if ($ready) {
+                "Battlegroup IP propagated; servers reported ready after $((($i - 1) * $waitTick))s."
+            } else {
+                'Battlegroup IP propagated; servers still coming up after 5 minutes (this can take a few more minutes - check Server Health).'
+            }
+            # Surface audit-ip-surfaces result inline so users see when an
+            # HOST_DATACENTER_IP_ADDRESS env, amqpAddress, or private/CGNAT
+            # value didn't reconcile cleanly. Non-fatal — reported but the
+            # step still completes so the rest of the apply flow finishes.
+            $bgStatus = 'done'
+            if ($rawVerify -match '(?m)^AUDIT_MISMATCH count=(\d+)') {
+                $bgDetail = "$bgDetail`nAudit found $($Matches[1]) IP-surface mismatch(es) — see raw output."
+                $bgStatus = 'warning'
+            }
+            $steps[$steps.Count - 1] = New-DunePublicIpStepResult 'bg-ip' 'Propagate IP to battlegroup + restart' $bgStatus $bgDetail $rawBg
+            & $pub
+
+            # Persist LastApplied/LastResolved as soon as the CR mutate + servers-ready
+            # wait complete, BEFORE the verify step. Verify's TCP 31982 external check
+            # can transiently fail after an ISP IP change (router forwards may not have
+            # reconciled to the new WAN IP yet). Persisting here means the UI shows the
+            # correct "last applied" value even if verify throws — otherwise the user
+            # sees stale LastAppliedPublicIp in dune-server.config until they run Apply
+            # a second time. Discovered 2026-07-01 during an ISP IP flap: CR + pods
+            # were reconciled but LastAppliedPublicIp stayed at the pre-flap IP.
+            Save-DuneConfig -Config @{
+                PublicIpMode = $Mode
+                DdnsHostname = if ($Mode -eq 'ddns') { $Hostname } else { '' }
+                ManualPublicIp = if ($Mode -eq 'manual') { $target } else { '' }
+                LastResolvedPublicIp = $target
+                LastAppliedPublicIp = $target
+            } | Out-Null
+
+            # --- Verify --------------------------------------------------------
+            $steps.Add((New-DunePublicIpStepResult 'verify' 'Verify external IP + RabbitMQ port' 'running' "Checking node ExternalIP and TCP $target:31982.")) | Out-Null
+            & $pub
+            # Use the same independent observers as the header. A client-side
+            # connection tests router hairpin behavior, not outside reachability.
+            $verdict = 'unknown'
+            try { $verdict = Test-DunePortBuiltin -PublicIp $target -Port 31982 -Protocol TCP } catch { }
+            $extOk = ($extIp -eq $target)
+            $aliasOk = ($rawVerify -match '(?m)^ALIAS_OK=yes\s*$')
+            $bgHealthy = $ready -or ($rawVerify -match '(?m)^BG_PHASE=Healthy\s*$')
+            if ($verdict -eq 'open') {
+                $steps[$steps.Count - 1] = New-DunePublicIpStepResult 'verify' 'Verify external IP + RabbitMQ port' 'done' "External observers reached TCP ${target}:31982. Node ExternalIP=$extIp."
+            } elseif ($extOk -and $aliasOk -and $bgHealthy) {
+                $detail = if ($verdict -eq 'closed') {
+                    "External observers reported TCP ${target}:31982 closed. Check the router's TCP 31982 forwarding to this VM."
+                } else { "External TCP check unavailable. Check reachability from another network." }
+                $steps[$steps.Count - 1] = New-DunePublicIpStepResult 'verify' 'Verify external IP + RabbitMQ port' 'warning' "$detail Server network and battlegroup reconciliation succeeded." $rawVerify
+            } else {
+                throw "Server reconciliation is incomplete. Node ExternalIP=$extIp; external TCP result=$verdict. Retry Server Health after startup."
+            }
+            & $pub
+
+            Save-DuneConfig -Config @{
+                PublicIpMode = $Mode
+                DdnsHostname = if ($Mode -eq 'ddns') { $Hostname } else { '' }
+                ManualPublicIp = if ($Mode -eq 'manual') { $target } else { '' }
+                LastResolvedPublicIp = $target
+                LastAppliedPublicIp = $target
+            } | Out-Null
+        }
+        # Serialize concurrent applies when the named-lock helper is available
+        # (HttpServer.ps1). The async launcher's running-flag already guards
+        # against double-runs, so fall back to running directly if the helper
+        # isn't loaded in this runspace.
+        if (Get-Command Invoke-WithDuneLock -ErrorAction SilentlyContinue) {
+            Invoke-WithDuneLock -Name 'public-ip-change' -TimeoutSec 5 -Script $applyWork
+        } else {
+            & $applyWork
+        }
+        $state.phase = 'done'; $state.running = $false
+        $state.finished = (Get-Date).ToUniversalTime().ToString('o')
+        & $pub 'done'
+        return @{ ok=$true; publicIp=$PublicIp; steps=@($steps) }
+    } catch {
+        if ($steps.Count -gt 0 -and $steps[$steps.Count - 1].status -eq 'running') {
+            $last = $steps[$steps.Count - 1]
+            $steps[$steps.Count - 1] = New-DunePublicIpStepResult $last.id $last.label 'failed' $_.Exception.Message $last.raw
+        }
+        $state.phase = 'error'; $state.running = $false; $state.error = $_.Exception.Message
+        $state.finished = (Get-Date).ToUniversalTime().ToString('o')
+        & $pub 'error'
+        return @{ ok=$false; publicIp=$PublicIp; error=$_.Exception.Message; steps=@($steps) }
+    }
+}
+
+# Launch Invoke-DunePublicIpApply in a dedicated background runspace and return
+# immediately. The apply streams progress to the state file (Save-DunePublicIpApplyState)
+# which the UI polls via GET /api/public-ip/apply/status. Running off the API pool
+# keeps all request workers free during the multi-minute apply. Mirrors
+# Start-DuneBotSeedAsync in GameplayBot.ps1.
+function Start-DunePublicIpApplyAsync {
+    param(
+        [Parameter(Mandatory)][string]$PublicIp,
+        [string]$Mode = 'manual',
+        [string]$Hostname = '',
+        [string]$ServerDir
+    )
+    if (-not $ServerDir) { $ServerDir = $script:DunePublicIpServerDir }
+
+    $st = Read-DunePublicIpApplyState
+    $running = $false
+    try { if ($st -is [hashtable]) { $running = [bool]$st['running'] } else { $running = [bool]$st.running } } catch {}
+    if ($running) {
+        return @{ ok = $false; running = $true; error = 'A public IP change is already in progress.' }
+    }
+    if (-not $ServerDir -or -not (Test-Path -LiteralPath $ServerDir)) {
+        return @{ ok = $false; error = "Start-DunePublicIpApplyAsync: server dir not found ('$ServerDir')." }
+    }
+
+    $target = ([string]$PublicIp).Trim()
+    # Stamp 'starting' synchronously so the next status poll sees running=true.
+    Save-DunePublicIpApplyState -State @{
+        phase = 'starting'; running = $true
+        mode = $Mode; hostname = $Hostname; publicIp = $target
+        steps = @(@{ id='client'; label='Apply request sent'; status='running'; detail='Starting the public IP change on the server.' })
+        started = (Get-Date).ToUniversalTime().ToString('o')
+        updated = (Get-Date).ToUniversalTime().ToString('o'); finished = $null; error = ''
+    }
+
+    try {
+        $rs = [runspacefactory]::CreateRunspace()
+        $rs.ApartmentState = 'MTA'
+        $rs.ThreadOptions  = 'ReuseThread'
+        $rs.Open()
+        $ps = [powershell]::Create()
+        $ps.Runspace = $rs
+        $script:DunePublicIpApplyRunspace = @{ ps = $ps; rs = $rs; handle = $null; started = (Get-Date).ToUniversalTime() }
+        [void]$ps.AddScript({
+            param($ServerDir, $PublicIp, $Mode, $Hostname)
+            try {
+                $boot = Join-Path $ServerDir 'lib\Bootstrap.ps1'
+                if (Test-Path $boot) { . $boot }
+                # Load HttpServer.ps1 too so Invoke-WithDuneLock / Get-DuneLock
+                # (defined there, not in lib/) are available to the apply.
+                $http = Join-Path $ServerDir 'HttpServer.ps1'
+                if (Test-Path $http) { . $http }
+                Get-ChildItem -Path (Join-Path $ServerDir 'lib') -Filter '*.ps1' | ForEach-Object {
+                    if ($_.Name -ieq 'Bootstrap.ps1') { return }
+                    try { . $_.FullName } catch {}
+                }
+                [void](Invoke-DunePublicIpApply -PublicIp $PublicIp -Mode $Mode -Hostname $Hostname)
+            } catch {
+                try {
+                    Save-DunePublicIpApplyState -State @{
+                        phase = 'error'; running = $false
+                        publicIp = $PublicIp
+                        steps = @(@{ id='client'; label='Apply request sent'; status='failed'; detail="Apply runspace crashed: $($_.Exception.Message)" })
+                        error = "Apply runspace crashed: $($_.Exception.Message)"
+                        updated = (Get-Date).ToUniversalTime().ToString('o')
+                        finished = (Get-Date).ToUniversalTime().ToString('o')
+                    }
+                } catch {}
+            }
+        }).AddArgument($ServerDir).AddArgument($target).AddArgument($Mode).AddArgument($Hostname)
+        $script:DunePublicIpApplyRunspace.handle = $ps.BeginInvoke()
+        return @{ ok = $true; running = $true; message = 'Public IP change started.' }
+    } catch {
+        Save-DunePublicIpApplyState -State @{
+            phase = 'error'; running = $false; publicIp = $target
+            steps = @(@{ id='client'; label='Apply request sent'; status='failed'; detail="Failed to spawn apply runspace: $($_.Exception.Message)" })
+            error = "Failed to spawn apply runspace: $($_.Exception.Message)"
+            updated = (Get-Date).ToUniversalTime().ToString('o')
+            finished = (Get-Date).ToUniversalTime().ToString('o')
+        }
+        return @{ ok = $false; running = $false; error = "Failed to spawn apply runspace: $($_.Exception.Message)" }
+    }
+}
+
+# =============================================================================
+# Server-browser Ping fix: HOST_DATACENTER_ID / HOST_DATACENTER_IP_ADDRESS
+# =============================================================================
+# The in-game server-browser Ping column only populates when the battlegroup
+# CR's HOST_DATACENTER_ID env (on the 3 utility pods: director / serverGateway /
+# textRouter) is the LITERAL value "dune-awakening". The vendor default is
+# "dune-testing", which does not register, so out of the box Ping shows 0 with
+# empty bars. Live-verified 2026-07-11 on Coastal's Reapers battlegroup: with
+# HOST_DATACENTER_ID = "dune-awakening" (+ HOST_DATACENTER_IP_ADDRESS = the
+# public IP) the browser Ping flipped from 0 to 46 with full green bars.
+#
+# IMPORTANT: patching the battlegroup CR (spec.utilities.<u>.spec.envVars) is
+# the PERSISTENT lever -- that CR is the operator's desired state (the same
+# object 'Edit Director' / kubectl edit battlegroup opens), so the operator
+# regenerates the utility pods from it and the value survives pod/BG restarts.
+# We do NOT touch the running pods directly, and we do NOT rely on the VM's
+# Linux hostname (an earlier attempt keyed off the hostname 'duneawakening',
+# the wrong literal, and failed).
+
+$script:DuneBrowserPingRecommendedId = 'dune-awakening'
+
+# Read the VM's Linux hostname over SSH (informational only -- shown in the UI
+# for context; it is NOT the value we patch). Returns '' on SSH failure.
+function Get-DuneVmHostname {
+    param([Parameter(Mandatory)][string]$Ip)
+    try {
+        $raw = Invoke-V6Ssh -Ip $Ip -Cmd 'hostname' -TimeoutSec 15
+        return ((($raw -join '') -replace "`r",'').Trim())
+    } catch {
+        return ''
+    }
+}
+
+# Read every utility pod's HOST_DATACENTER_ID + HOST_DATACENTER_IP_ADDRESS
+# values from the BG CR so the UI can pre-populate inputs and show whether the
+# CR already carries the recommended "dune-awakening" id.
+function Get-DuneBrowserPingStatus {
+    param([Parameter(Mandatory)][string]$Ip)
+    $vmHost = Get-DuneVmHostname -Ip $Ip
+    $script = @'
+set -eu
+NS=$(sudo kubectl get battlegroups -A --no-headers -o custom-columns=':metadata.namespace' 2>/dev/null | head -1 | tr -d ' ')
+BG=$(sudo kubectl get battlegroups -A --no-headers -o custom-columns=':metadata.name' 2>/dev/null | head -1 | tr -d ' ')
+[ -n "$NS" ] && [ -n "$BG" ] || { echo "DISCOVER_FAIL"; exit 0; }
+if ! command -v jq >/dev/null 2>&1; then echo "NO_JQ"; exit 0; fi
+DC_IDS=$(sudo kubectl get battlegroup "$BG" -n "$NS" -o json | jq -r '[.spec.utilities.director.spec.envVars, .spec.utilities.serverGateway.spec.envVars, .spec.utilities.textRouter.spec.envVars] | map(map(select(.name=="HOST_DATACENTER_ID")) | .[0].value // "") | unique | join("|")')
+DC_IPS=$(sudo kubectl get battlegroup "$BG" -n "$NS" -o json | jq -r '[.spec.utilities.director.spec.envVars, .spec.utilities.serverGateway.spec.envVars, .spec.utilities.textRouter.spec.envVars] | map(map(select(.name=="HOST_DATACENTER_IP_ADDRESS")) | .[0].value // "") | unique | join("|")')
+printf 'NS=%s\nBG=%s\nDC_IDS=%s\nDC_IPS=%s\n' "$NS" "$BG" "$DC_IDS" "$DC_IPS"
+'@
+    $text = ''
+    try {
+        $text = Invoke-DunePublicIpRemoteScript -Ip $Ip -Script $script -TimeoutSec 25
+    } catch {
+        $text = ''
+    }
+    $ns = ''; $bg = ''
+    $dcIds = @(); $dcIps = @()
+    foreach ($ln in ($text -split "`n")) {
+        if     ($ln -match '^NS=(.*)$')     { $ns = $Matches[1].Trim() }
+        elseif ($ln -match '^BG=(.*)$')     { $bg = $Matches[1].Trim() }
+        elseif ($ln -match '^DC_IDS=(.*)$') { $dcIds = @(($Matches[1] -split '\|') | Where-Object { $_ }) }
+        elseif ($ln -match '^DC_IPS=(.*)$') { $dcIps = @(($Matches[1] -split '\|') | Where-Object { $_ }) }
+    }
+    # Consolidated single values when all three utilities agree (typical).
+    # "(mixed)" surfaces the rare case where they don't -- the user then sees
+    # the disagreement before overwriting.
+    $currentDatacenterId = if ($dcIds.Count -eq 1) { $dcIds[0] } elseif ($dcIds.Count -gt 1) { '(mixed)' } else { '' }
+    $currentDatacenterIp = if ($dcIps.Count -eq 1) { $dcIps[0] } elseif ($dcIps.Count -gt 1) { '(mixed)' } else { '' }
+    $recommended = $script:DuneBrowserPingRecommendedId
+    return @{
+        vmHostname                = $vmHost
+        currentDatacenterId       = $currentDatacenterId
+        currentDatacenterIp       = $currentDatacenterIp
+        hostnameMatches           = [bool]($vmHost -ne '' -and $currentDatacenterId -eq $vmHost)
+        recommendedDatacenterId   = $recommended
+        datacenterIdIsRecommended = [bool]($currentDatacenterId -eq $recommended)
+        bgNamespace               = $ns
+        bgName                    = $bg
+    }
+}
+
+# Patch every utility pod's HOST_DATACENTER_ID to $DatacenterId (and, when
+# $PublicIp is supplied and differs from the current CR value,
+# HOST_DATACENTER_IP_ADDRESS too), then restart the battlegroup cleanly so FLS
+# re-registers on the next matchmaker cycle. The operator rolls the utility pods
+# on its own from the CR patch; the BG restart handles the game-server side.
+function Invoke-DuneBrowserPingReconcile {
+    param(
+        [Parameter(Mandatory)][string]$Ip,
+        [Parameter(Mandatory)][string]$DatacenterId,
+        [string]$PublicIp = ''
+    )
+    if ($DatacenterId -notmatch '^[A-Za-z0-9._-]{1,64}$') {
+        return @{ ok=$false; status=400; message='Invalid datacenter ID (1-64 chars: letters, digits, . _ -).' }
+    }
+    if ($PublicIp -and -not (Test-DuneIPv4Literal -Ip $PublicIp)) {
+        return @{ ok=$false; status=400; message='Invalid IPv4 for datacenter IP.' }
+    }
+    $script = @'
+set -eu
+DC_ID="$1"
+NEW_IP="$2"
+
+NS=$(sudo kubectl get battlegroups -A --no-headers -o custom-columns=':metadata.namespace' 2>/dev/null | head -1 | tr -d ' ')
+BG=$(sudo kubectl get battlegroups -A --no-headers -o custom-columns=':metadata.name' 2>/dev/null | head -1 | tr -d ' ')
+[ -n "$NS" ] && [ -n "$BG" ] || { echo "DISCOVER_FAIL"; exit 2; }
+if ! command -v jq >/dev/null 2>&1; then echo "NO_JQ"; exit 3; fi
+
+for u in director serverGateway textRouter; do
+  # HOST_DATACENTER_ID
+  idx=$(sudo kubectl get battlegroup "$BG" -n "$NS" -o json | jq -r --arg u "$u" '((.spec.utilities[$u].spec.envVars // []) | map(.name) | index("HOST_DATACENTER_ID")) // -1')
+  if [ "$idx" != "-1" ] && [ "$idx" != "null" ]; then
+    cur=$(sudo kubectl get battlegroup "$BG" -n "$NS" -o jsonpath="{.spec.utilities.$u.spec.envVars[$idx].value}" 2>/dev/null)
+    if [ "$cur" != "$DC_ID" ]; then
+      sudo kubectl patch battlegroup "$BG" -n "$NS" --type=json -p "[{\"op\":\"replace\",\"path\":\"/spec/utilities/$u/spec/envVars/$idx/value\",\"value\":\"$DC_ID\"}]" >/dev/null 2>&1 && echo "PATCHED_ID:$u:$cur->$DC_ID"
+    else
+      echo "UNCHANGED_ID:$u:$cur"
+    fi
+  else
+    echo "MISSING_ID_ENV:$u"
+  fi
+  # HOST_DATACENTER_IP_ADDRESS (only when caller supplied a new IP)
+  if [ -n "$NEW_IP" ]; then
+    ipx=$(sudo kubectl get battlegroup "$BG" -n "$NS" -o json | jq -r --arg u "$u" '((.spec.utilities[$u].spec.envVars // []) | map(.name) | index("HOST_DATACENTER_IP_ADDRESS")) // -1')
+    if [ "$ipx" != "-1" ] && [ "$ipx" != "null" ]; then
+      curip=$(sudo kubectl get battlegroup "$BG" -n "$NS" -o jsonpath="{.spec.utilities.$u.spec.envVars[$ipx].value}" 2>/dev/null)
+      if [ "$curip" != "$NEW_IP" ]; then
+        sudo kubectl patch battlegroup "$BG" -n "$NS" --type=json -p "[{\"op\":\"replace\",\"path\":\"/spec/utilities/$u/spec/envVars/$ipx/value\",\"value\":\"$NEW_IP\"}]" >/dev/null 2>&1 && echo "PATCHED_IP:$u:$curip->$NEW_IP"
+      else
+        echo "UNCHANGED_IP:$u:$curip"
+      fi
+    fi
+  fi
+done
+
+# Restart the battlegroup cleanly so FLS re-registers on the next matchmaker
+# cycle. Utility pods roll on their own from the CR patch above; this handles
+# the game-server side.
+BGBIN=/home/dune/.dune/bin/battlegroup
+if [ -x "$BGBIN" ]; then
+  "$BGBIN" restart 2>&1 | tail -30 || true
+  echo "BG_RESTART_ISSUED"
+else
+  echo "NO_BGBIN"
+fi
+echo "DONE"
+'@
+    $raw = ''
+    try {
+        $raw = Invoke-DunePublicIpRemoteScript -Ip $Ip -Script $script -Arguments @($DatacenterId, $PublicIp) -TimeoutSec 300
+    } catch {
+        return @{ ok=$false; status=502; message="Reconcile script failed: $($_.Exception.Message)" }
+    }
+    if ($raw -match 'DISCOVER_FAIL') { return @{ ok=$false; status=502; message='Could not discover battlegroup on VM.' } }
+    if ($raw -match 'NO_JQ')         { return @{ ok=$false; status=502; message='jq is not installed on the VM (required to patch the BG CR).' } }
+    $patched = @(($raw -split "`n") | Where-Object { $_ -match '^PATCHED_' }).Count
+    return @{
+        ok           = $true
+        message      = if ($patched -gt 0) {
+            "Set HOST_DATACENTER_ID / HOST_DATACENTER_IP_ADDRESS on $patched env(s) and restarted the battlegroup. Give the matchmaker a few minutes, then check the in-game server browser Ping column."
+        } else {
+            'Values already matched the CR; battlegroup restarted anyway so FLS re-registers. Give it a few minutes, then check the server browser Ping.'
+        }
+        datacenterId = $DatacenterId
+        publicIp     = $PublicIp
+        output       = $raw
+    }
+}

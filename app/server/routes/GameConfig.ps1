@@ -1,0 +1,1169 @@
+﻿# GameConfig API — read/write UserGame.ini + UserEngine.ini on the BG VM.
+# Two endpoints + one schema endpoint.
+
+# -----------------------------------------------------------------------------
+# GET /api/gameconfig/schema — static schema (no SSH).
+# Returned shape:
+#   { schema: [ { section, fields: [ { key, file, type, label, options?, ... } ] } ] }
+# -----------------------------------------------------------------------------
+Register-DuneRoute -Method GET -Path '/api/gameconfig/schema' -Handler {
+    param($req, $res, $routeParams, $body)
+    Write-DuneJson -Response $res -Body @{ schema = Get-DuneGameConfigSchemaApi }
+}
+
+# Server Settings use the persistent Linux UserSettings file. Existing YAML is
+# retained until a backed-up migration completes; it can also be read as a draft.
+Register-DuneRoute -Method GET -Path '/api/gameconfig/retail-startup-sync' -Handler {
+    param($req,$res,$routeParams,$body)
+    try {Write-DuneJson -Response $res -Body (Get-DuneRetailStartupSyncPreference)}
+    catch {Write-DuneError -Response $res -Status 400 -Message $_.Exception.Message}
+}
+
+Register-DuneRoute -Method PUT -Path '/api/gameconfig/retail-startup-sync' -LocalOnly -Handler {
+    param($req,$res,$routeParams,$body)
+    if(-not($body -is [hashtable]) -or $body.enabled -isnot [bool]){
+        Write-DuneError -Response $res -Status 400 -Message 'enabled must be a boolean.'
+        return
+    }
+    try {
+        $result=Invoke-WithDuneLock -Name 'retail-startup-sync' -Script {
+            $pending = $false
+            $cleanupError = ''
+            if (-not $body.enabled) {
+                # Persist the opt-out before remote cleanup. A transport failure
+                # must not leave automatic writers active after partial cleanup.
+                $null = Set-DuneRetailStartupSyncPreference -Enabled $false -CleanupPending
+                $ctx = Get-DuneGameConfigContext
+                if ($ctx.ok) {
+                    try { $null = Remove-DuneManagedSettingsYamlInjections -Ip $ctx.ip }
+                    catch { $pending=$true; $cleanupError=$_.Exception.Message }
+                }
+                else { $pending = $true }
+            }
+            $saved = Set-DuneRetailStartupSyncPreference -Enabled $body.enabled -CleanupPending:$pending
+            if ($cleanupError) { $saved.cleanupError = $cleanupError }
+            $saved
+        }
+        Write-DuneJson -Response $res -Body $result
+    } catch {Write-DuneError -Response $res -Status 400 -Message $_.Exception.Message}
+}
+
+Register-DuneRoute -Method GET -Path '/api/gameconfig/retail-server-settings' -Handler {
+    param($req, $res, $routeParams, $body)
+    $ctx = Get-DuneGameConfigContext
+    if (-not $ctx.ok) {
+        Write-DuneError -Response $res -Status $ctx.status -Message $ctx.message
+        return
+    }
+    try {
+        $readOperator = $req -and $req.QueryString['source'] -eq 'operator'
+        Write-DuneJson -Response $res -Body (Get-DuneRetailServerSettings -Ip $ctx.ip -ReadOperator:$readOperator)
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message "Official Retail Server Settings load failed: $($_.Exception.Message)"
+    }
+}
+
+Register-DuneRoute -Method PUT -Path '/api/gameconfig/retail-server-settings' -Handler {
+    param($req, $res, $routeParams, $body)
+    $ctx = Get-DuneGameConfigContext
+    if (-not $ctx.ok) {
+        Write-DuneError -Response $res -Status $ctx.status -Message $ctx.message
+        return
+    }
+    if (-not (Test-DunePlayerGuard -Req $req -Res $res -Ip $ctx.ip)) { return }
+    if (-not ($body -is [hashtable]) -or
+        -not $body.ContainsKey('revision') -or
+        -not $body.ContainsKey('updates') -or
+        -not ($body.updates -is [hashtable])) {
+        Write-DuneError -Response $res -Status 400 -Message 'Body must include revision and an updates object.'
+        return
+    }
+    try {
+        Write-DuneJson -Response $res -Body (
+            Set-DuneRetailServerSettings -Ip $ctx.ip -Updates $body.updates -ExpectedRevision "$($body.revision)" `
+                -ImportOperatorRevision "$($body.importOperatorRevision)")
+    } catch {
+        $status = if ($_.Exception.Message -match 'changed since|changed during save') { 409 } else { 400 }
+        Write-DuneError -Response $res -Status $status -Message $_.Exception.Message
+    }
+}
+
+# Experimental Lab metadata and category fields are separate from the normal
+# schema so opening DST or Game Config never loads the 5,000-control catalog.
+Register-DuneRoute -Method GET -Path '/api/gameconfig/experimental/categories' -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        Write-DuneJson -Response $res -Body @{ categories = Get-DuneAdvancedCvarCategoriesApi }
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message "Experimental Lab catalog load failed: $($_.Exception.Message)"
+    }
+}
+
+Register-DuneRoute -Method GET -Path '/api/gameconfig/experimental/category' -Handler {
+    param($req, $res, $routeParams, $body)
+    $category = "$($req.QueryString['name'])".Trim()
+    if (-not $category) {
+        Write-DuneError -Response $res -Status 400 -Message 'Category name is required.'
+        return
+    }
+    try {
+        Write-DuneJson -Response $res -Body @{
+            category = $category
+            fields   = @(Get-DuneAdvancedCvarCategoryApi -Category $category)
+        }
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message "Experimental Lab category load failed: $($_.Exception.Message)"
+    }
+}
+
+Register-DuneRoute -Method GET -Path '/api/gameconfig/experimental/search' -Handler {
+    param($req, $res, $routeParams, $body)
+    $query = "$($req.QueryString['q'])".Trim()
+    try {
+        $fields = [object[]]@()
+        if ($query) {
+            $fields = [object[]]@(Search-DuneAdvancedCvarCatalogApi -Query $query)
+        }
+
+        Write-DuneJson -Response $res -Body @{
+            query  = $query
+            fields = $fields
+        }
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message "Experimental Lab search failed: $($_.Exception.Message)"
+    }
+}
+
+Register-DuneRoute -Method GET -Path '/api/gameconfig/time-of-day' -Handler {
+    param($req, $res, $routeParams, $body)
+    $ctx = Get-DuneGameConfigContext
+    if (-not $ctx.ok) {
+        Write-DuneError -Response $res -Status $ctx.status -Message $ctx.message
+        return
+    }
+    try {
+        Write-DuneJson -Response $res -Body (Get-DuneTwilightLockConfig -Ip $ctx.ip)
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message "Time of Day load failed: $($_.Exception.Message)"
+    }
+}
+
+Register-DuneRoute -Method POST -Path '/api/gameconfig/time-of-day/stage' -Handler {
+    param($req, $res, $routeParams, $body)
+    $ctx = Get-DuneGameConfigContext
+    if (-not $ctx.ok) {
+        Write-DuneError -Response $res -Status $ctx.status -Message $ctx.message
+        return
+    }
+    if (-not (Test-DunePlayerGuard -Req $req -Res $res -Ip $ctx.ip)) { return }
+    try {
+        Write-DuneJson -Response $res -Body (
+            Invoke-DuneTwilightLockStage -Ip $ctx.ip -Candidate $body.candidate)
+    } catch {
+        Write-DuneError -Response $res -Status 400 -Message $_.Exception.Message
+    }
+}
+
+Register-DuneRoute -Method POST -Path '/api/gameconfig/time-of-day/restore' -Handler {
+    param($req, $res, $routeParams, $body)
+    $ctx = Get-DuneGameConfigContext
+    if (-not $ctx.ok) {
+        Write-DuneError -Response $res -Status $ctx.status -Message $ctx.message
+        return
+    }
+    if (-not (Test-DunePlayerGuard -Req $req -Res $res -Ip $ctx.ip)) { return }
+    try {
+        Write-DuneJson -Response $res -Body (Invoke-DuneTwilightLockRestore -Ip $ctx.ip)
+    } catch {
+        Write-DuneError -Response $res -Status 400 -Message $_.Exception.Message
+    }
+}
+
+# -----------------------------------------------------------------------------
+# GET /api/gameconfig/defaults — full settings catalog from the live image.
+# Reads DefaultGame.ini + DefaultEngine.ini out of a running game-server pod
+# (cached per process), merges with the current User*.ini overrides, and
+# returns every section as { name, file, count, overriddenCount, keys[] }.
+# Pass ?refresh=1 to force a re-read of the pod files (e.g. after a game patch).
+# 503 when VM not available; 500 on read failure.
+# -----------------------------------------------------------------------------
+Register-DuneRoute -Method GET -Path '/api/gameconfig/defaults' -Handler {
+    param($req, $res, $routeParams, $body)
+    $ctx = Get-DuneGameConfigContext
+    if (-not $ctx.ok) {
+        Write-DuneError -Response $res -Status $ctx.status -Message $ctx.message
+        return
+    }
+    try {
+        $force = $false
+        try {
+            $v = $req.QueryString['refresh']
+            if ($v -and ($v -eq '1' -or $v -eq 'true' -or $v -eq 'yes')) { $force = $true }
+        } catch {}
+        $cat = Get-DuneGameConfigCatalog -Ip $ctx.ip -ForceDefaults:$force
+        Write-DuneJson -Response $res -Body @{
+            available = $true
+            cached    = $cat.cached
+            source    = $cat.source
+            sections  = $cat.sections
+        }
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message "Defaults catalog load failed: $($_.Exception.Message)"
+    }
+}
+
+# -----------------------------------------------------------------------------
+# GET /api/gameconfig — fetch live INI values from the BG VM.
+# Returns:
+#   { available: true, source: 'installed'|'legacy-live'|'live'|'template'|'cache',
+#     game: { path, values, raw }, engine: { path, values, raw } }
+# 503 with message when VM not available.
+# -----------------------------------------------------------------------------
+Register-DuneRoute -Method GET -Path '/api/gameconfig' -Handler {
+    param($req, $res, $routeParams, $body)
+    $ctx = Get-DuneGameConfigContext
+    if (-not $ctx.ok) {
+        Write-DuneError -Response $res -Status $ctx.status -Message $ctx.message
+        return
+    }
+    try {
+        $cfg = Get-DuneGameConfig -Ip $ctx.ip
+        Write-DuneJson -Response $res -Body @{
+            available           = $true
+            source              = $cfg.source
+            authoritative       = $cfg.authoritative
+            needsInitialization = $cfg.needsInitialization
+            game                = $cfg.game
+            engine              = $cfg.engine
+        }
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message "Game config load failed: $($_.Exception.Message)"
+    }
+}
+
+# -----------------------------------------------------------------------------
+# POST /api/gameconfig/initialize — adopt the currently-installed, readable
+# UserGame.ini/UserEngine.ini defaults as authoritative when no authority marker
+# and no prior DST-managed candidate exist (installed-uninitialized). Writes
+# ONLY the v2 authority marker file — never UserGame.ini/UserEngine.ini. Owner
+# access is already required for the whole /api/gameconfig prefix; this also
+# requires an exact typed confirmation string.
+# -----------------------------------------------------------------------------
+Register-DuneRoute -Method POST -Path '/api/gameconfig/initialize' -Handler {
+    param($req, $res, $routeParams, $body)
+    $ctx = Get-DuneGameConfigContext
+    if (-not $ctx.ok) {
+        Write-DuneError -Response $res -Status $ctx.status -Message $ctx.message
+        return
+    }
+    $confirm = [string](Get-DuneBodyValue -Body $body -Name 'confirm')
+    if ($confirm -cne 'INITIALIZE GAME CONFIG') {
+        Write-DuneError -Response $res -Status 400 -Message 'Type INITIALIZE GAME CONFIG exactly to adopt the installed defaults.'
+        return
+    }
+    try {
+        Write-DuneJson -Response $res -Body (Initialize-DuneGameConfigAuthority -Ip $ctx.ip -Confirmed $true)
+    } catch {
+        Write-DuneError -Response $res -Status 409 -Message "Game Config initialization failed: $($_.Exception.Message)"
+    }
+}
+
+# -----------------------------------------------------------------------------
+# PUT /api/gameconfig — apply updates.
+# Body: { updates: { "<key>": "<value>", ... } }   (schema-keyed; section/file
+#        resolved from the schema), OR
+#        { updates: [ { file, section, key, value }, ... ] } (explicit/raw).
+# Every touched section is relocated into the DST-managed block (whole-section
+# absorption); any pre-existing the reference implementation block is migrated. Returns the
+# freshly-fetched config so the client can refresh its state.
+# -----------------------------------------------------------------------------
+Register-DuneRoute -Method PUT -Path '/api/gameconfig' -Handler {
+    param($req, $res, $routeParams, $body)
+    $ctx = Get-DuneGameConfigContext
+    if (-not $ctx.ok) {
+        Write-DuneError -Response $res -Status $ctx.status -Message $ctx.message
+        return
+    }
+    if (-not (Test-DunePlayerGuard -Req $req -Res $res -Ip $ctx.ip)) { return }
+
+    $updates = $null
+    if ($body -is [hashtable] -and $body.ContainsKey('updates')) { $updates = $body.updates }
+    elseif ($body.updates) { $updates = $body.updates }
+    if (-not $updates) {
+        Write-DuneError -Response $res -Status 400 -Message 'Body must include an "updates" object or array.'
+        return
+    }
+
+    # Build a schema lookup: key -> @{ section; file }.
+    $schemaMap = @{}
+    foreach ($f in $script:DuneGameConfigSchema) { $schemaMap[$f.Key] = @{ section = $f.Section; file = $f.File } }
+
+    $structured = New-Object 'System.Collections.Generic.List[object]'
+    if ($updates -is [System.Collections.IEnumerable] -and -not ($updates -is [hashtable]) -and -not ($updates -is [string])) {
+        # Explicit array form: each item already carries file/section/key/value
+        # OR file/section/key/arrayLines (for +/-key= array entries).
+        foreach ($u in $updates) {
+            $sec = "$($u.section)".Trim(); $file = "$($u.file)".Trim(); $key = "$($u.key)".Trim()
+            if (-not $key) { continue }
+            if (-not (Test-DuneGameConfigRawTextSafe -Value $sec) -or
+                -not (Test-DuneGameConfigRawTextSafe -Value $file) -or
+                -not (Test-DuneGameConfigRawTextSafe -Value $key)) {
+                Write-DuneError -Response $res -Status 400 -Message 'Raw INI file, section, and key identifiers must be one physical line without control characters.'
+                return
+            }
+            if ($key -match '^[+-]') {
+                Write-DuneError -Response $res -Status 400 -Message 'Raw INI keys must not include Unreal + or - operator prefixes; use arrayLines for array entries.'
+                return
+            }
+            if (-not $sec -or -not $file) {
+                if ($schemaMap.ContainsKey($key)) { if (-not $sec) { $sec = $schemaMap[$key].section }; if (-not $file) { $file = $schemaMap[$key].file } }
+            }
+            if (-not $sec -or -not $file) { continue }
+            if (Test-DuneGameConfigRawTargetBlocked -File $file -Section $sec -Key $key) {
+                Write-DuneError -Response $res -Status 400 -Message "Use the Time of day phase controls to change m_StartTime."
+                return
+            }
+            # Array-entry payload: rebuild the full set of +/-key= lines for
+            # this section+key. Save-DuneGameConfigUpdates knows to strip every
+            # +/- line for the key first and then write the supplied set. An
+            # empty arrayLines array is treated as arrayRemove (delete all).
+            $arrLines = $null
+            if ($u -is [hashtable]) {
+                if ($u.ContainsKey('arrayLines')) { $arrLines = $u['arrayLines'] }
+            } elseif ($u.PSObject.Properties['arrayLines']) {
+                $arrLines = $u.arrayLines
+            }
+            if ($null -ne $arrLines) {
+                $lines = New-Object 'System.Collections.Generic.List[string]'
+                if ($arrLines -is [System.Collections.IEnumerable] -and -not ($arrLines -is [string])) {
+                    foreach ($ln in $arrLines) {
+                        $s = "$ln".Trim()
+                        if (-not $s) { continue }
+                        if (-not (Test-DuneGameConfigArrayLineMatchesKey -Line $s -Key $key)) {
+                            Write-DuneError -Response $res -Status 400 -Message "Every arrayLines entry must be a +/-$key= line matching the submitted key."
+                            return
+                        }
+                        $lines.Add($s)
+                    }
+                }
+                if ($lines.Count -eq 0) {
+                    $structured.Add(@{ file = $file; section = $sec; key = $key; arrayRemove = $true })
+                } else {
+                    $structured.Add(@{ file = $file; section = $sec; key = $key; arrayLines = $lines.ToArray() })
+                }
+                continue
+            }
+            $rawValue = "$($u.value)"
+            if (-not (Test-DuneGameConfigRawTextSafe -Value $rawValue)) {
+                Write-DuneError -Response $res -Status 400 -Message 'Raw scalar INI values must be one physical line without control characters.'
+                return
+            }
+            $rm = ($u.remove -eq $true) -or [string]::IsNullOrWhiteSpace($rawValue)
+            if ($u.remove -eq $true) { $rawValue = '' }
+            $structured.Add(@{ file = $file; section = $sec; key = $key; value = $rawValue; remove = $rm })
+        }
+    } else {
+        # Schema-keyed object form: resolve section/file from the schema.
+        $keys = if ($updates -is [hashtable]) { $updates.Keys } else { $updates.PSObject.Properties.Name }
+        foreach ($k in $keys) {
+            $v = if ($updates -is [hashtable]) { $updates[$k] } else { $updates.$k }
+            if (-not $schemaMap.ContainsKey($k)) {
+                if (-not (Test-DuneAdvancedCvarKey -Key $k)) { continue }
+                $schemaMap[$k] = @{ file = 'engine'; section = $script:DuneGcSecConsole }
+            }
+            $rm = [string]::IsNullOrWhiteSpace("$v")
+            $structured.Add(@{ file = $schemaMap[$k].file; section = $schemaMap[$k].section; key = $k; value = "$v"; remove = $rm })
+        }
+    }
+
+    if ($structured.Count -eq 0) {
+        Write-DuneError -Response $res -Status 400 -Message 'No recognized keys in updates.'
+        return
+    }
+    foreach ($update in $structured) {
+        if ((Test-DuneStartupConsoleVariableKey -Key "$($update.key)") -and
+            -not $update.remove -and
+            -not (Test-DuneStartupConsoleVariableValue -Value "$($update.value)")) {
+            Write-DuneError -Response $res -Status 400 -Message "$($update.key) contains a comma, quote, control character, or exceeds 512 characters and cannot be encoded in the saved startup payload."
+            return
+        }
+    }
+
+    try {
+        if ($body.lab -eq $true) {
+            $before = Get-DuneGameConfig -Ip $ctx.ip
+            foreach ($file in @('game','engine')) {
+                Assert-DuneLabPathsUnchanged -Raw "$($before[$file].raw)" -Updates @($structured | Where-Object { $_.file -eq $file })
+            }
+        }
+        Save-DuneGameConfigLocked -Ip $ctx.ip -Updates $structured.ToArray()
+        # Console variables are staged, never applied here. The values live in
+        # UserEngine.ini; the matching startup commands are rebuilt from that file
+        # at the start of every battlegroup restart. Patching pod specs on save
+        # would make the operator replace the Hagga pod and disconnect its players
+        # the moment someone hits Save.
+        $restartRequired = [bool]($structured | Where-Object { Test-DuneStartupConsoleVariableKey -Key "$($_.key)" } | Select-Object -First 1)
+        $cfg = Get-DuneGameConfig -Ip $ctx.ip
+        $clientApply = Get-DuneGameConfigClientApplyNotice -Updates $structured.ToArray()
+
+        # If m_TaskGoalAmount was in this save, ALSO update the current Landsraad
+        # term's live task rows so the change takes effect immediately (Funcom's
+        # own path only reads the INI at term creation, so the running term would
+        # otherwise keep its original goal). Best-effort: any failure attaches a
+        # note to the response instead of failing the whole INI save.
+        $landsraadApply = $null
+        $goalUpdate = $structured | Where-Object { $_.key -eq 'm_TaskGoalAmount' } | Select-Object -Last 1
+        if ($goalUpdate -and -not [string]::IsNullOrWhiteSpace("$($goalUpdate.value)")) {
+            try {
+                $goalVal = 0L
+                $dbl = 0.0
+                if ([double]::TryParse("$($goalUpdate.value)", [ref]$dbl)) {
+                    $goalVal = [long][math]::Floor($dbl)
+                }
+                if ($goalVal -lt 0) { $goalVal = 0 }
+                $landsraadApply = Set-DuneLandsraadCurrentTermGoal -Ip $ctx.ip -Goal $goalVal
+            } catch {
+                $landsraadApply = @{ ok = $false; error = "landsraad apply: $($_.Exception.Message)" }
+            }
+        }
+
+        $body = @{
+            ok          = $true
+            applied     = $structured.Count
+            source      = $cfg.source
+            game        = $cfg.game
+            engine      = $cfg.engine
+            clientApply = $clientApply
+        }
+        if ($landsraadApply) { $body.landsraadGoalApply = $landsraadApply }
+        if ($restartRequired) { $body.restartRequired = $true }
+        Write-DuneJson -Response $res -Body $body
+    } catch {
+        $status = if ($_.Exception.Message -match 'has not been initialized') { 409 } else { 500 }
+        Write-DuneError -Response $res -Status $status -Message "Game config save failed: $($_.Exception.Message)"
+    }
+}
+
+# -----------------------------------------------------------------------------
+# POST /api/gameconfig/reload-pods — apply startup-read INI changes by doing a
+# clean battlegroup restart.
+#
+# This used to roll the game-server pods one at a time to keep the other maps up.
+# That looked faster than it was: it returned as soon as each container passed
+# its Kubernetes readiness probe, while the game server was still loading the
+# world. Waiting for the maps to genuinely report ready made the honest cost
+# visible - roughly two minutes per map, sequentially - which is slower than a
+# battlegroup restart that reloads every map in parallel. The rolling path is
+# retained in lib/Maps.ps1 for callers that need per-map restarts.
+# -----------------------------------------------------------------------------
+Register-DuneRoute -Method POST -Path '/api/gameconfig/reload-pods' -Handler {
+    param($req, $res, $routeParams, $body)
+    $ctx = Get-DuneGameConfigContext
+    if (-not $ctx.ok) {
+        Write-DuneError -Response $res -Status $ctx.status -Message $ctx.message
+        return
+    }
+    if (-not (Test-DuneDisruptiveActionGuard -Req $req -Res $res -Ip $ctx.ip -Action 'restarting the battlegroup to apply game configuration')) { return }
+    try {
+        # Invoke-DuneBattlegroupRestart rebuilds the startup console variables from
+        # the current INI before restarting, so no separate sync is needed here.
+        $r = Invoke-WithDuneLock -Name 'retail-startup-sync' -Script {
+            Invoke-DuneBattlegroupRestart -Ip $ctx.ip -ApplyInis -StartStopped:($body -and $body.startStopped -eq $true)
+        }
+        if (-not $r.ok) {
+            Write-DuneError -Response $res -Status 502 -Message $r.message
+            return
+        }
+        Write-DuneJson -Response $res -Body @{
+            ok      = $true
+            message = $r.message
+        }
+    } catch {
+        Write-DuneError -Response $res -Status 502 -Message "Battlegroup restart failed: $($_.Exception.Message)"
+    }
+}
+
+# -----------------------------------------------------------------------------
+# Deep Desert per-partition PvP.
+# GET lists only currently running DeepDesert_1 partitions.
+# PUT { enabled:bool, partitionIds:int[] } writes UserGame.ini and restarts all
+# running Deep Desert pods so the startup-loaded setting takes effect.
+# -----------------------------------------------------------------------------
+Register-DuneRoute -Method GET -Path '/api/gameconfig/deep-desert-pvp' -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        $state = Get-DuneDeepDesertPvp
+        if (-not $state.ok -and $state.status) {
+            Write-DuneError -Response $res -Status $state.status -Message $state.message
+            return
+        }
+        Write-DuneJson -Response $res -Body $state
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message "Deep Desert PvP load failed: $($_.Exception.Message)"
+    }
+}
+
+Register-DuneRoute -Method PUT -Path '/api/gameconfig/deep-desert-pvp' -Handler {
+    param($req, $res, $routeParams, $body)
+    $ctx = Get-DuneGameConfigContext
+    if (-not $ctx.ok) {
+        Write-DuneError -Response $res -Status $ctx.status -Message $ctx.message
+        return
+    }
+    if (-not (Test-DunePlayerGuard -Req $req -Res $res -Ip $ctx.ip)) { return }
+    if (-not ($body -is [hashtable]) -or -not $body.ContainsKey('enabled')) {
+        Write-DuneError -Response $res -Status 400 -Message 'Body must include enabled and partitionIds.'
+        return
+    }
+    $enabledRaw = $body['enabled']
+    if (-not ($enabledRaw -is [bool])) {
+        Write-DuneError -Response $res -Status 400 -Message 'enabled must be a JSON boolean.'
+        return
+    }
+    $ids = New-Object 'System.Collections.Generic.List[int]'
+    if ($body.ContainsKey('partitionIds') -and $null -ne $body['partitionIds']) {
+        if (-not ($body['partitionIds'] -is [System.Collections.IEnumerable]) -or $body['partitionIds'] -is [string]) {
+            Write-DuneError -Response $res -Status 400 -Message 'partitionIds must be an array of positive integers.'
+            return
+        }
+        foreach ($rawId in @($body['partitionIds'])) {
+            $id = 0
+            if (-not [int]::TryParse("$rawId", [ref]$id) -or $id -le 0) {
+                Write-DuneError -Response $res -Status 400 -Message 'partitionIds must contain only positive integers.'
+                return
+            }
+            $ids.Add($id)
+        }
+    }
+    try {
+        $state = Set-DuneDeepDesertPvp -Enabled ([bool]$enabledRaw) -PartitionIds $ids.ToArray()
+        if (-not $state.ok -and $state.status) {
+            Write-DuneError -Response $res -Status $state.status -Message $state.message
+            return
+        }
+        Write-DuneJson -Response $res -Body $state
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message "Deep Desert PvP save failed: $($_.Exception.Message)"
+    }
+}
+
+# -----------------------------------------------------------------------------
+# POST /api/gameconfig/backup — snapshot the live INI files before editing.
+# Copies each live file to "<path>.dstbak-<timestamp>" on the BG VM (read-only
+# copy; no settings are changed). Returns the backup paths so the user has a
+# restore point. 503 when VM not available.
+# -----------------------------------------------------------------------------
+Register-DuneRoute -Method POST -Path '/api/gameconfig/backup' -Handler {
+    param($req, $res, $routeParams, $body)
+    $ctx = Get-DuneGameConfigContext
+    if (-not $ctx.ok) {
+        Write-DuneError -Response $res -Status $ctx.status -Message $ctx.message
+        return
+    }
+    try {
+        $r = Backup-DuneGameConfig -Ip $ctx.ip
+        $allOk = (@($r.files | Where-Object { -not $_.ok }).Count -eq 0)
+        Write-DuneJson -Response $res -Body @{
+            ok        = $allOk
+            timestamp = $r.timestamp
+            source    = $r.source
+            files     = $r.files
+        }
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message "Game config backup failed: $($_.Exception.Message)"
+    }
+}
+
+# -----------------------------------------------------------------------------
+# GET /api/gameconfig/backups — list existing DST backups for the live INI files.
+# Returns the most-recent ".dstbak-<ts>" snapshots next to UserGame/UserEngine.ini
+# so the user can locate a restore point. 503 when VM not available.
+# -----------------------------------------------------------------------------
+Register-DuneRoute -Method GET -Path '/api/gameconfig/backups' -Handler {
+    param($req, $res, $routeParams, $body)
+    $ctx = Get-DuneGameConfigContext
+    if (-not $ctx.ok) {
+        Write-DuneError -Response $res -Status $ctx.status -Message $ctx.message
+        return
+    }
+    try {
+        $r = Get-DuneGameConfigBackups -Ip $ctx.ip
+        Write-DuneJson -Response $res -Body @{
+            available = $true
+            source    = $r.source
+            backups   = $r.backups
+        }
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message "Game config backup list failed: $($_.Exception.Message)"
+    }
+}
+
+# POST /api/gameconfig/backups/delete — delete selected DST backup files.
+# Body: { paths: ["<full path>.dstbak-<ts>", ...] }. Paths are validated
+# server-side to the .dstbak pattern next to the live INI files. 503 w/o VM.
+Register-DuneRoute -Method POST -Path '/api/gameconfig/backups/delete' -Handler {
+    param($req, $res, $routeParams, $body)
+    $ctx = Get-DuneGameConfigContext
+    if (-not $ctx.ok) {
+        Write-DuneError -Response $res -Status $ctx.status -Message $ctx.message
+        return
+    }
+    $paths = New-Object 'System.Collections.Generic.List[string]'
+    if ($body -is [hashtable]) {
+        $raw = $body['paths']
+        if ($raw -is [System.Collections.IEnumerable] -and -not ($raw -is [string])) {
+            foreach ($p in $raw) { $s = "$p".Trim(); if ($s) { $paths.Add($s) } }
+        }
+    }
+    if ($paths.Count -eq 0) {
+        Write-DuneError -Response $res -Status 400 -Message 'No backup paths supplied.'
+        return
+    }
+    try {
+        $r = Remove-DuneGameConfigBackups -Ip $ctx.ip -Paths $paths.ToArray()
+        Write-DuneJson -Response $res -Body @{
+            ok      = $true
+            deleted = $r.deleted
+            results = $r.results
+        }
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message "Game config backup delete failed: $($_.Exception.Message)"
+    }
+}
+
+# -----------------------------------------------------------------------------
+# LOCAL CLIENT CONFIG endpoints. These run on the admin's own machine (no SSH /
+# no VM context needed) and operate on the player's client Game.ini / Engine.ini.
+#
+# GET  /api/gameconfig/client      — read the local client config + folder info.
+# PUT  /api/gameconfig/client/dir  — persist the client-config FOLDER. { dir }
+# PUT  /api/gameconfig/client/engine — opt into/out of Engine.ini management.
+# PUT  /api/gameconfig/client/apply— upsert ClientApply keys into their local file.
+#                                     { updates: [ { key, value }, ... ], dir? }
+# -----------------------------------------------------------------------------
+Register-DuneRoute -Method GET -Path '/api/gameconfig/client' -LocalOnly -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        Write-DuneJson -Response $res -Body (Get-DuneGameConfigClient)
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message "Client config read failed: $($_.Exception.Message)"
+    }
+}
+
+Register-DuneRoute -Method PUT -Path '/api/gameconfig/client/dir' -LocalOnly -Handler {
+    param($req, $res, $routeParams, $body)
+    $dir = ''
+    if ($body -is [hashtable] -and $body.Contains('dir')) { $dir = "$($body['dir'])".Trim() }
+    if (-not $dir) {
+        Write-DuneError -Response $res -Status 400 -Message 'Missing dir.'
+        return
+    }
+    $resolved = [Environment]::ExpandEnvironmentVariables($dir)
+    if (-not (Test-Path -LiteralPath $resolved)) {
+        Write-DuneError -Response $res -Status 400 -Message "Folder does not exist: $resolved"
+        return
+    }
+    try {
+        $null = Invoke-WithDuneLock -Name 'config' -Script { Save-DuneConfig -Config @{ ClientConfigPath = $dir } }
+        Write-DuneJson -Response $res -Body (Get-DuneGameConfigClient)
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message "Saving client config folder failed: $($_.Exception.Message)"
+    }
+}
+
+Register-DuneRoute -Method PUT -Path '/api/gameconfig/client/engine' -LocalOnly -Handler {
+    param($req, $res, $routeParams, $body)
+    if (-not ($body -is [hashtable]) -or -not $body.ContainsKey('enabled')) {
+        Write-DuneError -Response $res -Status 400 -Message 'Missing enabled.'
+        return
+    }
+    $enabled = [bool]$body['enabled']
+    $dir = if ($body.ContainsKey('dir')) { "$($body['dir'])".Trim() } else { '' }
+    try {
+        $cleanup = Invoke-WithDuneLock -Name 'config' -Script {
+            $result = @{ removed = 0; changed = $false }
+            if (-not $enabled) {
+                $result = Remove-DuneGameConfigClientEngineValues -Dir $dir
+            }
+            $null = Save-DuneConfig -Config @{ ClientEngineIniEnabled = $(if ($enabled) { 'true' } else { 'false' }) }
+            return $result
+        }
+        Write-DuneJson -Response $res -Body @{
+            ok      = $true
+            enabled = $enabled
+            removed = [int]$cleanup.removed
+            client  = (Get-DuneGameConfigClient -Dir $dir)
+        }
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message "Updating client Engine.ini permission failed: $($_.Exception.Message)"
+    }
+}
+
+# The Lab's explicit destination review authorizes these exact raw targets,
+# including controls outside the curated client-compatibility schema.
+Register-DuneRoute -Method PUT -Path '/api/gameconfig/client/lab' -LocalOnly -Handler {
+    param($req, $res, $routeParams, $body)
+    if (-not ($body -is [hashtable]) -or $body.approved -ne $true) {
+        Write-DuneError -Response $res -Status 400 -Message 'Review and approve the local Lab file changes before saving.'
+        return
+    }
+    try {
+        $updates = @($body.updates)
+        $defaultsRaw = ''
+        if ((Test-DuneUpdatesHaveStructMember -Updates $updates) -or
+            (Test-DuneUpdatesHaveSpicefieldMember -Updates $updates)) {
+            $ctx = Get-DuneGameConfigContext
+            if (-not $ctx.ok) { throw 'The selected server is unavailable. No local Lab settings were saved.' }
+            $defaultsRaw = [string](Get-DuneGameConfigDefaults -Ip $ctx.ip).game
+        }
+        $validateOnly = $body.validateOnly -eq $true
+        $result = Save-DuneGameConfigClient -Updates $updates -ReviewedRaw -DefaultsRaw $defaultsRaw -ValidateOnly:$validateOnly
+        if ($validateOnly) { Write-DuneJson -Response $res -Body $result; return }
+        # Keep the comparison populated with every unselected local entry.
+        $result['client'] = Get-DuneGameConfigClient
+        Write-DuneJson -Response $res -Body $result
+    } catch {
+        Write-DuneError -Response $res -Status 400 -Message "Local Lab save failed: $($_.Exception.Message)"
+    }
+}
+
+Register-DuneRoute -Method PUT -Path '/api/gameconfig/client/apply' -LocalOnly -Handler {
+    param($req, $res, $routeParams, $body)
+    if (-not $body -or -not ($body -is [hashtable])) {
+        Write-DuneError -Response $res -Status 400 -Message 'Missing JSON body.'
+        return
+    }
+    $dir     = if ($body.Contains('dir')) { "$($body['dir'])".Trim() } else { '' }
+    $updates = New-Object 'System.Collections.Generic.List[object]'
+    $raw = $body['updates']
+    if ($raw -is [System.Collections.IEnumerable] -and -not ($raw -is [string]) -and -not ($raw -is [hashtable])) {
+        foreach ($u in $raw) {
+            $k = if ($u -is [hashtable]) { "$($u['key'])" } else { "$($u.key)" }
+            $v = if ($u -is [hashtable]) { "$($u['value'])" } else { "$($u.value)" }
+            if ($k) { $updates.Add(@{ key = $k; value = $v }) }
+        }
+    }
+    if ($updates.Count -eq 0) {
+        Write-DuneError -Response $res -Status 400 -Message 'No updates supplied.'
+        return
+    }
+    try {
+        # Seed-from-defaults needs DefaultGame.ini (a live pod read); only pay for
+        # it when a Landsraad-style struct member is actually being applied, and
+        # tolerate failure so non-struct client edits still apply offline.
+        $defaultsRaw = ''
+        if ((Test-DuneUpdatesHaveStructMember -Updates $updates.ToArray()) -or
+            (Test-DuneUpdatesHaveSpicefieldMember -Updates $updates.ToArray())) {
+            try {
+                $ctx = Get-DuneGameConfigContext
+                if ($ctx.ok) { $defaultsRaw = "$((Get-DuneGameConfigDefaults -Ip $ctx.ip).game)" }
+            } catch { $defaultsRaw = '' }
+        }
+        $r = Save-DuneGameConfigClient -Updates $updates.ToArray() -Dir $dir -DefaultsRaw $defaultsRaw
+        $client = Get-DuneGameConfigClient -Dir $dir
+        Write-DuneJson -Response $res -Body @{
+            ok      = $true
+            path    = $r.path
+            paths   = $r.paths
+            files   = $r.files
+            backup  = $r.backup
+            backups = $r.backups
+            created = $r.created
+            applied = $r.applied
+            items   = $r.items
+            client  = $client
+        }
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message "Applying to client config failed: $($_.Exception.Message)"
+    }
+}
+
+# -----------------------------------------------------------------------------
+# POST /api/gameconfig/client/open — open local Game.ini or Engine.ini in Notepad
+# on this PC (DST runs locally). Body (optional): { dir, file }
+# -----------------------------------------------------------------------------
+Register-DuneRoute -Method POST -Path '/api/gameconfig/client/open' -LocalOnly -Handler {
+    param($req, $res, $routeParams, $body)
+    $dir = ''
+    $file = 'game'
+    if ($body -is [hashtable] -and $body.Contains('dir')) { $dir = "$($body['dir'])".Trim() }
+    if ($body -is [hashtable] -and $body.Contains('file')) { $file = "$($body['file'])".Trim().ToLowerInvariant() }
+    if ($file -notin @('game','engine')) {
+        Write-DuneError -Response $res -Status 400 -Message "Invalid client config file: $file"
+        return
+    }
+    try {
+        $resolvedDir = Resolve-DuneGameConfigClientDir -Dir $dir
+        if (-not (Test-Path -LiteralPath $resolvedDir)) {
+            Write-DuneError -Response $res -Status 400 -Message "Client config folder not found: $resolvedDir"
+            return
+        }
+        $path = Get-DuneGameConfigClientFilePath -Dir $dir -File $file
+        Start-Process -FilePath 'notepad.exe' -ArgumentList "`"$path`""
+        Write-DuneJson -Response $res -Body @{ ok = $true; file = $file; path = $path }
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message "Opening client config failed: $($_.Exception.Message)"
+    }
+}
+
+# -----------------------------------------------------------------------------
+# GET /api/gameconfig/spicefields — current Funcom UserGame.ini limits.
+# Returns: { available: true, rows: [ { spicefieldTypeId, mapName, fieldType,
+#                                       dimensionIndex,
+#                                       maxActive, maxPrimed,
+#                                       currentActive, currentPrimed,
+#                                       isSpawningActive, spawnWeight } ] }
+# 503 when VM not available.
+# -----------------------------------------------------------------------------
+Register-DuneRoute -Method GET -Path '/api/gameconfig/spicefields' -Handler {
+    param($req, $res, $routeParams, $body)
+    $ctx = Get-DuneGameConfigContext
+    if (-not $ctx.ok) {
+        Write-DuneError -Response $res -Status $ctx.status -Message $ctx.message
+        return
+    }
+    try {
+        $retail = Get-DuneRetailSpicefieldRows -Ip $ctx.ip
+        $raw = @($retail.rows)
+
+        $rows = @($raw | ForEach-Object {
+            $mapId = if ($_.map_id) { "$($_.map_id)" } else { ConvertTo-DuneServerMapId -Name "$($_.map_name)" }
+            @{
+                spicefieldTypeId = [int]$_.spicefield_type_id
+                mapName          = "$($_.map_name)"
+                mapId            = $mapId
+                fieldType        = "$($_.field_type)"
+                dimensionIndex   = [int]$_.dimension_index
+                maxActive        = [int]$_.max_globally_active
+                maxPrimed        = [int]$_.max_globally_primed
+                defaultMaxActive = if ($null -eq $_.default_max_globally_active) { $null } else { [int]$_.default_max_globally_active }
+                defaultMaxPrimed = if ($null -eq $_.default_max_globally_primed) { $null } else { [int]$_.default_max_globally_primed }
+                guidanceMax      = if ($null -eq $_.guidance_max) { $null } else { [int]$_.guidance_max }
+                overCap          = [bool]$_.over_cap
+                configuredOverride = [bool]$_.configured_override
+                currentActive    = $null
+                currentPrimed    = $null
+                isSpawningActive = [bool]$_.is_spawning_active
+                spawnWeight      = [double]$_.global_spawn_weight
+                adapter          = 'retail-config'
+                requiresRestart  = $true
+                supportsSpawnWeight = $false
+                currentPrimedExact  = $false
+                globalSpawning      = $true
+            }
+        })
+        Write-DuneJson -Response $res -Body @{
+            available = $true
+            adapter = 'retail-config'
+            requiresRestart = $true
+            rows = $rows
+        }
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message "Spicefield types load failed: $($_.Exception.Message)"
+    }
+}
+
+# -----------------------------------------------------------------------------
+# GET /api/gameconfig/spicefields/{id}/state — bounded active field values for
+# the selected spicefield row's map and dimension. resourcefield_state does not
+# expose Small/Medium/Large, so the response explicitly marks size as unresolved.
+# -----------------------------------------------------------------------------
+Register-DuneRoute -Method GET -Path '/api/gameconfig/spicefields/{id}/state' -Handler {
+    param($req, $res, $routeParams, $body)
+    $ctx = Get-DuneGameConfigContext
+    if (-not $ctx.ok) {
+        Write-DuneError -Response $res -Status $ctx.status -Message $ctx.message
+        return
+    }
+
+    $typeId = 0
+    if (-not [int]::TryParse("$($routeParams.id)", [ref]$typeId) -or $typeId -le 0) {
+        Write-DuneError -Response $res -Status 400 -Message 'Invalid spicefield_type id.'
+        return
+    }
+
+    try {
+        $typeRows = @((Get-DuneRetailSpicefieldRows -Ip $ctx.ip).rows)
+        $typeRow = @($typeRows |
+            Where-Object { [int]$_.spicefield_type_id -eq $typeId } |
+            Select-Object -First 1)
+        if ($typeRow.Count -eq 0) {
+            Write-DuneError -Response $res -Status 404 -Message 'Spicefield type not found.'
+            return
+        }
+
+        $mapName = [string]$typeRow[0].map_name
+        if ($mapName -notin @('HaggaBasin', 'DeepDesert')) {
+            Write-DuneError -Response $res -Status 422 -Message 'Raw field state is available only for Hagga Basin and Deep Desert.'
+            return
+        }
+
+        $state = Get-DuneSpicefieldStateLive `
+            -Ip $ctx.ip `
+            -MapName $mapName `
+            -DimensionIndex ([int]$typeRow[0].dimension_index) `
+            -FieldType ([string]$typeRow[0].field_type)
+        if (-not $state.ok) {
+            $message = if ($state.error) { $state.error } else { 'Raw spice field state is unavailable.' }
+            Write-DuneError -Response $res -Status 500 -Message $message
+            return
+        }
+
+        Write-DuneJson -Response $res -Body @{
+            available               = $true
+            spicefieldTypeId        = $typeId
+            mapName                 = $mapName
+            dimensionIndex          = [int]$typeRow[0].dimension_index
+            requestedFieldType      = [string]$typeRow[0].field_type
+            fieldTypeResolved       = $false
+            fields                  = @($state.fields)
+            totalRawValueRemaining  = [string]$state.totalRawValueRemaining
+            totalAvailable          = [long]$state.totalAvailable
+            returned                = [int]$state.returned
+            truncated               = [bool]$state.truncated
+            source                  = $state.source
+        }
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message "Raw spice field state load failed: $($_.Exception.Message)"
+    }
+}
+
+# -----------------------------------------------------------------------------
+# PUT /api/gameconfig/spicefields/{id} — update one spicefield_type row.
+# Body: { maxActive, maxPrimed, isSpawningActive }
+# Returns the freshly-fetched row.
+# -----------------------------------------------------------------------------
+Register-DuneRoute -Method PUT -Path '/api/gameconfig/spicefields/{id}' -Handler {
+    param($req, $res, $routeParams, $body)
+    $ctx = Get-DuneGameConfigContext
+    if (-not $ctx.ok) {
+        Write-DuneError -Response $res -Status $ctx.status -Message $ctx.message
+        return
+    }
+    if (-not (Test-DunePlayerGuard -Req $req -Res $res -Ip $ctx.ip)) { return }
+    $typeId = 0
+    if (-not [int]::TryParse("$($routeParams.id)", [ref]$typeId) -or $typeId -le 0) {
+        Write-DuneError -Response $res -Status 400 -Message 'Invalid spicefield_type id.'
+        return
+    }
+    if (-not ($body -is [hashtable])) {
+        Write-DuneError -Response $res -Status 400 -Message 'Body must be a JSON object.'
+        return
+    }
+    try {
+        $maxA = 0; $maxP = 0
+        try { $maxA = [int]$body.maxActive } catch {}
+        try { $maxP = [int]$body.maxPrimed } catch {}
+        $isActive = [bool]$body.isSpawningActive
+        $row = @(Set-DuneRetailSpicefieldRow -Ip $ctx.ip -TypeId $typeId `
+            -MaxActive $maxA -MaxPrimed $maxP -SpawningActive $isActive | Select-Object -First 1)
+        if ($row.Count -gt 0) { $row = $row[0] } else { $row = $null }
+        if (-not $row) {
+            Write-DuneError -Response $res -Status 404 -Message "Spicefield type $typeId not found after update."
+            return
+        }
+        Write-DuneJson -Response $res -Body @{
+            ok  = $true
+            row = @{
+                spicefieldTypeId = [int]$row.spicefield_type_id
+                mapName          = "$($row.map_name)"
+                fieldType        = "$($row.field_type)"
+                dimensionIndex   = [int]$row.dimension_index
+                maxActive        = [int]$row.max_globally_active
+                maxPrimed        = [int]$row.max_globally_primed
+                defaultMaxActive = if ($null -eq $row.default_max_globally_active) { $null } else { [int]$row.default_max_globally_active }
+                defaultMaxPrimed = if ($null -eq $row.default_max_globally_primed) { $null } else { [int]$row.default_max_globally_primed }
+                guidanceMax      = if ($null -eq $row.guidance_max) { $null } else { [int]$row.guidance_max }
+                overCap          = [bool]$row.over_cap
+                configuredOverride = [bool]$row.configured_override
+                currentActive    = $null
+                currentPrimed    = $null
+                isSpawningActive = [bool]$row.is_spawning_active
+                spawnWeight      = [double]$row.global_spawn_weight
+                adapter          = 'retail-config'
+                requiresRestart  = $true
+                supportsSpawnWeight = $false
+                currentPrimedExact  = $false
+                globalSpawning      = $true
+            }
+        }
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message "Spicefield type save failed: $($_.Exception.Message)"
+    }
+}
+
+# -----------------------------------------------------------------------------
+# PUT /api/gameconfig/spicefields/{id}/spawning — current Funcom master switch.
+# Body: { "active": true|false }   — must be a JSON boolean. No other shape
+# is accepted; null, missing, strings, numbers all 400.
+#
+# Writes the current Funcom setting to UserGame.ini. It takes effect after
+# applying INIs and restarting the battlegroup.
+# -----------------------------------------------------------------------------
+Register-DuneRoute -Method PUT -Path '/api/gameconfig/spicefields/{id}/spawning' -Handler {
+    param($req, $res, $routeParams, $body)
+    $ctx = Get-DuneGameConfigContext
+    if (-not $ctx.ok) {
+        Write-DuneError -Response $res -Status $ctx.status -Message $ctx.message
+        return
+    }
+    if (-not (Test-DunePlayerGuard -Req $req -Res $res -Ip $ctx.ip)) { return }
+
+    $typeId = 0
+    if (-not [int]::TryParse("$($routeParams.id)", [ref]$typeId) -or $typeId -le 0) {
+        Write-DuneError -Response $res -Status 400 -Message 'Invalid spicefield_type id.'
+        return
+    }
+    if (-not ($body -is [hashtable])) {
+        Write-DuneError -Response $res -Status 400 -Message 'Body must be a JSON object: { "active": true|false }.'
+        return
+    }
+    if (-not $body.ContainsKey('active')) {
+        Write-DuneError -Response $res -Status 400 -Message 'Body must include "active" (true|false).'
+        return
+    }
+    $raw = $body['active']
+    # STRICT boolean parsing — accept only real JSON booleans. We deliberately
+    # do NOT coerce strings/numbers, because the whole point of this endpoint
+    # is to guarantee is_spawning_active is set to exactly TRUE or FALSE,
+    # never NULL, never some ambiguous truthy value.
+    $active = $null
+    if ($raw -is [bool]) {
+        $active = [bool]$raw
+    } elseif ($raw -is [int] -or $raw -is [long]) {
+        # Some JSON parsers map JSON true/false to 1/0 — accept only those.
+        if ([int]$raw -eq 1) { $active = $true }
+        elseif ([int]$raw -eq 0) { $active = $false }
+    }
+    if ($null -eq $active) {
+        Write-DuneError -Response $res -Status 400 -Message '"active" must be a JSON boolean (true or false); null and other values are rejected.'
+        return
+    }
+
+    try {
+        $retailRows = @((Get-DuneRetailSpicefieldRows -Ip $ctx.ip).rows)
+        $current = @($retailRows | Where-Object { [int]$_.spicefield_type_id -eq $typeId } | Select-Object -First 1)
+        if ($current.Count -eq 0) {
+            Write-DuneError -Response $res -Status 404 -Message "Spicefield type $typeId not found."
+            return
+        }
+        $row = @(Set-DuneRetailSpicefieldRow -Ip $ctx.ip -TypeId $typeId `
+            -MaxActive ([int]$current[0].max_globally_active) `
+            -MaxPrimed ([int]$current[0].max_globally_primed) `
+            -SpawningActive $active | Select-Object -First 1)
+        if ($row.Count -gt 0) { $row = $row[0] } else { $row = $null }
+        if (-not $row) {
+            Write-DuneError -Response $res -Status 404 -Message "Spicefield type $typeId not found after update."
+            return
+        }
+        Write-DuneJson -Response $res -Body @{
+            ok  = $true
+            row = @{
+                spicefieldTypeId = [int]$row.spicefield_type_id
+                mapName          = "$($row.map_name)"
+                fieldType        = "$($row.field_type)"
+                dimensionIndex   = [int]$row.dimension_index
+                maxActive        = [int]$row.max_globally_active
+                maxPrimed        = [int]$row.max_globally_primed
+                defaultMaxActive = if ($null -eq $row.default_max_globally_active) { $null } else { [int]$row.default_max_globally_active }
+                defaultMaxPrimed = if ($null -eq $row.default_max_globally_primed) { $null } else { [int]$row.default_max_globally_primed }
+                guidanceMax      = if ($null -eq $row.guidance_max) { $null } else { [int]$row.guidance_max }
+                overCap          = [bool]$row.over_cap
+                configuredOverride = [bool]$row.configured_override
+                currentActive    = $null
+                currentPrimed    = $null
+                isSpawningActive = [bool]$row.is_spawning_active
+                spawnWeight      = [double]$row.global_spawn_weight
+                adapter          = 'retail-config'
+                requiresRestart  = $true
+                supportsSpawnWeight = $false
+                currentPrimedExact  = $false
+                globalSpawning      = $true
+            }
+        }
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message "Spicefield spawning toggle failed: $($_.Exception.Message)"
+    }
+}
+
+# -----------------------------------------------------------------------------
+# Land-claim (staking unit) extension timer.
+# GET /api/gameconfig/landclaim-timer  — current server + client state.
+#   { server:{available,enabled,seconds,formattedOk,...}, client:{exists,enabled,seconds,...} }
+# PUT /api/gameconfig/landclaim-timer  — { enabled: bool, seconds: number }
+#   Writes both the server UserGame.ini and the local client Game.ini.
+# -----------------------------------------------------------------------------
+Register-DuneRoute -Method GET -Path '/api/gameconfig/landclaim-timer' -Handler {
+    param($req, $res, $routeParams, $body)
+    try {
+        if($env:DST_HOSTING_BACKEND -eq 'docker'){
+            Write-DuneJson -Response $res -Body (Get-DuneLandclaimTimer -Ip docker)
+            return
+        }
+        $ctx = Get-DuneGameConfigContext
+        if ($ctx.ok) {
+            Write-DuneJson -Response $res -Body (Get-DuneLandclaimTimer -Ip $ctx.ip)
+        } else {
+            # VM unavailable: still surface the local client Game.ini state.
+            $client = Get-DuneGameConfigClient
+            $cst    = Get-DuneLandclaimTimerState -Raw $client.raw
+            Write-DuneJson -Response $res -Body @{
+                server = @{ available = $false; enabled = $false; seconds = ''; formattedOk = $false; reason = $ctx.message }
+                client = @{ exists = [bool]$client.exists; dirExists = [bool]$client.dirExists; path = $client.path; dir = $client.dir; enabled = $cst.enabled; seconds = $cst.seconds; formattedOk = $cst.formattedOk; hasOverrides = $cst.hasOverrides }
+                clientBlock = (Get-DuneLandclaimClientBlock -Seconds ($(if ($cst.enabled) { $cst.seconds } else { '' })))
+            }
+        }
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message "Land-claim timer read failed: $($_.Exception.Message)"
+    }
+}
+
+Register-DuneRoute -Method PUT -Path '/api/gameconfig/landclaim-timer' -Handler {
+    param($req, $res, $routeParams, $body)
+    $ctx = Get-DuneGameConfigContext
+    if (-not $ctx.ok) {
+        Write-DuneError -Response $res -Status $ctx.status -Message $ctx.message
+        return
+    }
+    if (-not (Test-DunePlayerGuard -Req $req -Res $res -Ip $ctx.ip)) { return }
+    if (-not $body -or -not ($body -is [hashtable])) {
+        Write-DuneError -Response $res -Status 400 -Message 'Missing JSON body.'
+        return
+    }
+
+    try{$timer=Get-DuneLandclaimTimerRequestValues -Body $body;$enabled=$timer.enabled;$seconds=$timer.seconds}
+    catch{Write-DuneError -Response $res -Status 400 -Message $_.Exception.Message;return}
+
+    try {
+        $r      = Set-DuneLandclaimTimer -Ip $ctx.ip -Enabled $enabled -Seconds $seconds
+        $state  = Get-DuneLandclaimTimer -Ip $ctx.ip
+        Write-DuneJson -Response $res -Body @{
+            ok          = $true
+            enabled     = $enabled
+            seconds     = $seconds
+            result      = $r
+            server      = $state.server
+            client      = $state.client
+            clientBlock = $state.clientBlock
+        }
+    } catch {
+        Write-DuneError -Response $res -Status 500 -Message "Land-claim timer save failed: $($_.Exception.Message)"
+    }
+}
+
+
+# Read-only location query; opening Explorer is an explicit host-local action.
+Register-DuneRoute -Method GET -Path '/api/gameconfig/backup-folder' -LocalOnly -Handler {
+    param($req,$res,$routeParams,$body)
+    $path = if (Test-DuneSoloInstallation) { Join-Path (Get-DuneSoloBackupRoot) 'settings' } else { Get-DuneGameConfigClientBackupRoot }
+    Write-DuneJson -Response $res -Body @{path=$path}
+}
+Register-DuneRoute -Method POST -Path '/api/gameconfig/backup-folder/open' -LocalOnly -Handler {
+    param($req,$res,$routeParams,$body)
+    try {
+        $path = if (Test-DuneSoloInstallation) { Join-Path (Get-DuneSoloBackupRoot) 'settings' } else { Get-DuneGameConfigClientBackupRoot }
+        [void][IO.Directory]::CreateDirectory($path)
+        Start-Process -FilePath 'explorer.exe' -ArgumentList "`"$path`"" | Out-Null
+        Write-DuneJson -Response $res -Body @{ok=$true;path=$path}
+    } catch { Write-DuneError -Response $res -Status 400 -Message $_.Exception.Message }
+}

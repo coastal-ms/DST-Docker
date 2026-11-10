@@ -1,0 +1,553 @@
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { useNavigate } from '../router'
+import { externalPortVerificationUrl, summarizeTcpPorts } from '../util/portStatusPresentation'
+import { PageHeader } from '../components/PageHeader'
+import { Icon } from '../components/Icon'
+import { CollapsibleCard } from '../components/CollapsibleCard'
+import { useStatus } from '../hooks/useStatus'
+import { ScheduledRestarts } from './dashboard/ScheduledRestarts'
+import { VmMemoryPressureBanner } from './dashboard/VmMemoryPressureBanner'
+import type { BgState, BgGameServer } from '../api/types'
+import { getLinks, type LinksResponse } from '../api/links'
+import { api, ApiError } from '../api/client'
+import { completeDockerCommand } from '../api/dockerCommand'
+import { mapLabel } from '../util/mapLabel'
+import { HealthRefreshControl } from '../components/HealthRefreshControl'
+import './dashboard/dashboardLayout.css'
+
+const BG_STYLES: Record<BgState | 'unknown', { cls: string; label: string }> = {
+  running:  { cls: 'text-success', label: 'Running'  },
+  stopped:  { cls: 'text-text-muted', label: 'Stopped'  },
+  starting: { cls: 'text-warning', label: 'Starting' },
+  stopping: { cls: 'text-warning', label: 'Stopping' },
+  updating: { cls: 'text-info',    label: 'Updating' },
+  unknown:  { cls: 'text-text-muted', label: 'Unknown'  },
+}
+
+function fmtUptime(seconds: number): string {
+  if (!seconds || seconds <= 0) return '—'
+  const d = Math.floor(seconds / 86400)
+  const h = Math.floor((seconds % 86400) / 3600)
+  const m = Math.floor((seconds % 3600) / 60)
+  if (d > 0) return `${d}d ${h}h`
+  if (h > 0) return `${h}h ${m}m`
+  return `${m}m`
+}
+
+// Map a health/phase string to a tone class. Used for Battlegroup Info
+// (Healthy/Ready/...) and Game Servers (Running/Starting/...).
+function healthClass(v: string | undefined): string {
+  if (!v) return 'text-text-dim'
+  const s = v.toLowerCase()
+  if (/(healthy|ready|running|true)/.test(s)) return 'text-success'
+  if (/(starting|reconciling|pending|updating|warning)/.test(s)) return 'text-warning'
+  if (/(stopped|stopping|failed|error|unhealthy|crash|false)/.test(s)) return 'text-danger'
+  return 'text-text'
+}
+
+function findSurvivalServer(servers: BgGameServer[]): BgGameServer | undefined {
+  return servers.find(s => /survival[_-]?1/i.test(s.map))
+}
+
+function GameServerRow({ s }: { s: BgGameServer }) {
+  return (
+    <tr className="border-t border-border/30">
+      <td className="break-words py-1 pr-3 font-medium" title={s.sietchName ? `${s.sietchName} · ${mapLabel(s.map)}` : s.map}>
+        {s.sietchName || mapLabel(s.map)}
+      </td>
+      <td className={`break-words py-1 pr-3 ${healthClass(s.phase)}`}>{s.phase || '—'}</td>
+      <td className={`break-words py-1 pr-3 ${healthClass(s.ready)}`}>{s.ready || '—'}</td>
+      <td className="py-1 pr-3 font-mono tabular-nums">{s.players || '0'}</td>
+      <td className="py-1 font-mono tabular-nums text-text-dim">{s.age || '—'}</td>
+    </tr>
+  )
+}
+
+function GameServerMobileRow({ s }: { s: BgGameServer }) {
+  const name = s.sietchName || mapLabel(s.map)
+  return (
+    <li className="border-t border-border/30 py-3 first:border-t-0 first:pt-1 last:pb-1">
+      <div className="flex min-w-0 items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="break-words text-sm font-semibold text-text">{name}</p>
+          {s.sietchName && (
+            <p className="mt-0.5 break-words text-xs text-text-dim">{mapLabel(s.map)}</p>
+          )}
+        </div>
+        <span className={`shrink-0 text-xs font-medium ${healthClass(s.phase)}`}>
+          <span className="sr-only">Phase: </span>
+          {s.phase || '—'}
+        </span>
+      </div>
+      <dl className="mt-2 grid grid-cols-3 gap-3 text-xs">
+        <div className="min-w-0">
+          <dt className="text-text-dim">Ready</dt>
+          <dd className={`mt-0.5 break-words font-medium ${healthClass(s.ready)}`}>{s.ready || '—'}</dd>
+        </div>
+        <div className="min-w-0">
+          <dt className="text-text-dim">Players</dt>
+          <dd className="mt-0.5 font-mono tabular-nums text-text">{s.players || '0'}</dd>
+        </div>
+        <div className="min-w-0">
+          <dt className="text-text-dim">Age</dt>
+          <dd className="mt-0.5 font-mono tabular-nums text-text-muted">{s.age || '—'}</dd>
+        </div>
+      </dl>
+    </li>
+  )
+}
+
+export function GameServerList({ servers }: { servers: BgGameServer[] }) {
+  return (
+    <>
+      <ul className="md:hidden" data-game-server-layout="stacked">
+        {servers.map((server, index) => (
+          <GameServerMobileRow
+            key={`${server.sietchName || server.map}-${index}`}
+            s={server}
+          />
+        ))}
+      </ul>
+      <div className="hidden min-w-0 md:block" data-game-server-layout="table">
+        <table className="w-full table-fixed text-sm leading-snug">
+          <colgroup>
+            <col className="w-[30%]" />
+            <col className="w-[20%]" />
+            <col className="w-[18%]" />
+            <col className="w-[16%]" />
+            <col className="w-[16%]" />
+          </colgroup>
+          <thead className="text-[10px] uppercase tracking-wider text-text-dim">
+            <tr>
+              <th className="pb-1 text-left">Map</th>
+              <th className="pb-1 text-left">Phase</th>
+              <th className="pb-1 text-left">Ready</th>
+              <th className="pb-1 text-left">Players</th>
+              <th className="pb-1 text-left">Age</th>
+            </tr>
+          </thead>
+          <tbody>
+            {servers.map((server, index) => (
+              <GameServerRow
+                key={`${server.sietchName || server.map}-${index}`}
+                s={server}
+              />
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </>
+  )
+}
+
+// Login-readiness heartbeat, driven by the Survival_1 map pod — that's the map
+// players actually connect to, so if it isn't Ready you can't log in.
+//   ready=True              → green  + "Ready"
+//   in a startup phase      → yellow + "Starting"
+//   down / missing / failed → red    + "Not Ready"
+// Before the first status load (loading, no pods yet) the sensor goes flat.
+function survivalHeartbeat(servers: BgGameServer[], loading: boolean): {
+  cls: string
+  label: string
+  beating: boolean
+} {
+  const sv = findSurvivalServer(servers)
+  if (!sv) {
+    if (loading) return { cls: 'text-text-dim', label: 'No signal', beating: false }
+    return { cls: 'text-danger', label: 'Not Ready', beating: true }
+  }
+  if (/^(true|ready|yes|ok)$/i.test((sv.ready ?? '').trim())) {
+    return { cls: 'text-success', label: 'Ready', beating: true }
+  }
+  const phase = (sv.phase ?? '').toLowerCase()
+  if (/(start|pending|reconcil|creating|init|progress|updating|provision|scaling|waiting|landscape|physics)/.test(phase)) {
+    return { cls: 'text-warning', label: 'Starting', beating: true }
+  }
+  return { cls: 'text-danger', label: 'Not Ready', beating: true }
+}
+
+function HeartbeatSensor({ servers, loading }: { servers: BgGameServer[]; loading: boolean }) {
+  const hb = survivalHeartbeat(servers, loading)
+  return (
+    <div className="mt-auto pt-2 border-t border-border/30">
+      <div className="flex items-center gap-2"
+           title="Login readiness — driven by the Survival_1 map's ready/phase. If it isn't Ready you can't log in. Refreshes every 10s.">
+        <Icon
+          name="HeartPulse"
+          size={30}
+          className={`${hb.cls} ${hb.beating ? 'animate-heartbeat' : ''}`}
+        />
+        <span className="text-[13px] uppercase tracking-wider text-text-dim">Game Ready State</span>
+        <span className={`text-[15px] font-medium ml-auto ${hb.cls}`}>{hb.label}</span>
+      </div>
+    </div>
+  )
+}
+
+export function Dashboard() {
+  const { status, forceRefresh, loading, error } = useStatus()
+  const navigate = useNavigate()
+
+  const vm = status?.vm
+  const docker = status?.hostingBackend === 'docker'
+  const hostLabel = docker ? 'Docker' : 'VM'
+  const bgState = (status?.bg?.state ?? 'unknown') as BgState | 'unknown'
+  const bg = BG_STYLES[bgState]
+  const bgInfo = status?.bg?.info ?? null
+  const gameServers = status?.bg?.gameServers ?? []
+  const survivalPhase = findSurvivalServer(gameServers)?.phase?.trim() || ''
+  const ports = status?.ports
+  const checkedDate = status?.ts ? new Date(status.ts) : null
+  const checkedTime = checkedDate && Number.isFinite(checkedDate.getTime())
+    ? checkedDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    : null
+
+  // Deep Desert / Arakeen / Harko Village — on-demand map pods.
+  const bgReady = bgState === 'running'
+
+  // Per-visit toggle for the raw `battlegroup status` text. Local state only,
+  // so it resets to hidden whenever the user navigates away from the page.
+  const [showRawBg, setShowRawBg] = useState(false)
+
+  // Web Interfaces (File Browser + Director URLs)
+  const [links, setLinks] = useState<LinksResponse | null>(null)
+  const [linksLoading, setLinksLoading] = useState(false)
+  const [linksError, setLinksError] = useState<string | null>(null)
+  const linksRequestPending = useRef(false)
+
+  const refreshLinks = useCallback(async (force = false) => {
+    if (linksRequestPending.current) return
+    linksRequestPending.current = true
+    setLinksLoading(true); setLinksError(null)
+    try {
+      const r = await getLinks({ force })
+      setLinks(r)
+    } catch (e) {
+      setLinks(null)
+      setLinksError(e instanceof ApiError ? e.message : String(e))
+    } finally {
+      linksRequestPending.current = false
+      setLinksLoading(false)
+    }
+  }, [])
+
+  // Resolve again after VM/BG startup instead of retaining the first unavailable
+  // response for the whole visit. Keep the cheap cadence and skip busy requests.
+  useEffect(() => {
+    void refreshLinks()
+    const timer = window.setInterval(() => { void refreshLinks() }, 60_000)
+    return () => window.clearInterval(timer)
+  }, [refreshLinks])
+
+  // Log exports — run-command wrappers
+  const [exportBusy, setExportBusy] = useState<string | null>(null)
+  const [exportMsg,  setExportMsg]  = useState<string | null>(null)
+  const [exportErr,  setExportErr]  = useState<string | null>(null)
+
+  const runExport = useCallback(async (name: string, label: string) => {
+    setExportBusy(name); setExportErr(null); setExportMsg(null)
+    try {
+      const launched = await api<{ mode: string; operationId?: string }>(`/api/commands/run/${encodeURIComponent(name)}`, { method: 'POST' })
+      if (launched.mode === 'Docker' && launched.operationId) {
+        const result = await completeDockerCommand(launched.operationId)
+        if (!result.downloaded) throw new Error('The export completed without a download. Export it again.')
+        setExportMsg(result.complete ? `${label} download prepared.` : `${label} download is partial. See export-report.json for unavailable or truncated sources.`)
+      } else setExportMsg(`${label} launched in a console window.`)
+    } catch (e) {
+      setExportErr(e instanceof ApiError ? e.message : String(e))
+    } finally {
+      setExportBusy(null)
+    }
+  }, [])
+
+  const copyToClipboard = useCallback((url: string) => {
+    void navigator.clipboard?.writeText(url).catch(() => { /* ignore */ })
+  }, [])
+
+  // KPI summary — 2 combined cards: Battlegroup+VM, TCP ports+VM IP.
+  const vmSubLine = !vm
+    ? `No ${hostLabel} data`
+    : !vm.exists
+      ? `${hostLabel} not found`
+      : vm.running
+        ? `${hostLabel} ${vm.state.toLowerCase()}${vm.uptime ? ` · up ${fmtUptime(vm.uptime)}` : ''}`
+        : `${hostLabel} ${vm.state.toLowerCase()}`
+  const portSummary = summarizeTcpPorts(ports)
+  const portsSub = [
+    vm?.ip ? `${hostLabel} ip: ${vm.ip}` : `No ${hostLabel} ip`,
+    ports?.publicIp ? `public: ${ports.publicIp}` : null,
+  ].filter(Boolean).join(' · ')
+
+  return (
+    <div className="dst-dashboard">
+      <PageHeader
+        title="Server Overview"
+        icon="LayoutDashboard"
+        description={`Live ${docker ? 'Docker host' : 'VM'}, battlegroup, and port status.`}
+        actions={<div className="min-w-0"><HealthRefreshControl hostLabel={docker ? 'Docker host' : 'VM'} />{checkedTime && <p className="mt-1 text-xs text-text-dim" aria-live="off">Status checked <time dateTime={status?.ts}>{checkedTime}</time></p>}</div>}
+      />
+
+      {error && <div role="alert" className="mb-4 flex flex-wrap items-center gap-3 rounded-lg border border-warning/50 bg-warning/10 p-3 text-sm">
+        <Icon name="AlertTriangle" size={18} className="shrink-0 text-warning" />
+        <div className="min-w-0 flex-1"><p className="font-medium text-warning">Status refresh failed. Showing the last received status.</p><p className="break-words text-xs text-text-muted">{error}</p></div>
+        <button className="btn-secondary" disabled={loading} onClick={() => { void forceRefresh() }}>Retry status refresh</button>
+      </div>}
+
+      {!docker && <VmMemoryPressureBanner vmRunning={Boolean(vm?.running)} />}
+
+      <section className="dashboard-summary card p-4 mb-4 flex flex-wrap items-center gap-x-8 gap-y-4">
+        <div className="min-w-0 flex-1 basis-52">
+          <div className="flex items-center gap-2 text-xs uppercase tracking-wider text-text-dim">
+            <Icon name="Activity" size={16} className={bg.cls} /> Battlegroup + {hostLabel}
+          </div>
+          <div className={`mt-1 text-xl font-semibold ${bg.cls}`}>{bg.label}</div>
+          <div className="mt-1 text-xs text-text-dim break-words">{vmSubLine}</div>
+          {status?.bg?.reason && bgState === 'unknown' && <p className="mt-1 text-xs text-warning break-words">{status.bg.reason}</p>}
+        </div>
+        <div className="min-w-0 flex-1 basis-64">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs uppercase tracking-wider text-text-dim flex items-center gap-1.5">
+              <Icon name="Plug" size={13} className={portSummary.tone} /> {portSummary.heading}
+            </span>
+            <span className={`text-sm font-semibold ${portSummary.tone}`}>{portSummary.label}</span>
+          </div>
+          <div className="mt-1 text-xs text-text-dim break-words">{portsSub || '—'}</div>
+          {portSummary.state === 'unknown' && ports?.publicIp && <a className="mt-1 inline-flex items-center gap-1 text-xs text-warning hover:underline" href={externalPortVerificationUrl(ports.publicIp)} target="_blank" rel="noopener noreferrer">Verify externally <Icon name="ExternalLink" size={12} /></a>}
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          {docker && <button className="btn-secondary" onClick={() => navigate('/map?view=lifecycle')}><Icon name="Settings" size={15} /> Maps &amp; memory</button>}
+          <button className="btn-primary" onClick={() => navigate('/map?view=live')}><Icon name="Map" size={15} /> Open Live Maps</button>
+        </div>
+      </section>
+
+      <section className="dashboard-health grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
+        <CollapsibleCard
+          id="dashboard.bgInfo"
+          icon="Activity"
+          iconClassName="text-accent shrink-0"
+          title="Battlegroup info"
+          titleClassName="text-sm font-semibold uppercase tracking-wider text-text-muted"
+          className=""
+          headerClassName="px-4 pt-4 pb-1"
+          bodyClassName="px-4 pb-4"
+          headerRight={
+            <div className="flex items-center gap-2 min-w-0">
+              {status?.funcomUpdate?.available && (
+                <span
+                  className="inline-flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider text-warning border border-warning/40 bg-warning/10 rounded px-1.5 py-0.5 shrink-0"
+                  title={`Funcom has released a server update (installed build ${status.funcomUpdate.installedBuild || '?'}, latest ${status.funcomUpdate.latestBuild || '?'}). It is applied automatically on the next scheduled restart.`}
+                >
+                  <Icon name="ArrowUpCircle" size={11} /> Update
+                </span>
+              )}
+              {status?.bg?.name && (
+                <span className="text-[10px] font-mono text-text-dim truncate" title={status.bg.name}>
+                  {status.bg.name}
+                </span>
+              )}
+            </div>
+          }
+        >
+          {!bgInfo ? (
+            <p className="text-sm text-text-dim italic">
+              {status?.bg?.reason || 'Battlegroup status is unavailable.'}
+            </p>
+          ) : (
+            <dl className="grid grid-cols-[110px_1fr] gap-x-3 gap-y-1 text-sm leading-snug">
+              <dt className="text-text-dim" title="Survival_1 game-server phase. This is the login-facing battlegroup status signal.">BG Status</dt>
+              <dd className={healthClass(survivalPhase)} title={`Survival_1 phase: ${survivalPhase || 'unknown'}`}>
+                {survivalPhase || bgInfo.status || '—'}
+              </dd>
+              <dt className="text-text-dim">Database</dt>
+              <dd className={healthClass(bgInfo.database)}>{bgInfo.database || '—'}</dd>
+              <dt className="text-text-dim">Gateway</dt>
+              <dd className={healthClass(bgInfo.gateway)}>{bgInfo.gateway || '—'}</dd>
+              <dt className="text-text-dim">Director</dt>
+              <dd className={healthClass(bgInfo.director)}>{bgInfo.director || '—'}</dd>
+              <dt className="text-text-dim">Uptime</dt>
+              <dd className="font-mono">{bgInfo.uptime || '—'}</dd>
+            </dl>
+          )}
+          {bgReady && status?.bg?.output && (
+            <div className="mt-2 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setShowRawBg(v => !v)}
+                className="text-[10px] uppercase tracking-wider text-text-dim hover:text-text border border-border/40 hover:border-border rounded px-2 py-0.5 transition-colors"
+                title="Show the raw `battlegroup status` output from the VM. Resets when you leave this page."
+              >
+                {showRawBg ? 'Hide raw output' : 'Show raw output'}
+              </button>
+            </div>
+          )}
+          {showRawBg && status?.bg?.output && (
+            <pre className="mt-2 text-[10px] font-mono bg-bg-dim border border-border rounded p-2 max-h-64 overflow-auto whitespace-pre-wrap break-words text-text-dim">{status.bg.output}</pre>
+          )}
+        </CollapsibleCard>
+
+        <CollapsibleCard
+          id="dashboard.gameServers"
+          icon="ServerCog"
+          iconClassName="text-accent shrink-0"
+          title="Game servers"
+          titleClassName="text-sm font-semibold uppercase tracking-wider text-text-muted"
+          className=""
+          headerClassName="px-4 pt-4 pb-1"
+          bodyClassName="px-4 pb-4 flex flex-col"
+          headerRight={
+            <div className="flex items-center gap-2">
+              {gameServers.length > 0 && (
+                <span className="text-[10px] text-text-dim">{gameServers.length} pod{gameServers.length === 1 ? '' : 's'}</span>
+              )}
+              <button
+                type="button"
+                onClick={() => { void forceRefresh() }}
+                disabled={loading}
+                className="p-1.5 rounded-md border border-border text-text-muted hover:text-text hover:bg-bg-dim transition-colors disabled:opacity-50"
+                title="Refresh server status"
+              >
+                <Icon name="RefreshCw" size={18} className={loading ? 'animate-spin' : ''} />
+              </button>
+            </div>
+          }
+        >
+          {gameServers.length === 0 ? (
+            <p className="text-sm text-text-dim italic">{status?.bg?.reason || 'No game servers reported.'}</p>
+          ) : (
+            <GameServerList servers={gameServers} />
+          )}
+          <HeartbeatSensor servers={gameServers} loading={loading} />
+        </CollapsibleCard>
+      </section>
+
+      <section className="mb-4">
+        <CollapsibleCard
+          id="dashboard.webInterfaces"
+          icon="Link2"
+          iconClassName="text-accent shrink-0"
+          title="Web interfaces"
+          titleClassName="text-sm font-semibold uppercase tracking-wider text-text-muted"
+          className=""
+          headerClassName="px-5 pt-5 pb-2"
+          bodyClassName="px-5 pb-5"
+          headerRight={
+            <button
+              className="btn-secondary"
+              onClick={() => { void refreshLinks(true) }}
+              disabled={linksLoading}
+              title={docker ? 'Refresh Docker web interfaces' : 'Re-resolve Director port via SSH'}
+            >
+              <Icon name="RefreshCw" size={14} className={linksLoading ? 'animate-spin' : ''} />
+            </button>
+          }
+        >
+          {linksError ? (
+            <p className="text-sm text-danger break-words">{linksError}</p>
+          ) : !links ? (
+            <p className="text-sm text-text-dim italic">Loading…</p>
+          ) : (
+            <ul className="space-y-2 text-sm">
+              {([
+                { key: 'fb',  label: 'File Browser',         link: links.fileBrowser, icon: 'FolderOpen' },
+                { key: 'dir', label: 'Battlegroup Director', link: links.director,    icon: 'Compass' },
+              ] as const).map(row => (
+                <li key={row.key} className="flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <Icon name={row.icon} size={14} className={row.link.available ? 'text-success' : 'text-text-dim'} />
+                      <span className="font-medium">{row.label}</span>
+                    </div>
+                    {row.link.url ? (
+                      <a
+                        href={row.link.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-xs text-text-dim font-mono hover:text-accent truncate block"
+                      >
+                        {new URL(row.link.url, window.location.href).href}
+                      </a>
+                    ) : (
+                      <div className="text-xs text-text-dim italic">{row.link.reason ?? 'Unavailable'}</div>
+                    )}
+                  </div>
+                  <div className="flex gap-1 shrink-0">
+                    <button
+                      className="btn-secondary"
+                      disabled={!row.link.url}
+                      onClick={() => row.link.url && copyToClipboard(new URL(row.link.url, window.location.href).href)}
+                      title="Copy URL"
+                    >
+                      <Icon name="Copy" size={14} />
+                    </button>
+                    <a
+                      className={`btn-primary ${!row.link.url ? 'opacity-50 pointer-events-none' : ''}`}
+                      href={row.link.url ?? '#'}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      <Icon name="ExternalLink" size={14} /> Open
+                    </a>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </CollapsibleCard>
+      </section>
+
+      <section className="mb-4">
+        <ScheduledRestarts />
+      </section>
+
+      <section className="mb-4">
+        <CollapsibleCard
+          id="dashboard.logExports"
+          icon="FileText"
+          iconClassName="text-accent shrink-0"
+          title="Log exports"
+          titleClassName="text-sm font-semibold uppercase tracking-wider text-text-muted"
+          className=""
+          headerClassName="px-4 pt-4 pb-2"
+          bodyClassName="px-4 pb-4 flex flex-wrap items-center justify-between gap-3"
+        >
+          <p className="min-w-0 flex-1 basis-64 text-xs text-text-dim">
+            {docker ? 'Download retained container logs as a ZIP file. The export report identifies any unavailable or truncated sources.' : 'Collects logs from every pod and writes them to your desktop. Each export opens a console window.'}
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <button
+              className="btn-primary"
+              disabled={!bgReady || exportBusy !== null}
+              onClick={() => { void runExport('logs-export', 'Battlegroup log export') }}
+              title={!bgReady ? 'Battlegroup must be running' : 'Export battlegroup pod logs'}
+            >
+              <Icon name={exportBusy === 'logs-export' ? 'Loader2' : 'Download'} size={14} className={exportBusy === 'logs-export' ? 'animate-spin' : ''} />
+              Battlegroup logs
+            </button>
+            <button
+              className="btn-primary"
+              disabled={!bgReady || exportBusy !== null}
+              onClick={() => { void runExport('operator-logs-export', 'Operator log export') }}
+              title={!bgReady ? 'Battlegroup must be running' : 'Export operator pod logs'}
+            >
+              <Icon name={exportBusy === 'operator-logs-export' ? 'Loader2' : 'Download'} size={14} className={exportBusy === 'operator-logs-export' ? 'animate-spin' : ''} />
+              Operator logs
+            </button>
+          </div>
+          {exportMsg && <p className="basis-full text-xs text-text-muted border-l-2 border-accent pl-2">{exportMsg}</p>}
+          {exportErr && <p className="basis-full text-xs text-danger break-words">{exportErr}</p>}
+        </CollapsibleCard>
+      </section>
+
+      {vm?.error && (
+        <section className="card p-4 text-xs text-warning break-words">
+          <span className="font-semibold">{hostLabel} error:</span> {vm.error}
+          {/required permission|access (?:is )?denied/i.test(vm.error) && (
+            <span className="block mt-1 text-text-muted">
+              Hyper-V cmdlets need administrator rights. Re-launch Dune Server Tool with elevation.
+            </span>
+          )}
+        </section>
+      )}
+    </div>
+  )
+}

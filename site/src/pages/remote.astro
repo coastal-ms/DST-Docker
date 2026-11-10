@@ -1,0 +1,238 @@
+---
+import Base from "../layouts/Base.astro";
+import PageHeader from "../components/PageHeader.astro";
+import Screenshot from "../components/Screenshot.astro";
+const base = import.meta.env.BASE_URL;
+---
+
+<Base
+  title="Browser Portal guide — DST"
+  description="Use the full DST Browser Portal from a phone, tablet, or PC with optional host-managed Owner and Admin accounts."
+>
+  <PageHeader
+    eyebrow="Browser Portal"
+    title="Take the full DST portal with you"
+    intro="DST stays local-only by default. When you choose remote access, the same responsive portal can run on a phone, tablet, or another PC through a stable HTTPS address. Optional host-managed accounts replace credential-bearing links with normal sign-in and enforce Owner/Admin boundaries in both navigation and APIs."
+  />
+
+  <section class="site-width phone-tour pb-12">
+    <div>
+      <h2>Your control room, on a smaller screen.</h2>
+      <p>Open the same responsive Browser Portal in your device's browser. Account login uses host-created credentials, not a password hidden in the shared link.</p>
+      <p>New setups use Tailscale Funnel. Existing Cloudflare configuration remains available but its legacy portal is disabled by default. Keep it disabled unless you explicitly need it.</p>
+      <a class="text-link" href="#funnel">Start with Tailscale Funnel <span aria-hidden="true">↓</span></a>
+    </div>
+    <Screenshot src={`${base}screenshots/browser-portal.png`} alt="DST Browser Portal sign-in form on a phone-sized screen with empty account fields and a remember-me option" caption="Current sign-in screen, captured offline. No credentials or connected remote session." width={390} height={844} />
+  </section>
+
+  <section class="mx-auto max-w-3xl px-6 pb-16 space-y-12 text-dune-text">
+    <nav class="rounded-xl border border-dune-border bg-dune-surface p-5">
+      <h2 class="text-sm font-semibold uppercase tracking-wide text-dune-muted mb-3">On this page</h2>
+      <ol class="list-decimal list-inside text-sm space-y-1 text-dune-muted">
+        <li><a class="text-dune-text hover:underline" href="#access">What each role can access</a></li>
+        <li><a class="text-dune-text hover:underline" href="#security">How access is protected</a></li>
+        <li><a class="text-dune-text hover:underline" href="#funnel">Set up a Tailscale Funnel</a></li>
+        <li><a class="text-dune-text hover:underline" href="#accounts">Create Browser Portal accounts</a></li>
+        <li><a class="text-dune-text hover:underline" href="#device">Open and save the portal on a device</a></li>
+        <li><a class="text-dune-text hover:underline" href="#cloudflare">Migrate an existing Cloudflare domain</a></li>
+        <li><a class="text-dune-text hover:underline" href="#trouble">Troubleshooting</a></li>
+        <li><a class="text-dune-text hover:underline" href="#revoke">Disable or revoke access</a></li>
+      </ol>
+    </nav>
+
+    <div id="access">
+      <h2 class="text-2xl font-semibold mb-4">1 · What each role can access</h2>
+      <p class="text-dune-muted leading-relaxed mb-4">
+        The Browser Portal is the normal DST AppShell, not a reduced companion
+        dashboard. It uses the same pages, responsive navigation, and updates as
+        the desktop portal. Host-only safeguards still apply.
+      </p>
+      <div class="grid sm:grid-cols-2 gap-5">
+        <div class="rounded-xl border border-dune-border bg-dune-surface p-5">
+          <h3 class="font-semibold text-lg mb-2">Owner</h3>
+          <p class="text-dune-muted text-sm leading-relaxed">
+            Trusted remote administration across the full portal except
+            host-local surfaces such as PowerShell, Solo Mode, Setup, local
+            paths, credentials, SSH controls, and local client configuration.
+          </p>
+        </div>
+        <div class="rounded-xl border border-dune-border bg-dune-surface p-5">
+          <h3 class="font-semibold text-lg mb-2">Admin</h3>
+          <p class="text-dune-muted text-sm leading-relaxed">
+            Operational access to server health, pods, approved Commands,
+            Gameplay Admin, Broadcasts, DD Atlas, and Map Management.
+            Game Config, Experimental, Database, Sietches, and Settings remain
+            unavailable.
+          </p>
+        </div>
+      </div>
+      <p class="text-dune-muted text-sm leading-relaxed mt-4">
+        Only the host can create, promote, demote, disable, reset, or delete
+        Browser Portal accounts. Users cannot self-register.
+      </p>
+    </div>
+
+    <div id="security">
+      <h2 class="text-2xl font-semibold mb-4">2 · How access is protected</h2>
+      <ol class="list-decimal list-inside space-y-3 text-dune-muted leading-relaxed">
+        <li>
+          A public HTTPS transport forwards to DST's loopback-only bridge on{" "}
+          <span class="font-mono">127.0.0.1:47900</span>. No router
+          port-forward or inbound Windows Firewall rule is required.
+        </li>
+        <li>
+          Account mode uses host-created usernames, PBKDF2-HMAC-SHA256 password
+          hashes, forced replacement of one-time passwords, opaque server-side
+          sessions, lockouts, origin checks, and immediate revocation.
+        </li>
+        <li>
+          The shared QR/link becomes a stable token-free address after account
+          mode is enabled. A username or password is still required, so the
+          address itself is not an administrator credential.
+        </li>
+        <li>
+          Owner/Admin authorization is enforced by backend routes as well as the
+          visible navigation. Hiding a page is not the security boundary.
+        </li>
+      </ol>
+      <p class="text-dune-muted text-sm leading-relaxed mt-4">
+        Until account mode is enabled, DST preserves the legacy magic-link flow.
+        Enabling account mode invalidates those browser sessions and retires
+        paired native iOS/Android apps, whose token header cannot be safely
+        distinguished from a browser request.
+      </p>
+    </div>
+
+    <div id="funnel">
+      <h2 class="text-2xl font-semibold mb-4">3 · Recommended: Tailscale Funnel <span class="text-dune-muted text-base font-normal">— no domain required</span></h2>
+      <div class="space-y-5">
+        <div class="rounded-xl border border-dune-border bg-dune-surface p-5">
+          <h3 class="font-semibold text-lg mb-2">Install Tailscale on the DST PC</h3>
+          <p class="text-dune-muted text-sm">
+            Download it from <a class="underline text-dune-text" href="https://tailscale.com/download" rel="noopener" target="_blank">tailscale.com/download</a>{" "}
+            and sign in. A personal account is enough for one host.
+          </p>
+        </div>
+        <div class="rounded-xl border border-dune-border bg-dune-surface p-5">
+          <h3 class="font-semibold text-lg mb-2">Enable Funnel on the bridge</h3>
+          <p class="text-dune-muted text-sm mb-2">Run in PowerShell on the DST PC:</p>
+          <pre class="bg-dune-bg border border-dune-border rounded-md p-3 text-xs font-mono overflow-x-auto">tailscale funnel --bg http://127.0.0.1:47900</pre>
+          <p class="text-dune-muted text-xs mt-2">
+            Follow Tailscale's one-time enablement link if it prints one, then
+            run the command again. Funnel works behind CGNAT and does not carry
+            Dune game traffic.
+          </p>
+        </div>
+        <div class="rounded-xl border border-dune-border bg-dune-surface p-5">
+          <h3 class="font-semibold text-lg mb-2">Confirm Remote Device Access</h3>
+          <p class="text-dune-muted text-sm">
+            Open <strong>Settings → Remote Device Access</strong>. DST should
+            show the stable <span class="font-mono">.ts.net</span> address and a
+            ready local bridge.
+          </p>
+        </div>
+      </div>
+    </div>
+
+    <div id="accounts">
+      <h2 class="text-2xl font-semibold mb-4">4 · Create Browser Portal accounts</h2>
+      <ol class="list-decimal list-inside space-y-3 text-dune-muted leading-relaxed">
+        <li>In <strong>Settings → Remote Device Access</strong>, create the first Owner.</li>
+        <li>Copy and store the one-time password. DST cannot reveal it again.</li>
+        <li>Verify that Owner password locally on the host.</li>
+        <li>Acknowledge native-app retirement, then enable account login.</li>
+        <li>Create additional Owner or Admin accounts as needed.</li>
+      </ol>
+      <p class="text-dune-muted text-sm leading-relaxed mt-4">
+        Account roles can be changed in place without changing the username or
+        password. Password reset revokes that account's existing sessions.
+        Hosts can also revoke sessions, disable an account, or delete it.
+      </p>
+    </div>
+
+    <div id="device">
+      <h2 class="text-2xl font-semibold mb-4">5 · Open the portal on a phone, tablet, or PC</h2>
+      <ol class="list-decimal list-inside space-y-3 text-dune-muted leading-relaxed">
+        <li>Scan the QR with the device's normal camera, or open the copied Browser Portal link.</li>
+        <li>Sign in with the account and one-time password supplied privately by the host.</li>
+        <li>Create a permanent password when prompted.</li>
+        <li>Use <strong>Remember me</strong> only on a trusted personal device.</li>
+      </ol>
+      <div class="rounded-xl border border-dune-border bg-dune-surface p-5 mt-5">
+        <h3 class="font-semibold mb-2">Save it like an app</h3>
+        <p class="text-dune-muted text-sm leading-relaxed">
+          On iPhone or iPad, open the portal in Safari and choose{" "}
+          <strong>Share → Add to Home Screen</strong>. On Android, open it in
+          Chrome and choose <strong>Add to Home screen</strong> or{" "}
+          <strong>Install app</strong>. The icon opens the responsive Browser
+          Portal; no separate DST mobile app is required.
+        </p>
+      </div>
+    </div>
+
+    <div id="cloudflare">
+      <h2 class="text-2xl font-semibold mb-4">6 · Migrate an existing Cloudflare domain <span class="text-dune-muted text-base font-normal">— deprecated</span></h2>
+      <p class="text-dune-muted leading-relaxed mb-3">
+        DST retains existing Cloudflare named-tunnel/Access configuration, but
+        its legacy portal is disabled by default. It can be explicitly
+        re-enabled in local Settings if needed, but new setups use Tailscale
+        Funnel. DST does not manage the Cloudflare tunnel itself.
+      </p>
+      <ol class="list-decimal list-inside space-y-2 text-dune-muted leading-relaxed text-sm">
+        <li>Run <span class="font-mono">tailscale funnel --bg http://127.0.0.1:47900</span> in PowerShell.</li>
+        <li>Confirm the <span class="font-mono">.ts.net</span> URL appears in Remote Device Access.</li>
+        <li>Under Browser Portal accounts, create and locally verify an Owner.</li>
+        <li>Acknowledge native-app retirement, then enable account login.</li>
+        <li>Create any Browser Portal Admin account needed for role-boundary testing.</li>
+        <li>Test Owner sign-in and Admin restricted navigation from outside the LAN.</li>
+        <li>Leave the legacy Cloudflare portal disabled in local Settings unless you explicitly need to restore it.</li>
+      </ol>
+    </div>
+
+    <div id="trouble">
+      <h2 class="text-2xl font-semibold mb-4">7 · Troubleshooting</h2>
+      <div class="space-y-5">
+        <div>
+          <h3 class="font-semibold mb-1">No remote address appears</h3>
+          <p class="text-dune-muted text-sm leading-relaxed">
+            Confirm <span class="font-mono">tailscale funnel status</span> lists
+            the proxy to <span class="font-mono">127.0.0.1:47900</span>, then
+            refresh Remote Device Access.
+          </p>
+        </div>
+        <div>
+          <h3 class="font-semibold mb-1">The device cannot reach DST</h3>
+          <p class="text-dune-muted text-sm leading-relaxed">
+            DST or its background service must be running on the host. Reopen
+            the current QR/link if the public hostname changed.
+          </p>
+        </div>
+        <div>
+          <h3 class="font-semibold mb-1">The one-time password does not work</h3>
+          <p class="text-dune-muted text-sm leading-relaxed">
+            The host can reset that account's password in local Settings. The
+            reset creates a new one-time password and revokes existing sessions.
+          </p>
+        </div>
+        <div>
+          <h3 class="font-semibold mb-1">Password change reports a security check failure</h3>
+          <p class="text-dune-muted text-sm leading-relaxed">
+            Reopen the current Browser Portal QR or stable link so the request
+            uses the configured HTTPS authority, then sign in and try again.
+          </p>
+        </div>
+      </div>
+    </div>
+
+    <div id="revoke">
+      <h2 class="text-2xl font-semibold mb-4">8 · Disable or revoke access</h2>
+      <ul class="space-y-3 text-dune-muted leading-relaxed">
+        <li><strong class="text-dune-text">One device:</strong> sign out, or revoke that account's sessions from local Settings.</li>
+        <li><strong class="text-dune-text">One account:</strong> disable, reset, demote, or delete it from Browser Portal account management.</li>
+        <li><strong class="text-dune-text">All account sessions:</strong> use the local emergency Disable action. This restores legacy magic-link behavior.</li>
+        <li><strong class="text-dune-text">Public endpoint:</strong> turn off Funnel. Legacy Cloudflare portal enablement is separate from its tunnel lifecycle, which DST does not manage.</li>
+        <li><strong class="text-dune-text">Background access:</strong> disable <strong>Help → Keep serving while DST is closed</strong>.</li>
+      </ul>
+    </div>
+  </section>
+</Base>

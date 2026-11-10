@@ -1,0 +1,612 @@
+﻿<#
+.SYNOPSIS
+    DST Friend Helper bridge daemon. Runs on the host's PC.
+
+.DESCRIPTION
+    Long-lived HTTP listener bound to a stable port (default 47900). Re-reads
+    %LOCALAPPDATA%\DuneServer\last-url.txt on every request to discover the
+    current DST loopback port + DuneToken (DST rewrites this file on every
+    launch). All non-special paths are reverse-proxied to the current DST
+    process on 127.0.0.1.
+
+    Trust boundary: this listener binds to LOOPBACK (127.0.0.1) only. Remote
+    devices reach it exclusively through a Cloudflare quick tunnel — cloudflared
+    runs on this same PC and connects OUT to Cloudflare, then forwards inbound
+    requests to 127.0.0.1 locally. Nothing is exposed on the LAN or the public
+    internet, so no firewall rule or URL ACL is needed.
+
+    The /_dst/token endpoint (which hands out the current DuneToken) is served
+    ONLY to genuinely-local requests: any request bearing Cloudflare/proxy edge
+    headers (Cf-Ray, Cf-Connecting-Ip, X-Forwarded-For, ...) is refused, so the
+    admin token can never leak out over a tunnel — including a Cloudflare quick
+    tunnel, which has no Access gate. The mobile app receives the token via the
+    pairing QR and the /remote portal via server-side injection, so no
+    legitimate remote caller needs /_dst/token.
+
+.PARAMETER Port
+    TCP port to listen on. Default 47900.
+
+.PARAMETER LastUrlPath
+    Path to DST's last-url.txt. Default %LOCALAPPDATA%\DuneServer\last-url.txt.
+
+.PARAMETER LogPath
+    Optional log file path. When set, each request is appended.
+
+.NOTES
+    PowerShell 7+ (uses [System.Net.Http.HttpClient] async patterns
+    synchronously via .GetAwaiter().GetResult()).
+#>
+
+[CmdletBinding()]
+param(
+    [int]$Port = 47900,
+    [string]$LastUrlPath = (Join-Path $env:LOCALAPPDATA 'DuneServer\last-url.txt'),
+    [string]$LogPath,
+    # Override the listener URL prefix. Defaults to loopback (127.0.0.1), which
+    # needs no admin / URL ACL and is reached remotely only via the local
+    # cloudflared quick tunnel. Set to 'http://+:<port>/' only for legacy setups
+    # that front the bridge with their own firewall-scoped exposure.
+    [string]$Prefix,
+    [switch]$NoStart
+)
+
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+
+# Hop-by-hop headers that must not be forwarded (RFC 7230 §6.1) plus a few
+# that HttpClient / HttpListener manage themselves.
+$script:HopByHop = @(
+    'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
+    'te', 'trailers', 'transfer-encoding', 'upgrade',
+    'host', 'content-length'
+)
+$script:BridgeVersion = '2.0.1'
+$script:BridgeProtocolVersion = '2'
+$script:BridgeInternalHeaders = @('x-dune-bridge-protocol', 'x-dune-original-authority', 'x-dune-bridge-proof')
+
+# Shared HttpClient — keep-alive + connection pooling to localhost.
+$script:HttpClient = [System.Net.Http.HttpClient]::new()
+$script:HttpClient.Timeout = [TimeSpan]::FromSeconds(60)
+
+function Write-BridgeLog {
+    param([string]$Message)
+    $line = "{0} {1}" -f ([DateTime]::UtcNow.ToString('o')), $Message
+    Write-Host $line
+    if ($LogPath) {
+        try {
+            $dir = Split-Path -Parent $LogPath
+            if ($dir -and -not (Test-Path -LiteralPath $dir)) {
+                New-Item -ItemType Directory -Force -Path $dir | Out-Null
+            }
+            Add-Content -LiteralPath $LogPath -Value $line -Encoding UTF8
+        } catch {
+            # Swallow log errors — never let logging take the daemon down.
+        }
+    }
+}
+
+function Get-CurrentDst {
+    <#
+        Re-read last-url.txt and parse out the current DST loopback URL +
+        token. Cheap (single file read), so safe to call per request.
+    #>
+    if (-not (Test-Path -LiteralPath $LastUrlPath)) {
+        throw "last-url.txt not found at $LastUrlPath — is DST running?"
+    }
+    $raw = (Get-Content -LiteralPath $LastUrlPath -Raw).Trim()
+    if (-not $raw) {
+        throw "last-url.txt is empty"
+    }
+    # Expected: http://127.0.0.1:<port>/?t=<token>
+    $match = [regex]::Match($raw, '^https?://127\.0\.0\.1:(?<port>\d+)/?\?t=(?<token>[A-Za-z0-9]+)\s*$')
+    if (-not $match.Success) {
+        throw "last-url.txt does not match expected format: '$raw'"
+    }
+    return [pscustomobject]@{
+        DstPort = [int]$match.Groups['port'].Value
+        Token   = $match.Groups['token'].Value
+        BaseUrl = "http://127.0.0.1:$($match.Groups['port'].Value)"
+    }
+}
+
+function Send-JsonResponse {
+    param(
+        [System.Net.HttpListenerResponse]$Response,
+        [int]$StatusCode,
+        $Body
+    )
+    $json = $Body | ConvertTo-Json -Compress -Depth 6
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
+    $Response.StatusCode = $StatusCode
+    $Response.ContentType = 'application/json; charset=utf-8'
+    $Response.ContentLength64 = $bytes.LongLength
+    $Response.OutputStream.Write($bytes, 0, $bytes.Length)
+    $Response.OutputStream.Close()
+}
+
+function Get-DuneBridgeOriginSecret {
+    $directory = Join-Path $env:APPDATA 'DuneServer'
+    $path = Join-Path $directory 'bridge-origin.key'
+    if (-not (Test-Path -LiteralPath $directory)) {
+        New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    }
+    if (-not (Test-Path -LiteralPath $path)) {
+        $bytes = [byte[]]::new(32)
+        [Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+        $secret = [Convert]::ToBase64String($bytes)
+        try {
+            $stream = [IO.File]::Open($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+            try {
+                $data = [Text.Encoding]::ASCII.GetBytes($secret)
+                $stream.Write($data, 0, $data.Length)
+            } finally { $stream.Dispose() }
+        } catch [IO.IOException] {}
+    }
+    foreach ($attempt in 1..10) {
+        try {
+            $value = (Get-Content -LiteralPath $path -Raw -Encoding ascii -ErrorAction Stop).Trim()
+            if ([Convert]::FromBase64String($value).Length -eq 32) { return $value }
+        } catch {}
+        Start-Sleep -Milliseconds 20
+    }
+    throw 'Bridge origin secret is unavailable.'
+}
+
+function Set-DuneBridgeForwardingHeaders {
+    param($InboundRequest, [System.Net.Http.HttpRequestMessage]$OutboundRequest)
+    foreach ($name in $InboundRequest.Headers.AllKeys) {
+        $normalizedName = $name.ToLowerInvariant()
+        if ($script:HopByHop -contains $normalizedName -or $script:BridgeInternalHeaders -contains $normalizedName) { continue }
+        $values = $InboundRequest.Headers.GetValues($name)
+        if (-not $OutboundRequest.Headers.TryAddWithoutValidation($name, $values)) {
+            if ($OutboundRequest.Content) {
+                [void]$OutboundRequest.Content.Headers.TryAddWithoutValidation($name, $values)
+            }
+        }
+    }
+    [void]$OutboundRequest.Headers.TryAddWithoutValidation('X-Dune-Bridge-Protocol', $script:BridgeProtocolVersion)
+    [void]$OutboundRequest.Headers.TryAddWithoutValidation('X-Dune-Original-Authority', [string]$InboundRequest.UserHostName)
+    [void]$OutboundRequest.Headers.TryAddWithoutValidation('X-Dune-Bridge-Proof', (Get-DuneBridgeOriginSecret))
+}
+
+function Invoke-Proxy {
+    param(
+        [System.Net.HttpListenerContext]$Context,
+        [pscustomobject]$Dst
+    )
+    $req = $Context.Request
+    $res = $Context.Response
+
+    # Build the target URI: same path + query, but pointing at loopback DST.
+    $targetUri = [Uri]::new("$($Dst.BaseUrl)$($req.Url.PathAndQuery)")
+    $httpReq = [System.Net.Http.HttpRequestMessage]::new(
+        [System.Net.Http.HttpMethod]::new($req.HttpMethod),
+        $targetUri
+    )
+
+    # Copy body (POST/PUT/PATCH). Buffer to memory — DST API payloads are
+    # tiny, and HttpListener's InputStream is non-seekable.
+    $methodHasBody = @('POST', 'PUT', 'PATCH', 'DELETE') -contains $req.HttpMethod.ToUpperInvariant()
+    if ($methodHasBody -and $req.HasEntityBody) {
+        $ms = [System.IO.MemoryStream]::new()
+        $req.InputStream.CopyTo($ms)
+        $ms.Position = 0
+        $content = [System.Net.Http.StreamContent]::new($ms)
+        if ($req.ContentType) {
+            $content.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse($req.ContentType)
+        }
+        $httpReq.Content = $content
+    }
+
+    Set-DuneBridgeForwardingHeaders -InboundRequest $req -OutboundRequest $httpReq
+
+    # Send and stream the response back.
+    $httpRes = $script:HttpClient.SendAsync(
+        $httpReq,
+        [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead
+    ).GetAwaiter().GetResult()
+
+    try {
+        $res.StatusCode = [int]$httpRes.StatusCode
+
+        foreach ($h in $httpRes.Headers) {
+            if ($script:HopByHop -contains $h.Key.ToLowerInvariant()) { continue }
+            try { $res.Headers[$h.Key] = ($h.Value -join ', ') } catch { }
+        }
+        if ($httpRes.Content) {
+            foreach ($h in $httpRes.Content.Headers) {
+                if ($script:HopByHop -contains $h.Key.ToLowerInvariant()) { continue }
+                if ($h.Key -ieq 'Content-Type') {
+                    $res.ContentType = ($h.Value -join ', ')
+                    continue
+                }
+                try { $res.Headers[$h.Key] = ($h.Value -join ', ') } catch { }
+            }
+
+            $stream = $httpRes.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+            try { $stream.CopyTo($res.OutputStream) } finally { $stream.Dispose() }
+        }
+    } finally {
+        $httpRes.Dispose()
+        try { $res.OutputStream.Close() } catch { }
+    }
+}
+
+function Start-WsPumpAsync {
+    <#
+        Spawn a background PowerShell runspace that pumps WebSocket frames
+        one-way (Src -> Dst). Returns @{ PS = ..., Handle = ... } so the
+        caller can wait for completion and dispose.
+    #>
+    param(
+        [System.Net.WebSockets.WebSocket]$Src,
+        [System.Net.WebSockets.WebSocket]$Dst,
+        [System.Threading.CancellationToken]$CT
+    )
+    $ps = [System.Management.Automation.PowerShell]::Create()
+    [void]$ps.AddScript({
+        param($s, $d, $ct)
+        $buf = [byte[]]::new(16384)
+        try {
+            while (-not $ct.IsCancellationRequested -and
+                   $s.State -eq [System.Net.WebSockets.WebSocketState]::Open) {
+                $seg = [System.ArraySegment[byte]]::new($buf)
+                $r = $s.ReceiveAsync($seg, $ct).GetAwaiter().GetResult()
+                if ($r.MessageType -eq [System.Net.WebSockets.WebSocketMessageType]::Close) {
+                    if ($d.State -eq [System.Net.WebSockets.WebSocketState]::Open) {
+                        try {
+                            [void]$d.CloseOutputAsync(
+                                [System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure,
+                                '', [System.Threading.CancellationToken]::None
+                            ).GetAwaiter().GetResult()
+                        } catch { }
+                    }
+                    return
+                }
+                $out = [System.ArraySegment[byte]]::new($buf, 0, $r.Count)
+                [void]$d.SendAsync($out, $r.MessageType, $r.EndOfMessage, $ct).GetAwaiter().GetResult()
+            }
+        } catch {
+            # Connection dropped / cancelled. Let the partner pump notice
+            # through its own cancellation token; nothing to log per-frame.
+        }
+    }).AddArgument($Src).AddArgument($Dst).AddArgument($CT) | Out-Null
+    return @{ PS = $ps; Handle = $ps.BeginInvoke() }
+}
+
+function Invoke-WsProxy {
+    <#
+        Bidirectional WebSocket reverse proxy. The friend's browser opens a
+        WS to the bridge (e.g. /ws/terminal?t=token); we accept it, open a
+        matching WS to DST on loopback, and bridge frames in both directions
+        until either side closes.
+
+        This occupies one request worker for the lifetime of the session.
+        Other transfers and the separate authentication workers remain usable.
+    #>
+    param(
+        [System.Net.HttpListenerContext]$Context,
+        [pscustomobject]$Dst
+    )
+    $req = $Context.Request
+    $serverWs = $null
+    $client = $null
+    $cts = [System.Threading.CancellationTokenSource]::new()
+    $j1 = $null
+    $j2 = $null
+
+    try {
+        # Accept the inbound upgrade (subprotocol negotiation deferred to DST —
+        # pass through whatever the client requested, if anything).
+        $subprotocol = [NullString]::Value
+        $requested = $req.Headers['Sec-WebSocket-Protocol']
+        if ($requested) {
+            # Use the first offered subprotocol; AcceptWebSocketAsync requires
+            # us to pick one specifically rather than echoing the list.
+            $subprotocol = ($requested -split ',')[0].Trim()
+        }
+        $wsCtx = $Context.AcceptWebSocketAsync($subprotocol).GetAwaiter().GetResult()
+        $serverWs = $wsCtx.WebSocket
+
+        # Connect to DST on loopback. Same path + query (e.g. ?t=token).
+        $client = [System.Net.WebSockets.ClientWebSocket]::new()
+        if ($subprotocol -and $subprotocol -ne [NullString]::Value) {
+            $client.Options.AddSubProtocol($subprotocol)
+        }
+        $targetUri = [Uri]::new("ws://127.0.0.1:$($Dst.DstPort)$($req.Url.PathAndQuery)")
+        [void]$client.ConnectAsync($targetUri, [System.Threading.CancellationToken]::None).GetAwaiter().GetResult()
+
+        # Two pumps in parallel: client->DST and DST->client.
+        $j1 = Start-WsPumpAsync -Src $serverWs -Dst $client -CT $cts.Token
+        $j2 = Start-WsPumpAsync -Src $client -Dst $serverWs -CT $cts.Token
+
+        [System.Threading.WaitHandle]::WaitAny(@($j1.Handle.AsyncWaitHandle, $j2.Handle.AsyncWaitHandle)) | Out-Null
+        $cts.Cancel()
+        # WaitAll isn't supported on STA threads (PowerShell default), so
+        # wait on each handle individually with a 5s ceiling each.
+        foreach ($j in @($j1, $j2)) {
+            try { [void]$j.Handle.AsyncWaitHandle.WaitOne([TimeSpan]::FromSeconds(5)) } catch { }
+        }
+    } catch {
+        Write-BridgeLog "WS proxy error: $($_.Exception.Message)"
+    } finally {
+        foreach ($j in @($j1, $j2)) {
+            if ($null -ne $j) {
+                try { [void]$j.PS.EndInvoke($j.Handle) } catch { }
+                try { $j.PS.Dispose() } catch { }
+            }
+        }
+        if ($null -ne $serverWs) {
+            try {
+                if ($serverWs.State -eq [System.Net.WebSockets.WebSocketState]::Open) {
+                    [void]$serverWs.CloseAsync(
+                        [System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure,
+                        '', [System.Threading.CancellationToken]::None
+                    ).GetAwaiter().GetResult()
+                }
+            } catch { }
+            try { $serverWs.Dispose() } catch { }
+        }
+        if ($null -ne $client) {
+            try {
+                if ($client.State -eq [System.Net.WebSockets.WebSocketState]::Open) {
+                    [void]$client.CloseAsync(
+                        [System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure,
+                        '', [System.Threading.CancellationToken]::None
+                    ).GetAwaiter().GetResult()
+                }
+            } catch { }
+            try { $client.Dispose() } catch { }
+        }
+        $cts.Dispose()
+    }
+}
+
+function Test-DuneRequestIsLocal {
+    # The bridge binds loopback only, and cloudflared connects to it from
+    # 127.0.0.1 — so RemoteEndPoint is ALWAYS loopback and cannot distinguish a
+    # genuine local request from one tunneled in. Cloudflare (quick OR named
+    # tunnel) always injects edge headers (Cf-Ray / Cf-Connecting-Ip) and
+    # cloudflared adds X-Forwarded-For; a real local request (e.g. the desktop
+    # app or curl 127.0.0.1) carries none of these. Treat the presence of ANY
+    # proxy/edge header as "arrived through a tunnel" and therefore NOT local.
+    param($Request)
+    $isLoopback = $false
+    try { $isLoopback = [Net.IPAddress]::IsLoopback($Request.RemoteEndPoint.Address) } catch {}
+    if (-not $isLoopback) { return $false }
+    foreach ($h in @(
+        'Cf-Ray','Cf-Connecting-Ip','Cf-Worker',
+        'Cf-Access-Authenticated-User-Email','Cf-Access-Jwt-Assertion',
+        'X-Forwarded-For','X-Forwarded-Proto','Cf-Warp-Tag-Id'
+    )) {
+        if ($Request.Headers[$h]) { return $false }
+    }
+    return $true
+}
+
+function Test-DuneBridgeWebSocketUpgradeAllowed {
+    param($Request)
+
+    # The backend must see direct desktop WebSocket upgrades only. A proxied
+    # request loses its edge headers while the bridge opens a new loopback
+    # socket, which would otherwise make a remote terminal look host-local.
+    return (Test-DuneRequestIsLocal -Request $Request)
+}
+
+function Invoke-Request {
+    param([System.Net.HttpListenerContext]$Context)
+    $req = $Context.Request
+    $res = $Context.Response
+    $path = $req.Url.AbsolutePath
+    $client = $req.RemoteEndPoint
+
+    try {
+        if ($path -eq '/_dst/token') {
+            # SECURITY: never hand the admin token to a request that arrived
+            # through a tunnel. Over a Cloudflare quick tunnel (the default free
+            # path) there is no Access gate, so an unauthenticated GET here would
+            # otherwise leak full-admin credentials to anyone with the URL. The
+            # mobile app receives the token out-of-band via the pairing QR, and
+            # the /remote co-admin portal gets it via server-side HTML injection,
+            # so no legitimate REMOTE caller ever needs this endpoint.
+            if (-not (Test-DuneRequestIsLocal -Request $req)) {
+                Send-JsonResponse -Response $res -StatusCode 403 -Body @{ error = 'The bridge token endpoint is only available locally. Pair the mobile app with the QR code, or use the /remote portal.' }
+                Write-BridgeLog "403 $($req.HttpMethod) $path from $client (token-handout refused: tunneled request)"
+                return
+            }
+            $dst = Get-CurrentDst
+            Send-JsonResponse -Response $res -StatusCode 200 -Body @{
+                url   = $dst.BaseUrl
+                token = $dst.Token
+            }
+            Write-BridgeLog "200 $($req.HttpMethod) $path from $client (token-handout)"
+            return
+        }
+
+        if ($path -eq '/_dst/health') {
+            $backendHealthy = $true
+            $backendError = ''
+            try {
+                $null = Get-CurrentDst
+            } catch {
+                $backendHealthy = $false
+                $backendError = $_.Exception.Message
+            }
+            Send-JsonResponse -Response $res -StatusCode 200 -Body @{
+                ok = $true
+                bridgeVersion = $script:BridgeVersion
+                protocolVersion = $script:BridgeProtocolVersion
+                backendHealthy = $backendHealthy
+                backendError = $backendError
+            }
+            return
+        }
+
+        # Everything else: reverse-proxy to current DST.
+        $dst = Get-CurrentDst
+
+        if ($req.IsWebSocketRequest) {
+            if (-not (Test-DuneBridgeWebSocketUpgradeAllowed -Request $req)) {
+                $res.StatusCode = 403
+                $res.OutputStream.Close()
+                Write-BridgeLog "403 WS $($req.HttpMethod) $path from $client (remote WebSocket refused)"
+                return
+            }
+            # WebSocket upgrades (currently just /ws/terminal). Handled inline
+            # — see Invoke-WsProxy for the trade-off note about main-loop blocking.
+            Invoke-WsProxy -Context $Context -Dst $dst
+            Write-BridgeLog "WS  $($req.HttpMethod) $path from $client (closed)"
+            return
+        }
+
+        Invoke-Proxy -Context $Context -Dst $dst
+        Write-BridgeLog "$($res.StatusCode) $($req.HttpMethod) $path from $client"
+    } catch {
+        $msg = $_.Exception.Message
+        Write-BridgeLog "ERR $($req.HttpMethod) $path from $client : $msg"
+        try {
+            Send-JsonResponse -Response $res -StatusCode 502 -Body @{
+                ok    = $false
+                error = $msg
+            }
+        } catch {
+            try { $res.OutputStream.Close() } catch { }
+        }
+    }
+}
+
+function New-DuneBridgeRequestPool {
+    param([int]$Maximum = 8)
+    $initial = [Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+    foreach ($name in @('Write-BridgeLog','Get-CurrentDst','Send-JsonResponse','Get-DuneBridgeOriginSecret',
+        'Set-DuneBridgeForwardingHeaders','Invoke-Proxy','Start-WsPumpAsync','Invoke-WsProxy',
+        'Test-DuneRequestIsLocal','Test-DuneBridgeWebSocketUpgradeAllowed','Invoke-Request')) {
+        $definition = (Get-Item "Function:$name").Definition
+        $initial.Commands.Add([Management.Automation.Runspaces.SessionStateFunctionEntry]::new($name, $definition))
+    }
+    foreach ($entry in @{
+        LastUrlPath=$LastUrlPath; LogPath=$LogPath; HopByHop=$script:HopByHop
+        BridgeVersion=$script:BridgeVersion; BridgeProtocolVersion=$script:BridgeProtocolVersion
+        BridgeInternalHeaders=$script:BridgeInternalHeaders; HttpClient=$script:HttpClient
+    }.GetEnumerator()) {
+        $initial.Variables.Add([Management.Automation.Runspaces.SessionStateVariableEntry]::new($entry.Key, $entry.Value, 'Bridge request context'))
+    }
+    $pool = [runspacefactory]::CreateRunspacePool(1, $Maximum, $initial, $Host)
+    $pool.Open()
+    return $pool
+}
+
+function Start-DuneBridgeRequest {
+    param($Pool, $Context)
+    $worker = [powershell]::Create()
+    $worker.RunspacePool = $Pool
+    [void]$worker.AddScript({ param($context) Invoke-Request -Context $context }).AddArgument($Context)
+    try { return @{ worker=$worker; handle=$worker.BeginInvoke() } }
+    catch { $worker.Dispose(); throw }
+}
+
+function Complete-DuneBridgeRequests {
+    param($Jobs)
+    for ($i=$Jobs.Count-1; $i -ge 0; $i--) {
+        $job = $Jobs[$i]
+        if (-not $job.handle.IsCompleted) { continue }
+        try { [void]$job.worker.EndInvoke($job.handle) }
+        catch { Write-BridgeLog 'A bridge request ended before completion.' }
+        finally { $job.worker.Dispose(); $Jobs.RemoveAt($i) }
+    }
+}
+
+function Start-Bridge {
+    $listener = [System.Net.HttpListener]::new()
+    # Bind to loopback by default: cloudflared connects locally, so nothing needs
+    # to be exposed on the LAN/public interfaces and no admin/URL ACL is required.
+    # The -Prefix override allows legacy all-interfaces binding if ever needed.
+    $effectivePrefix = if ($Prefix) { $Prefix } else { "http://127.0.0.1:$Port/" }
+    $listener.Prefixes.Add($effectivePrefix)
+
+    try {
+        $listener.Start()
+    } catch [System.Net.HttpListenerException] {
+        throw "Failed to bind $effectivePrefix — needs admin OR a URL ACL: `n  netsh http add urlacl url=$effectivePrefix user=$env:USERNAME`n($($_.Exception.Message))"
+    }
+
+    Write-BridgeLog "DST Helper Bridge listening on $effectivePrefix"
+    Write-BridgeLog "Watching $LastUrlPath"
+
+    $requests = [Collections.Generic.List[object]]::new()
+    $authRequests = [Collections.Generic.List[object]]::new()
+    $pool = $null; $authPool = $null
+    try {
+        $pool = New-DuneBridgeRequestPool -Maximum 8
+        $authPool = New-DuneBridgeRequestPool -Maximum 2
+        while ($listener.IsListening) {
+            $ctx = $listener.GetContext()
+            Complete-DuneBridgeRequests -Jobs $requests
+            Complete-DuneBridgeRequests -Jobs $authRequests
+            $path = $ctx.Request.Url.AbsolutePath
+            # Health must answer even when all transfer workers are occupied.
+            if ($path -in @('/_dst/health','/_dst/token')) { Invoke-Request -Context $ctx; continue }
+            # Sign-in/out has reserved capacity rather than waiting behind maps,
+            # artwork or a terminal WebSocket. The backend still checks access.
+            $auth = $path.StartsWith('/api/portal-auth/', [StringComparison]::Ordinal)
+            $jobs = if ($auth) { ,$authRequests } else { ,$requests }
+            $selectedPool = if ($auth) { $authPool } else { $pool }
+            $limit = if ($auth) { 4 } else { 16 }
+            if ($jobs.Count -ge $limit) {
+                Send-JsonResponse -Response $ctx.Response -StatusCode 503 -Body @{error='Remote access is busy. Please retry.'}
+                continue
+            }
+            $jobs.Add((Start-DuneBridgeRequest -Pool $selectedPool -Context $ctx))
+        }
+    } finally {
+        try { $listener.Stop(); $listener.Close() } catch { }
+        try { $script:HttpClient.Dispose() } catch { }
+        foreach ($job in @($requests.ToArray()) + @($authRequests.ToArray())) {
+            try { $job.worker.Stop(); $job.worker.Dispose() } catch { }
+        }
+        foreach ($requestPool in @($pool,$authPool)) { try { $requestPool.Close(); $requestPool.Dispose() } catch { } }
+        Write-BridgeLog "Bridge stopped."
+    }
+}
+
+# SINGLE-INSTANCE GUARD. Two daemons both registering the SAME http.sys prefix
+# (http://127.0.0.1:47900/) was the cause of recurring "bridge running but not
+# responding" wedges: http.sys round-robins queued requests between the two
+# registrations, so if EITHER instance is busy/stuck (e.g. a blocked request),
+# requests routed to it hang and /_dst/health times out. A process-wide named
+# mutex guarantees exactly one daemon ever owns the listener. A duplicate
+# instance (spawned by a duplicate supervisor) returns immediately WITHOUT
+# binding; its supervisor simply retries on its next loop. We must NOT call
+# `exit` here — the supervisor invokes this script with `&` in its own process,
+# so `exit` would kill the supervisor too; `return` cleanly ends only this script.
+if ($NoStart) { return }
+$mutexName = "Global\DstHelperBridge_$Port"
+$createdNew = $false
+$bridgeMutex = $null
+try {
+    $bridgeMutex = [System.Threading.Mutex]::new($true, $mutexName, [ref]$createdNew)
+} catch {
+    # Fall back to running without the guard rather than failing closed.
+    $bridgeMutex = $null
+}
+
+if ($bridgeMutex -and -not $createdNew) {
+    # Another daemon owns the port. Briefly wait in case it is shutting down,
+    # then yield so we never double-register the prefix.
+    $acquired = $false
+    try { $acquired = $bridgeMutex.WaitOne(2000) } catch { $acquired = $false }
+    if (-not $acquired) {
+        Write-BridgeLog "Another bridge instance already owns port $Port; this instance is yielding."
+        try { $bridgeMutex.Dispose() } catch { }
+        return
+    }
+}
+
+try {
+    Start-Bridge
+} finally {
+    if ($bridgeMutex) {
+        try { $bridgeMutex.ReleaseMutex() } catch { }
+        try { $bridgeMutex.Dispose() } catch { }
+    }
+}

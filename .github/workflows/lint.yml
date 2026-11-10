@@ -1,0 +1,175 @@
+name: Lint PowerShell
+
+# Triggered on:
+#   - push to main: only when PowerShell files (or this workflow) change, to
+#     keep CI minutes low on doc / site-only pushes.
+#   - ready pull_request to any branch, regardless of which files changed. This
+#     workflow's job name (`lint`) is a required status check on main, and
+#     filtering it by paths means PRs that don't touch *.ps1 would block
+#     forever waiting for a check that never runs. The lint steps below are
+#     a few seconds when there's nothing relevant to lint, so the cost is
+#     negligible. See PR #58 history for the catch-22 this resolves.
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**/*.ps1'
+      - '**/*.psm1'
+      - '.github/workflows/lint.yml'
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+# Draft PRs run no jobs. Ready PRs validate each new head; superseded runs stop.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install PSScriptAnalyzer
+        shell: pwsh
+        # Newer windows-latest runner images don't pre-register PSGallery
+        # for the legacy PowerShellGet v2 cmdlets, so prefer PowerShellGet
+        # v3 (`Install-PSResource`) which has PSGallery baked in. We've
+        # also seen two transient failure modes worth tolerating:
+        #   1. PSGallery returns 403/429 during high CI load.
+        #   2. The legacy fallback shells out to nuget.exe, which prints a
+        #      "Missing option value for: '-source'" parser error and exits
+        #      non-zero on some runner images even when PSScriptAnalyzer is
+        #      ultimately installed.
+        # Strategy: retry v3 install up to 3x with backoff, then attempt
+        # the legacy install in a try/catch, and treat success as
+        # "Import-Module PSScriptAnalyzer works" rather than "no command
+        # exited non-zero". Suppresses noise; only fails if we genuinely
+        # can't get the module loaded.
+        run: |
+          $ErrorActionPreference = 'Continue'
+
+          $haveV3 = [bool](Get-Command Install-PSResource -ErrorAction SilentlyContinue)
+          $installed = $false
+
+          if ($haveV3) {
+              for ($i = 1; $i -le 3 -and -not $installed; $i++) {
+                  try {
+                      Install-PSResource -Name PSScriptAnalyzer -Scope CurrentUser `
+                          -TrustRepository -Reinstall -ErrorAction Stop
+                      $installed = $true
+                  } catch {
+                      Write-Host "::warning::Install-PSResource attempt $i failed: $($_.Exception.Message)"
+                      if ($i -lt 3) { Start-Sleep -Seconds ([Math]::Pow(2, $i)) }
+                  }
+              }
+          }
+
+          if (-not $installed) {
+              try {
+                  if (-not (Get-PSRepository -Name PSGallery -ErrorAction SilentlyContinue)) {
+                      Register-PSRepository -Default -ErrorAction Stop
+                  }
+                  Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
+                  Install-Module PSScriptAnalyzer -Scope CurrentUser -Force -ErrorAction Stop
+                  $installed = $true
+              } catch {
+                  Write-Host "::warning::Install-Module fallback failed: $($_.Exception.Message)"
+              }
+          }
+
+          # Success criterion is Import-Module, not exit codes from the
+          # install path. nuget.exe noise from the legacy installer is
+          # routinely non-zero even on successful installs.
+          Import-Module PSScriptAnalyzer -ErrorAction Stop
+          $v = (Get-Module PSScriptAnalyzer).Version
+          Write-Host "PSScriptAnalyzer $v ready."
+
+          # The Actions pwsh wrapper appends `exit $LASTEXITCODE`, so a
+          # non-zero code left behind by nuget.exe in the fallback path
+          # would fail this step even though the import above succeeded.
+          # Import-Module uses -ErrorAction Stop, so reaching this line
+          # means the module really is loaded; make that the exit code.
+          exit 0
+
+      - name: Parse-validate dune-server.ps1
+        shell: pwsh
+        run: |
+          $tokens = $null; $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+              "$PWD\dune-server.ps1", [ref]$tokens, [ref]$errors) | Out-Null
+          if ($errors.Count -gt 0) {
+              $errors | ForEach-Object {
+                  "::error file=dune-server.ps1,line=$($_.Extent.StartLineNumber)::$($_.Message)"
+              }
+              exit 1
+          }
+          Write-Host "Parse OK"
+
+      - name: Run PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          $results = Invoke-ScriptAnalyzer -Path .\dune-server.ps1 -Severity @('Error','Warning')
+          if ($results) {
+              $results | Format-Table -AutoSize
+              $errs = $results | Where-Object Severity -eq 'Error'
+              if ($errs) { exit 1 }
+          } else {
+              Write-Host "No issues found."
+          }
+
+      - name: Guard remote-portal isolation
+        shell: pwsh
+        # Issue #74 (v11.1.0): the CF-Access-gated route module MUST NOT
+        # touch console-requiring or destructive surface area. The
+        # dispatcher already partitions URLs by prefix, but the runspace
+        # pool dot-sources every lib + route into every worker, so any
+        # function is technically reachable. This guard is the third
+        # safety net (after dispatcher and code review): if Remote.ps1
+        # mentions any of these names in EXECUTABLE code (comments are
+        # intentionally allowed to document the rule), the build fails so
+        # the PR can't land.
+        run: |
+          $path = 'app/server/routes/Remote.ps1'
+          if (-not (Test-Path -LiteralPath $path)) {
+              Write-Host "::warning::$path not present; skipping guard."
+              exit 0
+          }
+          $tokens = $null; $parseErrors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $path).Path, [ref]$tokens, [ref]$parseErrors) | Out-Null
+          if ($parseErrors -and $parseErrors.Count -gt 0) {
+              $parseErrors | ForEach-Object {
+                  Write-Host "::error file=$path,line=$($_.Extent.StartLineNumber)::$($_.Message)"
+              }
+              exit 1
+          }
+          $banned = @(
+              'Setup','ConsoleHost','Database','Browse-','EditDuneIni','Edit-DuneIni',
+              'Invoke-DuneCommand','Get-DuneCommandByName','Start-DuneTerminal',
+              'Invoke-DuneSshShell'
+          )
+          # Walk every token that is NOT a comment and check its text.
+          $bad = @()
+          foreach ($tok in $tokens) {
+              if ($tok.Kind -eq 'Comment') { continue }
+              foreach ($pat in $banned) {
+                  if ($tok.Text -match [regex]::Escape($pat)) {
+                      $bad += [pscustomobject]@{
+                          line = $tok.Extent.StartLineNumber
+                          text = $tok.Text
+                          pat  = $pat
+                      }
+                      break
+                  }
+              }
+          }
+          if ($bad) {
+              foreach ($h in $bad) {
+                  Write-Host "::error file=$path,line=$($h.line)::Remote.ps1 must not reference '$($h.pat)' in code (found: '$($h.text)')."
+              }
+              exit 1
+          }
+          Write-Host "Remote.ps1 isolation guard OK"

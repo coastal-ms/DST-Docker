@@ -1,0 +1,445 @@
+BeforeAll {
+    . (Join-Path $PSScriptRoot '_TestHelpers.ps1')
+    Import-DstLib   'Config.ps1'
+    Import-DstRoute 'Update.ps1'
+
+    # A representative GitHub /releases payload (newest-first), already mapped to
+    # the shape Get-DuneReleases emits. Mix of: newest stable final, two test
+    # pre-releases (newest first), one asset-less pre-release (must be filtered),
+    # one draft pre-release (must be filtered), and an older final.
+    function global:New-DstReleaseFixture {
+        @(
+            [pscustomobject]@{ tag='v12.9.5';        name='v12.9.5';        isPrerelease=$false; isDraft=$false; assetUrl='https://x/final.exe';  assetName='DuneServerSetup.exe'; assetSize=100; htmlUrl='u'; publishedAt='2026-06-21'; releaseNotes='' }
+            [pscustomobject]@{ tag='v12.9.6-test3';  name='Spec fix test3'; isPrerelease=$true;  isDraft=$false; assetUrl='https://x/t3.exe';     assetName='DuneServerSetup.exe'; assetSize=100; htmlUrl='u'; publishedAt='2026-06-21'; releaseNotes='' }
+            [pscustomobject]@{ tag='v12.9.6-test2';  name='Spec fix test2'; isPrerelease=$true;  isDraft=$false; assetUrl='https://x/t2.exe';     assetName='DuneServerSetup.exe'; assetSize=100; htmlUrl='u'; publishedAt='2026-06-20'; releaseNotes='' }
+            [pscustomobject]@{ tag='v12.9.6-test1';  name='Spec fix test1'; isPrerelease=$true;  isDraft=$false; assetUrl='https://x/t1.exe';     assetName='DuneServerSetup.exe'; assetSize=100; htmlUrl='u'; publishedAt='2026-06-19'; releaseNotes='' }
+            [pscustomobject]@{ tag='v12.9.6-test0';  name='no asset';       isPrerelease=$true;  isDraft=$false; assetUrl=$null;                  assetName=$null;                 assetSize=0;   htmlUrl='u'; publishedAt='2026-06-18'; releaseNotes='' }
+            [pscustomobject]@{ tag='v12.9.7-draft';  name='draft';          isPrerelease=$true;  isDraft=$true;  assetUrl='https://x/d.exe';      assetName='DuneServerSetup.exe'; assetSize=100; htmlUrl='u'; publishedAt='2026-06-22'; releaseNotes='' }
+            [pscustomobject]@{ tag='v12.9.4';        name='v12.9.4';        isPrerelease=$false; isDraft=$false; assetUrl='https://x/old.exe';    assetName='DuneServerSetup.exe'; assetSize=100; htmlUrl='u'; publishedAt='2026-06-10'; releaseNotes='' }
+        )
+    }
+
+    function global:New-DstStableLatest {
+        [pscustomobject]@{
+            fetchedAt=[DateTime]::UtcNow; tag='v12.9.5'; name='v12.9.5'; htmlUrl='u'
+            publishedAt='2026-06-21'; releaseNotes=''; assetName='DuneServerSetup.exe'
+            assetUrl='https://x/final.exe'; assetSize=100
+            targetCommit='1234567890abcdef1234567890abcdef12345678'
+        }
+        function global:New-InstallRequest {
+            param([hashtable]$Query = @{})
+            return [pscustomobject]@{ QueryString = $Query }
+        }
+    }
+}
+
+Describe 'Compare-DuneSemver (prerelease-aware)' {
+    It 'keeps four-part hotfix identity and orders it below the next patch test' {
+        Get-DuneVersionCore 'v15.2.3.1-test1' | Should -BeExactly '15.2.3.1'
+        Compare-DuneSemver -A '15.2.3.1' -B '15.2.3' | Should -BeGreaterThan 0
+        Compare-DuneSemver -A '15.2.3.1' -B '15.2.4-test1' | Should -BeLessThan 0
+        Compare-DuneSemver -A '15.2.3.1' -B '15.2.3.1-test1' | Should -BeGreaterThan 0
+    }
+
+    It 'ranks a higher patch above a lower one' {
+        Compare-DuneSemver -A '12.9.5' -B '12.9.4' | Should -BeGreaterThan 0
+        Compare-DuneSemver -A '12.9.4' -B '12.9.5' | Should -BeLessThan 0
+    }
+    It 'treats identical versions as equal' {
+        Compare-DuneSemver -A '12.9.5' -B '12.9.5' | Should -Be 0
+        Compare-DuneSemver -A 'v12.9.5-test1' -B '12.9.5-test1' | Should -Be 0
+    }
+    It 'ranks a final release above its prerelease of the same core' {
+        Compare-DuneSemver -A '12.9.5' -B '12.9.5-test1' | Should -BeGreaterThan 0
+        Compare-DuneSemver -A '12.9.5-test1' -B '12.9.5' | Should -BeLessThan 0
+    }
+    It 'orders dotted numeric prerelease identifiers numerically' {
+        Compare-DuneSemver -A '12.9.5-rc.2' -B '12.9.5-rc.1' | Should -BeGreaterThan 0
+    }
+    It 'distinguishes distinct -testN tags (never equal)' {
+        Compare-DuneSemver -A '12.9.6-test2' -B '12.9.6-test1' | Should -Not -Be 0
+    }
+    It 'orders multi-digit test tags numerically instead of lexically' {
+        Compare-DuneSemver -A '14.0.0-test10' -B '14.0.0-test8' |
+            Should -BeGreaterThan 0
+        Compare-DuneSemver -A '14.0.0-test20' -B '14.0.0-test19' |
+            Should -BeGreaterThan 0
+    }
+    It 'rolls a tester onto the final release when core matches' {
+        # current = a -testN build of 12.9.6; final 12.9.6 must read as newer.
+        Compare-DuneSemver -A '12.9.6' -B '12.9.6-test1' | Should -BeGreaterThan 0
+    }
+}
+
+Describe 'Get-DunePreReleaseList filtering' {
+    BeforeEach {
+        function global:Get-DuneReleases { param([switch]$Force) New-DstReleaseFixture }
+        function global:Get-DuneLatestRelease { param([switch]$Force) New-DstStableLatest }
+    }
+    It 'keeps only the newest two published pre-releases carrying the installer asset' {
+        $list = Get-DunePreReleaseList
+        @($list).Count | Should -Be 2
+        $list[0].tag | Should -Be 'v12.9.6-test3'
+        $list[1].tag | Should -Be 'v12.9.6-test2'
+    }
+    It 'excludes finals, drafts and asset-less pre-releases' {
+        $tags = (Get-DunePreReleaseList).tag
+        $tags | Should -Not -Contain 'v12.9.5'
+        $tags | Should -Not -Contain 'v12.9.6-test1'
+        $tags | Should -Not -Contain 'v12.9.6-test0'
+        $tags | Should -Not -Contain 'v12.9.7-draft'
+    }
+    It 'recognizes the silent prerelease mirror wording used by stable publication' {
+        Test-DuneStableMirrorLabel -Release ([pscustomobject]@{
+            name='v15.0.4-test1'
+            releaseNotes='Silent prerelease mirror of v15.0.4. Uses the exact verified stable installer artifact.'
+        }) | Should -BeTrue
+    }
+    It 'shows only a fresh stable mirror when it identifies the current stable commit' {
+        function global:Get-DuneReleases {
+            param([switch]$Force)
+            @(
+                [pscustomobject]@{ tag='v12.9.5-test10'; name='Stable channel mirror'; releaseNotes='same bits'; targetCommit='1234567890abcdef1234567890abcdef12345678'; isPrerelease=$true; isDraft=$false; assetUrl='https://x/mirror.exe' }
+                [pscustomobject]@{ tag='v12.9.5-test9'; name='Old test'; releaseNotes=''; isPrerelease=$true; isDraft=$false; assetUrl='https://x/old.exe' }
+            )
+        }
+        $list = Get-DunePreReleaseList
+        @($list).Count | Should -Be 1
+        $list[0].tag | Should -Be 'v12.9.5-test10'
+    }
+    It 'does not let an older stable mirror displace the previous active test' {
+        function global:Get-DuneReleases {
+            param([switch]$Force)
+            @(
+                [pscustomobject]@{ tag='v13.0.0-test3'; name='Current test'; releaseNotes=''; isPrerelease=$true; isDraft=$false; assetUrl='https://x/current.exe' }
+                [pscustomobject]@{ tag='v12.9.5-test1'; name='Stable channel mirror'; releaseNotes='same bits'; targetCommit='1234567890abcdef1234567890abcdef12345678'; isPrerelease=$true; isDraft=$false; assetUrl='https://x/mirror.exe' }
+                [pscustomobject]@{ tag='v13.0.0-test2'; name='Previous test'; releaseNotes=''; isPrerelease=$true; isDraft=$false; assetUrl='https://x/previous.exe' }
+            )
+        }
+        $list = Get-DunePreReleaseList
+        @($list).Count | Should -Be 2
+        $list[0].tag | Should -Be 'v13.0.0-test3'
+        $list[1].tag | Should -Be 'v13.0.0-test2'
+    }
+    It 'falls back to stable rather than obsolete tests when the newest mirror is unproven' {
+        function global:Get-DuneReleases {
+            param([switch]$Force)
+            @(
+                [pscustomobject]@{ tag='v15.0.0-test1'; name='Stable channel mirror'; releaseNotes='same bits'; targetCommit='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'; isPrerelease=$true; isDraft=$false; assetUrl='https://x/old-mirror.exe' }
+                [pscustomobject]@{ tag='v15.0.0-test9'; name='Previous test'; releaseNotes=''; isPrerelease=$true; isDraft=$false; assetUrl='https://x/test.exe' }
+            )
+        }
+        function global:Get-DuneLatestRelease {
+            param([switch]$Force)
+            [pscustomobject]@{ tag='v15.0.0'; targetCommit='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'; assetUrl='https://x/stable.exe' }
+        }
+
+        $list = Get-DunePreReleaseList
+        @($list).Count | Should -Be 0
+    }
+    It 'resolves branch-valued release targets to prove a current stable mirror' {
+        function global:Get-DuneReleases {
+            param([switch]$Force)
+            @(
+                [pscustomobject]@{ tag='v15.0.0-test10'; name='Stable channel mirror'; releaseNotes='same stable commit'; targetCommit='main'; isPrerelease=$true; isDraft=$false; assetUrl='https://x/mirror.exe' }
+            )
+        }
+        function global:Get-DuneLatestRelease {
+            param([switch]$Force)
+            [pscustomobject]@{ tag='v15.0.0'; targetCommit='main'; assetUrl='https://x/stable.exe' }
+        }
+        Mock Get-DuneReleaseCommitSha { 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' }
+
+        $list = Get-DunePreReleaseList
+        @($list).Count | Should -Be 1
+        $list[0].tag | Should -Be 'v15.0.0-test10'
+        Assert-MockCalled Get-DuneReleaseCommitSha -Times 2 -Exactly
+    }
+}
+
+Describe 'Get-DuneSelectedRelease channel resolution' {
+    BeforeEach {
+        function global:Get-DuneReleases     { param([switch]$Force) New-DstReleaseFixture }
+        function global:Get-DuneLatestRelease { param([switch]$Force) New-DstStableLatest }
+        function global:Get-DuneUpdatePreReleaseTag { '' }
+    }
+
+    Describe 'Update install route cache safety' {
+        It 'force-refreshes the selected release before downloading' {
+            $routePath = Join-Path (Split-Path $PSScriptRoot -Parent) 'app\server\routes\Update.ps1'
+            $source = Get-Content -LiteralPath $routePath -Raw
+            $installRoute = $source.Substring($source.IndexOf('# POST /api/update/install'))
+
+            $installRoute | Should -Match '\$rel\s*=\s*Get-DuneSelectedRelease\s+-Force'
+        }
+    }
+
+    It 'stable channel returns the stable latest, not a prerelease' {
+        function global:Get-DuneUpdateChannel { 'stable' }
+        $r = Get-DuneSelectedRelease
+        $r.tag | Should -Be 'v12.9.5'
+        $r.channel | Should -Be 'stable'
+        $r.isPrerelease | Should -BeFalse
+    }
+
+    It 'test channel with no pin selects the newest prerelease' {
+        function global:Get-DuneUpdateChannel { 'test' }
+        $r = Get-DuneSelectedRelease
+        $r.tag | Should -Be 'v12.9.6-test3'
+        $r.channel | Should -Be 'test'
+        $r.isPrerelease | Should -BeTrue
+    }
+
+    It 'test channel honors a valid pinned tag' {
+        function global:Get-DuneUpdateChannel { 'test' }
+        function global:Get-DuneUpdatePreReleaseTag { 'v12.9.6-test2' }
+        (Get-DuneSelectedRelease).tag | Should -Be 'v12.9.6-test2'
+    }
+
+    It 'test channel falls back to newest when the pinned tag is gone' {
+        function global:Get-DuneUpdateChannel { 'test' }
+        function global:Get-DuneUpdatePreReleaseTag { 'v12.9.6-test99' }
+        (Get-DuneSelectedRelease).tag | Should -Be 'v12.9.6-test3'
+    }
+
+    It 'falls back to newest when a pin is older than the retained test history' {
+        function global:Get-DuneUpdateChannel { 'test' }
+        function global:Get-DuneUpdatePreReleaseTag { 'v12.9.6-test1' }
+        (Get-DuneSelectedRelease).tag | Should -Be 'v12.9.6-test3'
+    }
+
+    It 'test channel falls back to stable when no prereleases exist' {
+        function global:Get-DuneUpdateChannel { 'test' }
+        function global:Get-DuneReleases { param([switch]$Force) @() }
+        $r = Get-DuneSelectedRelease
+        $r.tag | Should -Be 'v12.9.5'
+        $r.channel | Should -Be 'test'
+        $r.isPrerelease | Should -BeFalse
+    }
+
+    It 'uses a fresh stable mirror to update a Finalphase client without repointing test1' {
+        $script:DuneToolVersion = '15.0.0-finalphase-1.4'
+        function global:Get-DuneUpdateChannel { 'test' }
+        function global:Read-DuneConfigRaw { @{} }
+        function global:Get-DuneBuildMetadata {
+            @{ present=$true; prerelease=$true; tag='v15.0.0-finalphase-1.4'; commit='oldfinalphase' }
+        }
+        function global:Get-DuneLatestRelease {
+            param([switch]$Force)
+            [pscustomobject]@{
+                tag='v15.0.0'; targetCommit='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+                assetUrl='https://x/stable.exe'; assetName='DuneServerSetup.exe'
+            }
+        }
+        function global:Get-DuneReleases {
+            param([switch]$Force)
+            @(
+                [pscustomobject]@{ tag='v15.0.0-test10'; name='Stable channel mirror'; releaseNotes='same stable commit'; targetCommit='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'; isPrerelease=$true; isDraft=$false; assetUrl='https://x/fresh-mirror.exe' }
+                [pscustomobject]@{ tag='v15.0.0-test1'; name='Stable channel mirror'; releaseNotes='old immutable mirror'; targetCommit='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'; isPrerelease=$true; isDraft=$false; assetUrl='https://x/old-mirror.exe' }
+            )
+        }
+
+        (Get-DuneSelectedRelease).tag | Should -Be 'v15.0.0-test10'
+    }
+
+    It 'keeps a fresh v15 stable client on the stable identity during <MirrorNotes> rollover' -ForEach @(
+        @{ MirrorNotes='Stable channel mirror' }
+        @{ MirrorNotes='Silent prerelease mirror of v15.0.0. Uses the exact verified stable installer artifact.' }
+    ) {
+        $script:DuneToolVersion = '15.0.0'
+        function global:Get-DuneUpdateChannel { 'test' }
+        function global:Read-DuneConfigRaw { @{} }
+        function global:Get-DuneBuildMetadata {
+            @{ present=$true; prerelease=$false; tag='v15.0.0'; commit='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' }
+        }
+        function global:Get-DuneLatestRelease {
+            param([switch]$Force)
+            [pscustomobject]@{
+                tag='v15.0.0'; targetCommit='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+                assetUrl='https://x/stable.exe'; assetName='DuneServerSetup.exe'
+            }
+        }
+        $script:MirrorNotes = $MirrorNotes
+        function global:Get-DuneReleases {
+            param([switch]$Force)
+            @(
+                [pscustomobject]@{ tag='v15.0.0-test10'; name='v15.0.0-test10'; releaseNotes=$script:MirrorNotes; targetCommit='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'; isPrerelease=$true; isDraft=$false; assetUrl='https://x/fresh-mirror.exe' }
+                [pscustomobject]@{ tag='v15.0.0-test1'; name='Stable channel mirror'; releaseNotes='old immutable mirror'; targetCommit='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'; isPrerelease=$true; isDraft=$false; assetUrl='https://x/old-mirror.exe' }
+            )
+        }
+
+        $release = Get-DuneSelectedRelease
+        $release.tag | Should -Be 'v15.0.0'
+        $release.isPrerelease | Should -BeFalse
+    }
+}
+
+Describe 'Get-DuneUpdateInstalledPrerelease (running-build marker)' {
+    BeforeEach {
+        $script:DuneToolVersion = '14.0.0'
+        function global:Get-DuneBuildMetadata { @{ commit='abcdef123456'; prerelease=$false; tag='v14.0.0'; present=$true } }
+    }
+    It 'is false when the marker key is absent (normal stable install)' {
+        function global:Read-DuneConfigRaw { @{ UpdateChannel = 'stable' } }
+        Get-DuneUpdateInstalledPrerelease | Should -BeFalse
+    }
+    It 'is true only after a pre-release build was installed' {
+        function global:Read-DuneConfigRaw { @{ UpdateInstalledPrerelease = 'true'; UpdateInstalledTag = 'v14.0.0-test6' } }
+        function global:Get-DuneBuildMetadata { @{ commit='abcdef123456'; prerelease=$true; tag='v14.0.0-test6'; present=$true } }
+        Get-DuneUpdateInstalledPrerelease | Should -BeTrue
+    }
+    It 'is false when a later stable install wrote false' {
+        function global:Read-DuneConfigRaw { @{ UpdateInstalledPrerelease = 'false' } }
+        Get-DuneUpdateInstalledPrerelease | Should -BeFalse
+    }
+    It 'does not key off the channel preference (toggling Test alone stays false)' {
+        # User toggled to Test (preference set) but never installed a pre-release.
+        function global:Read-DuneConfigRaw { @{ UpdateChannel = 'test' } }
+        Get-DuneUpdateInstalledPrerelease | Should -BeFalse
+    }
+    It 'returns the exact installed tag only when its core matches the runtime' {
+        function global:Read-DuneConfigRaw { @{ UpdateInstalledPrerelease='true'; UpdateInstalledTag='v14.0.0-test6' } }
+        function global:Get-DuneBuildMetadata { @{ commit='abcdef123456'; prerelease=$true; tag='v14.0.0-test6'; present=$true } }
+        $info = Get-DuneUpdateRunningBuildInfo
+        $info.installedTag | Should -Be 'v14.0.0-test6'
+        $info.runningIsPrerelease | Should -BeTrue
+    }
+    It 'ignores a stale installed tag and marker when its core differs' {
+        function global:Read-DuneConfigRaw { @{ UpdateInstalledPrerelease='true'; UpdateInstalledTag='v13.9.0-test2' } }
+        $info = Get-DuneUpdateRunningBuildInfo
+        $info.installedTag | Should -Be 'v14.0.0'
+        $info.runningIsPrerelease | Should -BeFalse
+        $info.buildCommit | Should -Be 'abcdef123456'
+    }
+    It 'uses explicit artifact metadata for a manual test candidate with no tag' {
+        function global:Read-DuneConfigRaw { @{} }
+        function global:Get-DuneBuildMetadata { @{ commit='1234567890ab'; prerelease=$true; tag=''; present=$true } }
+        $info = Get-DuneUpdateRunningBuildInfo
+        $info.installedTag | Should -Be ''
+        $info.runningIsPrerelease | Should -BeTrue
+        $info.buildCommit | Should -Be '1234567890ab'
+    }
+    It 'uses new immutable metadata only after an installer succeeds' {
+        function global:Read-DuneConfigRaw { @{ UpdateInstalledPrerelease='true'; UpdateInstalledTag='v14.0.0-test7' } }
+        function global:Get-DuneBuildMetadata { @{ commit='oldold1'; prerelease=$false; tag='v14.0.0'; present=$true } }
+        $cancelled = Get-DuneUpdateRunningBuildInfo
+        $cancelled.runningIsPrerelease | Should -BeFalse
+        $cancelled.installedTag | Should -Be 'v14.0.0'
+
+        function global:Get-DuneBuildMetadata { @{ commit='abcdef7'; prerelease=$true; tag='v14.0.0-test7'; present=$true } }
+        $succeeded = Get-DuneUpdateRunningBuildInfo
+        $succeeded.runningIsPrerelease | Should -BeTrue
+        $succeeded.installedTag | Should -Be 'v14.0.0-test7'
+    }
+    It 'does not write candidate identity before the installer exits successfully' {
+        $routePath = Join-Path (Split-Path $PSScriptRoot -Parent) 'app\server\routes\Update.ps1'
+        $installRoute = (Get-Content -LiteralPath $routePath -Raw).Substring(
+            (Get-Content -LiteralPath $routePath -Raw).IndexOf('# POST /api/update/install')
+        )
+        $installRoute | Should -Not -Match 'UpdateInstalledTag\s*='
+        $installRoute | Should -Not -Match 'UpdateInstalledPrerelease\s*='
+    }
+}
+
+Describe 'Update install initiation mode' {
+    It 'defaults older clients and direct calls to interactive legacy mode' {
+        $resolved = Resolve-DuneUpdateInstallRequest -Request (New-InstallRequest) -Body @{}
+        $resolved.mode | Should -Be 'interactive'
+        $resolved.source | Should -Be 'legacy'
+    }
+
+    It 'accepts silent mode only when explicitly sourced from the banner' {
+        $resolved = Resolve-DuneUpdateInstallRequest -Request (New-InstallRequest) -Body @{ mode='silent'; source='banner' }
+        $resolved.mode | Should -Be 'silent'
+        $resolved.source | Should -Be 'banner'
+        { Resolve-DuneUpdateInstallRequest -Request (New-InstallRequest) -Body @{ mode='silent'; source='settings' } } |
+            Should -Throw '*only from the update banner*'
+    }
+
+    It 'keeps Settings and reinstall requests interactive' {
+        $resolved = Resolve-DuneUpdateInstallRequest -Request (New-InstallRequest) -Body @{ mode='interactive'; source='settings' }
+        $resolved.mode | Should -Be 'interactive'
+        $resolved.source | Should -Be 'settings'
+        $request = New-InstallRequest -Query @{ reinstall='1' }
+        (Resolve-DuneUpdateInstallRequest -Request $request -Body @{ mode='interactive'; source='settings' }).mode |
+            Should -Be 'interactive'
+    }
+
+    It 'rejects malformed, conflicting, and command-shaped mode values' {
+        { Resolve-DuneUpdateInstallRequest -Request (New-InstallRequest) -Body @{ mode='silent /SUPPRESSMSGBOXES & calc'; source='banner' } } |
+            Should -Throw '*Invalid update install mode*'
+        { Resolve-DuneUpdateInstallRequest -Request (New-InstallRequest -Query @{ mode='silent'; source='banner' }) -Body @{ mode='interactive'; source='banner' } } |
+            Should -Throw '*Conflicting update install mode*'
+        { Resolve-DuneUpdateInstallRequest -Request (New-InstallRequest) -Body @{ mode='interactive'; source='settings;calc' } } |
+            Should -Throw '*Invalid update install source*'
+    }
+
+    It 'selects installer arguments only from validated constant modes' {
+        $routePath = Join-Path (Split-Path $PSScriptRoot -Parent) 'app\server\routes\Update.ps1'
+        $source = Get-Content -LiteralPath $routePath -Raw
+        $source | Should -Match ([regex]::Escape("'/SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART'"))
+        $source | Should -Match ([regex]::Escape("'/SP- /NORESTART'"))
+        $source | Should -Match "\`$installMode -eq 'silent'"
+        $source | Should -Not -Match 'ArgumentList\s+\$installRequest'
+    }
+}
+
+Describe 'Get-DuneInstallDecision (install/blocked gate)' {
+    Context 'Stable channel, running a normal (non-prerelease) build' {
+        It 'installs a strictly newer release' {
+            $d = Get-DuneInstallDecision -Diff 1 -Channel 'stable' -HasAsset $true -RunningIsPrerelease $false
+            $d.installable | Should -BeTrue
+            $d.blocked     | Should -BeFalse
+        }
+        It 'blocks a same-version reinstall' {
+            $d = Get-DuneInstallDecision -Diff 0 -Channel 'stable' -HasAsset $true -RunningIsPrerelease $false
+            $d.installable | Should -BeFalse
+            $d.blocked     | Should -BeTrue
+        }
+        It 'blocks a downgrade' {
+            $d = Get-DuneInstallDecision -Diff -1 -Channel 'stable' -HasAsset $true -RunningIsPrerelease $false
+            $d.installable | Should -BeFalse
+            $d.blocked     | Should -BeTrue
+        }
+        It 'never installs without an asset even when newer' {
+            (Get-DuneInstallDecision -Diff 1 -Channel 'stable' -HasAsset $false -RunningIsPrerelease $false).installable | Should -BeFalse
+        }
+    }
+
+    Context 'Stable channel, running a pre-release (Test) build - return-to-live' {
+        It 'allows returning to the live release as a downgrade' {
+            # running 12.9.7-test1 (reports 12.9.7); live stable is 12.9.6 => diff < 0
+            $d = Get-DuneInstallDecision -Diff -1 -Channel 'stable' -HasAsset $true -RunningIsPrerelease $true
+            $d.installable | Should -BeTrue
+            $d.blocked     | Should -BeFalse
+        }
+        It 'allows a same-version live reinstall (clears the TEST BUILD indicator)' {
+            # after fold: live stable == 12.9.7, running 12.9.7-test1 => diff == 0
+            $d = Get-DuneInstallDecision -Diff 0 -Channel 'stable' -HasAsset $true -RunningIsPrerelease $true
+            $d.installable | Should -BeTrue
+            $d.blocked     | Should -BeFalse
+        }
+        It 'still requires an installer asset' {
+            (Get-DuneInstallDecision -Diff -1 -Channel 'stable' -HasAsset $false -RunningIsPrerelease $true).installable | Should -BeFalse
+        }
+    }
+
+    Context 'Test channel' {
+        It 'installs any pre-release that differs from the running build' {
+            (Get-DuneInstallDecision -Diff 1  -Channel 'test' -HasAsset $true -RunningIsPrerelease $true).installable | Should -BeTrue
+            (Get-DuneInstallDecision -Diff -1 -Channel 'test' -HasAsset $true -RunningIsPrerelease $true).installable | Should -BeTrue
+        }
+        It 'blocks reinstalling the exact same pre-release build' {
+            $d = Get-DuneInstallDecision -Diff 0 -Channel 'test' -HasAsset $true -RunningIsPrerelease $true
+            $d.installable | Should -BeFalse
+            $d.blocked     | Should -BeTrue
+        }
+        It 'installs the published artifact when the tag matches but commit differs' {
+            $d = Get-DuneInstallDecision -Diff 0 -Channel 'test' -HasAsset $true `
+                -RunningIsPrerelease $true -IdentityMismatch $true
+            $d.available   | Should -BeTrue
+            $d.installable | Should -BeTrue
+            $d.blocked     | Should -BeFalse
+        }
+    }
+}

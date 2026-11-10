@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 💬 DST Community Discord (help & chat)
+    url: https://discord.gg/tj2x7cywSC
+    about: |
+      Join the DST community server for install/setup help, hosting and
+      networking questions, Game Config tips, and general chat. New releases
+      are posted there too. Report bugs and request support in Discord.
+  - name: 📘 Funcom Self-Hosted Server docs
+    url: https://duneawakening.com/self-hosted-servers/
+    about: Official setup instructions for the dedicated server itself.

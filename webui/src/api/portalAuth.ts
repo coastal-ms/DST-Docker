@@ -1,0 +1,42 @@
+import { api } from './client'
+
+export interface PortalAccount {
+  id: string
+  username: string
+  role: 'owner' | 'admin' | 'player'
+  enabled: boolean
+  mustChangePassword: boolean
+  gameCharacterId: string
+  gameCharacterLabel: string
+}
+
+export interface PortalAuthStatus {
+  accountLoginEnabled: boolean
+  authenticated: boolean
+  mustChangePassword: boolean
+  account: PortalAccount | null
+  ownerSetupRequired?: boolean
+  bootstrapAuthorized?: boolean
+}
+
+export function getPortalAuthStatus(): Promise<PortalAuthStatus> {
+  return api('/api/portal-auth/status')
+}
+
+export function loginPortal(username: string, password: string, rememberMe = false): Promise<PortalAuthStatus> {
+  return api('/api/portal-auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ username, password, rememberMe }),
+  })
+}
+
+export function changePortalPassword(currentPassword: string, newPassword: string): Promise<{ ok: boolean }> {
+  return api('/api/portal-auth/change-password', {
+    method: 'POST',
+    body: JSON.stringify({ currentPassword, newPassword }),
+  })
+}
+
+export function logoutPortal(): Promise<{ ok: boolean }> {
+  return api('/api/portal-auth/logout', { method: 'POST' })
+}

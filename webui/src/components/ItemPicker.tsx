@@ -1,0 +1,219 @@
+// ItemPicker — typeahead autocomplete for the item catalog.
+// v11.5.7. Used in player Give Item, storage Give Item, etc.
+//
+// Behaviour mirrors the reference implementation's item search: lazy-load the catalog on first
+// keystroke, filter on every change with substring match against display
+// name, template_id, or category (case-insensitive), show up to 500 matches in a scrollable popup
+// listing "Name — template_id (category)". Arrow keys + Enter to select,
+// Escape to clear.
+
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
+import { Icon } from './Icon'
+import { catalogCategories, filterCatalog, getItemCatalog, isValidTemplateId, type CatalogItem } from '../api/gameplay'
+
+const PICKER_RESULT_LIMIT = 500
+
+interface Props {
+  value: string
+  onChange: (templateId: string, item?: CatalogItem) => void
+  /** Optional display text shown in the input. Defaults to `value`. Lets the
+   *  parent show a friendly name (e.g. "Spice Melange") while keeping the
+   *  underlying template_id as the value sent to the API. */
+  displayValue?: string
+  label?: string
+  placeholder?: string
+  autoFocus?: boolean
+  disabled?: boolean
+}
+
+export function ItemPicker({ value, onChange, displayValue, label, placeholder, autoFocus, disabled }: Props) {
+  const inputId = useId()
+  const [catalog, setCatalog] = useState<CatalogItem[] | null>(null)
+  const [catalogError, setCatalogError] = useState<string | null>(null)
+  const [catalogLoading, setCatalogLoading] = useState(false)
+  const [open, setOpen] = useState(false)
+  const [active, setActive] = useState(0)
+  const [category, setCategory] = useState('')
+  const wrapRef = useRef<HTMLDivElement>(null)
+  const rowRef = useRef<HTMLDivElement>(null)
+  const popRef = useRef<HTMLDivElement>(null)
+  // Fixed-position coordinates for the portaled results popup, anchored under
+  // the search row. Portaling to <body> escapes the ancestor `overflow-hidden`
+  // card that was clipping the list and preventing scroll to the last items.
+  const [pos, setPos] = useState<{ left: number; top: number; width: number; maxH: number } | null>(null)
+
+  const updatePos = useCallback(() => {
+    const r = rowRef.current?.getBoundingClientRect()
+    if (!r) return
+    const top = r.bottom + 4
+    const maxH = Math.min(288, Math.max(160, window.innerHeight - top - 12))
+    setPos({ left: r.left, top, width: r.width, maxH })
+  }, [])
+
+  // Lazy-load on first focus.
+  const ensureCatalog = useCallback(() => {
+    if (catalog || catalogLoading) return
+    setCatalogLoading(true)
+    getItemCatalog()
+      .then(setCatalog)
+      .catch(e => setCatalogError(e instanceof Error ? e.message : String(e)))
+      .finally(() => setCatalogLoading(false))
+  }, [catalog, catalogLoading])
+
+  // Categories for the narrowing selector (depends on the loaded catalog).
+  const categories = useMemo(() => (catalog ? catalogCategories(catalog) : []), [catalog])
+
+  // What's shown in the input. Display name when one is provided (post-pick),
+  // otherwise the raw value (which is also the live search query).
+  const shown = displayValue ?? value
+  // Filter against whatever text is currently visible, narrowed by category.
+  const matches: CatalogItem[] = catalog ? filterCatalog(catalog, shown, PICKER_RESULT_LIMIT, category) : []
+
+  // Close popup on outside click (treat the portaled popup as "inside").
+  useEffect(() => {
+    function onDoc(e: MouseEvent) {
+      const t = e.target as Node
+      if (wrapRef.current?.contains(t)) return
+      if (popRef.current?.contains(t)) return
+      setOpen(false)
+    }
+    document.addEventListener('mousedown', onDoc)
+    return () => document.removeEventListener('mousedown', onDoc)
+  }, [])
+
+  // Keep the portaled popup anchored to the input while open (re-measure before
+  // paint and on any scroll/resize so it tracks the field).
+  useLayoutEffect(() => {
+    if (!open) return
+    updatePos()
+    const onMove = () => updatePos()
+    window.addEventListener('scroll', onMove, true)
+    window.addEventListener('resize', onMove)
+    return () => {
+      window.removeEventListener('scroll', onMove, true)
+      window.removeEventListener('resize', onMove)
+    }
+  }, [open, updatePos])
+
+  // Keep the highlighted (keyboard-active) item scrolled into view.
+  useEffect(() => {
+    if (!open) return
+    popRef.current?.querySelector<HTMLElement>(`[data-idx="${active}"]`)?.scrollIntoView({ block: 'nearest' })
+  }, [active, open])
+
+  const pick = (it: CatalogItem) => {
+    // Pass the item so the parent can show a friendly label in the input
+    // while still posting template_id to the API.
+    onChange(it.template_id, it)
+    setOpen(false)
+    setActive(0)
+  }
+
+  const onKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (!open || matches.length === 0) {
+      if (e.key === 'ArrowDown' && catalog) { setOpen(true); setActive(0); e.preventDefault() }
+      return
+    }
+    if (e.key === 'ArrowDown')      { setActive(a => Math.min(a + 1, matches.length - 1)); e.preventDefault() }
+    else if (e.key === 'ArrowUp')   { setActive(a => Math.max(a - 1, 0));                    e.preventDefault() }
+    else if (e.key === 'Enter')     { pick(matches[active]); e.preventDefault() }
+    else if (e.key === 'Escape')    { setOpen(false); e.preventDefault() }
+    else if (e.key === 'Tab' && matches.length > 0) { pick(matches[active]) }
+  }
+
+  return (
+    <div ref={wrapRef} className="relative">
+      {label && (
+        <label htmlFor={inputId} className="block text-[11px] uppercase tracking-wider text-text-dim mb-1">
+          {label}
+        </label>
+      )}
+      <div ref={rowRef} className="flex gap-2 mb-2">
+        <select
+          aria-label="Filter by category"
+          style={{ colorScheme: 'dark' }}
+          disabled={disabled}
+          value={category}
+          onFocus={ensureCatalog}
+          onChange={e => { setCategory(e.target.value); ensureCatalog(); setOpen(true); setActive(0) }}
+          className="shrink-0 max-w-[45%] px-2 py-2 rounded-lg bg-surface-2 border border-border text-text text-sm focus:outline-none focus:ring-2 focus:ring-ibad focus:border-ibad/50"
+        >
+          <option value="">All categories</option>
+          {categories.map(c => <option key={c} value={c}>{c}</option>)}
+        </select>
+        <div className="relative flex-1">
+          <input
+            id={inputId}
+            type="text"
+            autoComplete="off"
+            spellCheck={false}
+            disabled={disabled}
+            autoFocus={autoFocus}
+            value={shown}
+            placeholder={placeholder || 'e.g. spice, stillsuit, literjon…'}
+            onFocus={() => { ensureCatalog(); setOpen(true) }}
+            onChange={e => { onChange(e.target.value); setOpen(true); setActive(0) }}
+            onKeyDown={onKey}
+            className="w-full pl-9 pr-3 py-2 rounded-lg bg-surface-2 border border-border text-text text-sm focus:outline-none focus:ring-2 focus:ring-ibad focus:border-ibad/50"
+          />
+          <Icon name="Search" size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-dim pointer-events-none" />
+        </div>
+      </div>
+
+      {open && pos && (catalogLoading || catalogError || matches.length > 0 || shown.trim().length > 0 || category !== '') && createPortal(
+        <div
+          ref={popRef}
+          style={{ position: 'fixed', left: pos.left, top: pos.top, width: pos.width, maxHeight: pos.maxH }}
+          className="z-[100] overflow-y-auto overscroll-contain rounded-lg border border-border bg-surface shadow-2xl"
+        >
+          {catalogLoading && (
+            <div className="px-3 py-2 text-xs text-text-dim flex items-center gap-2">
+              <Icon name="Loader2" size={12} className="animate-spin" /> Loading item catalog…
+            </div>
+          )}
+          {catalogError && (
+            <div className="px-3 py-2 text-xs text-danger">
+              Catalog load failed: {catalogError}
+            </div>
+          )}
+          {!catalogLoading && !catalogError && matches.length === 0 && shown.trim().length > 0 && (
+            <div className="px-3 py-2 text-xs text-text-dim">
+              No items match "{shown}". Type fewer letters or paste the exact template id.
+            </div>
+          )}
+          {matches.map((it, i) => (
+            <button
+              key={it.template_id}
+              type="button"
+              data-idx={i}
+              onMouseEnter={() => setActive(i)}
+              onMouseDown={e => { e.preventDefault(); pick(it) }}
+              className={`w-full text-left px-3 py-2 flex items-center gap-2 text-sm ${
+                i === active ? 'bg-surface-2 text-text' : 'text-text-dim hover:bg-surface-2/60'
+              }`}
+            >
+              <span className="flex-1 min-w-0 truncate">
+                <span className={i === active ? 'text-text font-medium' : 'text-text'}>{it.name}</span>
+                <span className="ml-2 text-text-dim text-[11px] font-mono">{it.template_id}</span>
+              </span>
+              {it.category && (
+                <span className="text-[10px] uppercase tracking-wider text-text-dim/70 shrink-0">
+                  {it.category}
+                </span>
+              )}
+            </button>
+          ))}
+        </div>,
+        document.body
+      )}
+
+      {!open && value.trim().length > 0 && !isValidTemplateId(value) && (
+        <div className="mt-1 text-[11px] text-warning flex items-center gap-1">
+          <Icon name="AlertTriangle" size={11} className="shrink-0" />
+          Numbers aren't valid item ids — pick an item from the list.
+        </div>
+      )}
+    </div>
+  )
+}

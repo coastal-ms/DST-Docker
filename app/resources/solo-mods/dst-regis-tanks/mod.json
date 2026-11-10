@@ -1,0 +1,20 @@
+{
+  "id": "dst-regis-tanks",
+  "name": "Regis Tanks",
+  "version": "1.0.0",
+  "requires": [],
+  "loadBefore": [],
+  "loadAfter": [],
+  "conflicts": [
+    "dst-regis-tanks-trial",
+    "dst-regis-tanks-dart-trial",
+    "dst-regis-tanks-persistence-trial",
+    "dst-regis-tanks-fire-persistence-trial",
+    "dst-regis-tanks-probe"
+  ],
+  "warnings": [
+    "Steam and Xbox PC Solo. Grant Dart or Flamethrower using DST's Solo Inventory buttons. One of each per launch.",
+    "Tank support is included automatically in supported DST Solo launches.",
+    "Known issues: pink Dart firing effect, missing audio and misleading tread/PSU module labels."
+  ]
+}
