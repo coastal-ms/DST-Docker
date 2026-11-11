@@ -4,7 +4,7 @@ Run Dune Server Tool from a browser, with the server and management services ins
 
 DST Docker is a standalone browser application for hosting and managing Dune Awakening servers on Linux and Windows WSL. It has its own releases and installer, separate from the Windows Dune Server Tool application.
 
-## Install DST Docker 1.0.2
+## Install DST Docker 1.0.3
 
 Windows users prepare Ubuntu below, then run the Linux installation command. Native Linux users can go directly to **Linux or WSL: install**.
 
@@ -89,6 +89,21 @@ On Windows, open **Settings > WSL RAM limit** to choose a lower RAM ceiling in G
 ### Chrome: video freezes while the portal is visible
 
 If YouTube or another video freezes while the portal is visible in Chrome despite having buffered video, try opening `chrome://flags/#disable-accelerated-video-decode`, setting **Hardware-accelerated video decode** to **Disabled**, and selecting **Relaunch**. Leave Chrome's general graphics acceleration enabled. This switches video decoding to the CPU and can increase CPU use. It is a workaround for the observed Chrome playback issue, not a required setting for every installation. Opening the portal in Edge is another workaround. Return the flag to **Default** if it does not help.
+
+## Network ports
+
+Game connections and browser access use separate ports. Check **Setup Wizard > Your world > Game-port base** for your configured base, called `B` below; the default is **28777**. Changing the console port does not change the game ports.
+
+| Purpose | Protocol | Default / configured port | Who needs access |
+| --- | --- | --- | --- |
+| Game traffic for each map partition | UDP | `B + partition ID - 1`; Hagga **28777**, Overmap **28778** with the default base | Players. Allow every partition's game port, including maps that start on demand. |
+| Game login and messaging | TCP | `B + 1002` = **29779** | Players. Forward this along with the game UDP ports when hosting behind a router. |
+| Browser portal and its API | TCP | **8088**, or your selected console port | Browser users only; it is not required for game login. HTTP is the default. Optional local HTTPS uses the same selected external port. |
+| Tailscale private browser access / public HTTPS Funnel | HTTPS | **443** on the address shown by Tailscale | Optional browser access. No inbound router forward is needed for this path; it does not carry game traffic. |
+
+Forward game traffic to the Linux host running the containers and allow it through that host's firewall. Use your configured base and installed map partition IDs rather than another server tool's port list. DST Docker does not configure a separate public-directory latency-probe range or a separate encrypted-API port; its browser API uses the console's transport and port.
+
+On Windows WSL NAT, forwarding a router port to Windows alone does not make the WSL game listeners reachable. The console LAN helper configures only the selected **TCP console port**, not game UDP or messaging. Tailscale browser access also does not replace game-port reachability. See [hosting network details](packaging/docker/README.md#network-details) for the internal service ports and WSL distinction.
 
 ## Manage this installation
 

@@ -23,6 +23,27 @@ On native Linux, stop the battlegroup through the browser before running `sh bin
 
 HTTP is the default on port8088. The installer prints addresses reachable from the Linux host. Select a different port during installation or run `sh bin/dst-docker port PORT` later. Windows WSL NAT users can access the WSL address from Windows. To use the Windows LAN address, run `packaging/docker/Enable-DstDockerLan.ps1 -ListenAddress <Windows-LAN-IP> -Port 8088` from administrator PowerShell. Rerun it if WSL receives a new address. `-WhatIf` previews changes. Other devices also need the host firewall to permit the chosen port.
 
+## Network details
+
+The [network ports table](../../README.md#network-ports) separates player connections from optional browser access. `B` is **Setup Wizard > Your world > Game-port base**, default **28777**. A partition's game UDP port is `B + partition ID - 1`; its ID comes from the installed official world layout. Include on-demand partitions when preparing game forwarding. A running console or a successful TCP check does not verify UDP reachability for every map.
+
+These additional service ports support the local installation. They are not player-facing router forwards:
+
+| Local service | Protocol | Default / configured port | Listener |
+| --- | --- | --- | --- |
+| Battlegroup director | TCP | `B + 1000` = **29777** | Linux loopback |
+| Administrative messaging | TCP | `B + 1001` = **29778** | Linux loopback |
+| Game messaging HTTP endpoint | TCP | `B + 1003` = **29780** | Linux loopback; used by the gateway |
+| Text router | TCP | `B + 1004` = **29781** | Linux loopback |
+| File Browser | TCP | `B + 1005` = **29782** | Linux loopback; open through the authenticated portal |
+| PostgreSQL | TCP | Installation-selected host port | Linux loopback; database connections also use the private Docker network |
+
+Per-partition IGW endpoints use `B + 2000 + partition ID - 1` on the Docker bridge address for internal map communication, rather than a player-facing router forward.
+
+The publicly reachable messaging listener is **TCP `B + 1002`**, not the loopback HTTP endpoint. Browser HTTPS and the browser API use the selected console port; there is no additional fixed API port to forward. The internal HTTPS upstream stays on loopback. Tailscale Serve/Funnel publishes the browser on its own HTTPS address at port443 and proxies the console; game clients still need the game UDP ports and messaging TCP port.
+
+For WSL NAT, the Windows host and Linux guest have separate network addresses. `Enable-DstDockerLan.ps1` forwards only the chosen console TCP port and adds a private-LAN rule for that port. It does not forward game UDP or game messaging. Ensure your chosen WSL networking and firewall configuration makes the Linux game listeners reachable from players; a Windows TCP portproxy rule cannot carry game UDP. Native Linux hosts use the Linux host address directly.
+
 ## Optional HTTPS
 
 ```sh

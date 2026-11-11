@@ -80,7 +80,7 @@ def snapshot(state,now,worker_alive):
 def history(state,recent=10):
     if type(recent) is not int or not 1<=recent<=5000:raise ValueError('Choose between one and5000 recent backups.')
     rows=sorted((value for value in state.get('backups',{}).values() if value.get('phase')=='completed'),key=lambda value:value['createdAt'],reverse=True)
-    return {'recent':[{'path':'/backups/'+value['name'],'sizeBytes':value['bytes'],'mtimeEpoch':value['createdAt'],
+    return {'recent':[{'path':'/backups/'+value['name'],'originalFilename':value.get('originalFilename',''),'sizeBytes':value['bytes'],'mtimeEpoch':value['createdAt'],
                        'mtimeIso':datetime.fromtimestamp(value['createdAt'],timezone.utc).isoformat(),
                        'verificationPhase':value.get('verification',{}).get('phase','unverified'),
                        'verificationError':value.get('verification',{}).get('error','')} for value in rows[:recent]],

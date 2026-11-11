@@ -1316,7 +1316,7 @@ function BackupScheduleCard({ vmRunning, showToast }: BackupScheduleCardProps) {
 
   // Filename relative to the dump dir, for display + search.
   function backupRelName(path: string): string {
-    return path.replace(/^\/(?:funcom\/artifacts\/database-dumps|backups)\//, '')
+    return history?.recent.find(file => file.path === path)?.originalFilename || path.replace(/^\/(?:funcom\/artifacts\/database-dumps|backups)\//, '')
   }
 
   // Filtered + sorted view of the full backup list.
@@ -1759,7 +1759,7 @@ function BackupScheduleCard({ vmRunning, showToast }: BackupScheduleCardProps) {
                     </td>
                     <td className="py-1 px-2 text-text whitespace-nowrap">{f.mtimeIso}</td>
                     <td className="py-1 px-2 text-text-muted text-right whitespace-nowrap">{(f.sizeBytes / (1024 * 1024)).toFixed(1)} MB</td>
-                    <td className="py-1 px-2 text-text-dim truncate max-w-[16rem]" title={f.path}>{backupRelName(f.path)}</td>
+                    <td className="py-1 px-2 text-text-dim truncate max-w-[16rem]" title={backupRelName(f.path)}>{backupRelName(f.path)}</td>
                     <td className="py-1 px-2">
                       <div className="flex items-center gap-2 justify-end">
                         {docker && <button type="button" className="text-info disabled:opacity-40 whitespace-nowrap" disabled={!!transferring || deleting || ['preparing', 'running'].includes(f.verificationPhase || '')}

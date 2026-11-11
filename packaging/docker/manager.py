@@ -192,7 +192,7 @@ def public_state(state, engine):
         backup_mirror_control.observe(state,engine,save)
     backups=[]
     for identifier,entry in state.get('backups',{}).items():
-        row={key:entry[key] for key in ['name','phase','createdAt','finishedAt','bytes','sha256','error','operationId','scheduledSlot','requestId','source','uploadId'] if key in entry}
+        row={key:entry[key] for key in ['name','originalFilename','phase','createdAt','finishedAt','bytes','sha256','error','operationId','scheduledSlot','requestId','source','uploadId'] if key in entry}
         row['id']=identifier
         if entry.get('verification'):
             row['verification']={key:entry['verification'][key] for key in ['phase','finishedAt','restored','error'] if key in entry['verification']}
@@ -355,6 +355,10 @@ def start_backup_export(state,engine,backup_id):
 
 def start_backup_import(state,engine,request):
     upload=request.get('uploadId')
+    original_filename=request.get('originalFilename','')
+    if (not isinstance(original_filename,str) or len(original_filename)>255 or original_filename in {'.','..'} or
+        any(ord(c)<32 or ord(c)==127 or c in '/\\' for c in original_filename)):
+        raise ValueError('Choose a backup filename without a folder path or control characters.')
     if (request.get('trustedSource') is not True or not isinstance(upload,str) or not re.fullmatch(r'[a-f0-9]{32}',upload) or
         not isinstance(request.get('sha256'),str) or not re.fullmatch(r'[a-f0-9]{64}',request['sha256']) or
         type(request.get('bytes')) is not int or not 5<=request['bytes']<=25*1024**3):
@@ -363,7 +367,7 @@ def start_backup_import(state,engine,request):
     entries=state.setdefault('backups',{})
     entry=entries.get(upload)
     if entry:
-        if entry.get('source')!='import' or entry.get('uploadId')!=upload or entry.get('sha256')!=request['sha256'] or entry.get('bytes')!=request['bytes']:
+        if entry.get('source')!='import' or entry.get('uploadId')!=upload or entry.get('sha256')!=request['sha256'] or entry.get('bytes')!=request['bytes'] or entry.get('originalFilename','')!=original_filename:
             raise ValueError('The existing import does not match this upload.')
         if entry['phase']=='deleted':raise ValueError('This import was deleted. Select the backup again for a new upload.')
         if entry['phase'] in {'completed','failed'}:return
@@ -375,6 +379,7 @@ def start_backup_import(state,engine,request):
     if entry is None:
         entry={'source':'import','uploadId':upload,'sha256':request['sha256'],'bytes':request['bytes'],
                'phase':'preparing','createdAt':time.time(),'name':'backup-'+str(int(time.time()))+'-'+secrets.token_hex(4)+'.dump'}
+        if original_filename:entry['originalFilename']=original_filename
         entries[upload]=entry;save(state)
     payload={key:entry[key] for key in ('uploadId','name','sha256','bytes')}
     identifier=engine.create_backup_import_job(state['id'],tags[0],payload,Path('/opt/dst-manager/backup_import.py').read_text())
@@ -425,7 +430,7 @@ def backup_schedule_tick(engine=None,now=None):
         for entry in state.get('backups',{}).values():
             if entry.get('source')=='import' and entry.get('phase') in {'preparing','running'}:
                 if entry['phase']=='preparing' or engine.assert_owned(entry['job'],state['id'],'db-import')['State']['Status']=='created':
-                    start_backup_import(state,engine,{**{key:entry[key] for key in ('uploadId','sha256','bytes')},'trustedSource':True})
+                    start_backup_import(state,engine,{**{key:entry[key] for key in ('uploadId','sha256','bytes')},'trustedSource':True,'originalFilename':entry.get('originalFilename','')})
         config=backup_schedule.settings(state)
         run=state.get('scheduledBackup',{})
         if run.get('phase') in {'dispatching','running'}:

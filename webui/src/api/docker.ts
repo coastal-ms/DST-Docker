@@ -94,7 +94,7 @@ export async function importDockerBackup(file: File): Promise<void> {
   if (file.size < 5 || file.size > 25 * 1024 ** 3) throw new Error('Choose a PostgreSQL custom backup up to 25 GiB.')
   if (new TextDecoder().decode(await file.slice(0, 5).arrayBuffer()) !== 'PGDMP') throw new Error('Choose a PostgreSQL custom-format backup, not a SQL script or other file.')
   const started = await api<Reply & { uploadId: string }>('/api/docker/backup-import', {
-    method: 'POST', body: file, headers: { 'Content-Type': 'application/octet-stream', 'X-Dst-Trusted-Backup': 'true' },
+    method: 'POST', body: file, headers: { 'Content-Type': 'application/octet-stream', 'X-Dst-Trusted-Backup': 'true', 'X-Dst-Backup-Filename': encodeURIComponent(file.name) },
   })
   if (!started.ok || !/^[a-f0-9]{32}$/.test(started.uploadId)) throw new Error(started.error || 'Refresh Database to check whether the import was recorded before retrying.')
   const deadline = Date.now() + 2 * 60 * 60 * 1000

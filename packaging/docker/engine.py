@@ -425,7 +425,7 @@ class Engine:
         own=self.inspect(os.environ['HOSTNAME']);compose=(own.get('Config',{}).get('Labels') or {}).get('com.docker.compose.project','')
         if not re.fullmatch(r'[a-z0-9][a-z0-9_-]{0,62}',compose):raise ValueError('The application installation identity is unavailable.')
         filters=quote(json.dumps({'label':['com.docker.compose.project='+compose,'com.docker.compose.service=dst']}),safe='')
-        applications=self.request('GET','/containers/json?all=true&filters='+filters)
+        applications=self.request('GET','/containers/json?filters='+filters)
         if len(applications)!=1:raise ValueError('Exactly one application instance is required for browser backup imports.')
         app=self.inspect(applications[0]['Id'])
         mounts=[row for row in app.get('Mounts',[]) if row.get('Type')=='volume' and row.get('Destination')=='/data/cache']

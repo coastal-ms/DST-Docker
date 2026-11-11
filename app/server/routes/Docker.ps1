@@ -246,7 +246,8 @@ Register-DuneRoute -Method POST -Path '/api/docker/backup-import' -StreamBody -H
     $upload=$null
     try{
         if($req.Headers['Content-Type'] -notlike 'application/octet-stream*'){throw 'Send one PostgreSQL custom backup file.'}
-        $upload=Receive-DuneDockerBackupUpload -Stream $req.InputStream -Length $req.ContentLength64 -TrustedSource:($req.Headers['X-Dst-Trusted-Backup'] -ceq 'true')
+        $originalFilename=[uri]::UnescapeDataString([string]$req.Headers['X-Dst-Backup-Filename'])
+        $upload=Receive-DuneDockerBackupUpload -Stream $req.InputStream -Length $req.ContentLength64 -TrustedSource:($req.Headers['X-Dst-Trusted-Backup'] -ceq 'true') -OriginalFilename $originalFilename
         $reply=Invoke-DuneDockerManager -Request (@{action='backups.import'}+$upload)
         if(-not $reply.ok){Write-DuneJson -Response $res -Status 409 -Body @{error=$reply.error;upload=$upload;message='The separate upload was retained. Refresh Database to check for a recorded import before retrying.'};return}
         Write-DuneJson -Response $res -Body @{ok=$true;uploadId=$upload.uploadId;data=$reply.data}
