@@ -26,6 +26,16 @@ class EngineConnection(http.client.HTTPConnection):
 
 
 class Engine:
+    def component_memory_usage(self,identifier,project,component):
+        self.assert_owned(identifier,project,component)
+        stats=self.request('GET','/containers/'+identifier+'/stats?stream=false&one-shot=true')
+        memory=stats.get('memory_stats',{})
+        usage=memory.get('usage')
+        cache=memory.get('stats',{}).get('inactive_file',memory.get('stats',{}).get('total_inactive_file',0))
+        if type(usage) is not int or usage<0 or type(cache) is not int or cache<0:
+            raise EngineError('Current map memory usage could not be verified. Refresh before starting another map.')
+        return max(0,usage-min(usage,cache))
+
     def create_asset_activation_job(self,project,operation,stage,build,mode,assets_volume):
         if any(not isinstance(value,str) or not re.fullmatch(r'[a-f0-9]{32}',value) for value in (project,operation,stage)) or not isinstance(build,str) or not re.fullmatch(r'[0-9]{1,18}',build) or mode not in {'activate','rollback'}:
             raise ValueError('Invalid package activation job.')

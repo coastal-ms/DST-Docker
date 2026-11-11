@@ -214,3 +214,11 @@ class RegisCompatibilityTests(unittest.TestCase):
 
 
 if __name__ == '__main__': unittest.main()
+
+
+class MultipleHaggaCompatibilityTests(unittest.TestCase):
+    def test_all_numbered_hagga_maps_get_the_selected_image_and_deep_deserts_do_not(self):
+        state={'worldPlan':{'games':[{'partition':1,'map':'Survival_1'},{'partition':2,'map':'Survival_2'},{'partition':8,'map':'DeepDesert_1'},{'partition':9,'map':'DeepDesert_2'}]},'services':{f'game-{n}':{} for n in (1,2,8,9)},'regisSupport':{'enabled':True,'image':IMAGE}}
+        self.assertEqual(regis.hagga_components(state),['game-1','game-2'])
+        for partition in (1,2):self.assertEqual(regis.apply_image_policy(state,partition,{})['regis_image'],IMAGE)
+        for partition in (8,9):self.assertNotIn('regis_image',regis.apply_image_policy(state,partition,{}))

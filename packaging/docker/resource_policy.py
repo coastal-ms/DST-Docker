@@ -88,12 +88,16 @@ def admit(state, engine, partitions):
     if not policy: return
     if state.get('pendingResourceChange'): raise ValueError('Finish the pending resource allocation before starting maps.')
     selected = set(partitions)
+    running=set()
+    measured=0
     for component, entry in state.get('services', {}).items():
         if component.startswith('game-') and engine.assert_owned(entry['id'], state['id'], component)['State']['Status'] == 'running':
-            selected.add(int(component[5:]))
-    memory = SERVICE_RESERVE
+            running.add(int(component[5:]))
+            measured+=engine.component_memory_usage(entry['id'],state['id'],component)
+    selected-=running
+    memory = SERVICE_RESERVE+measured
     for row in state['worldPlan']['maps']:
         count = len(selected.intersection(row['partitions']))
         memory += count * row['memoryBytes']
     if memory > policy['memoryGiB'] * GIB:
-        raise ValueError('Starting these maps would exceed the configured server RAM budget.')
+        raise ValueError('Current map usage plus the requested map limits and service reserve exceed the configured server RAM budget.')

@@ -53,7 +53,7 @@ class SavedSettings:
         return SavedSettings(root)
 
     def map_read(self,target,key):
-        if not isinstance(key,str) or key not in {'game','engine','server'}:raise ValueError('Choose a supported map INI file.')
+        if key != 'server':raise ValueError('Per-map settings support only Custom Server Settings. Use Global for Game.ini and Engine.ini.')
         global_file=self.read(key)
         store=self.map_store(target)
         local=store.read(key) if (store.saved/'UserSettings').exists() else None

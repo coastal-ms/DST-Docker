@@ -92,13 +92,15 @@ function Get-DuneDockerMapSettings {
     param([string]$Target,[ValidateSet('game','engine','server')][string]$File='server')
     $context=Get-DuneDockerSettingsContext
     if(-not $context.ok){throw $context.message}
-    $targets=@(@{id='global';map='global';label='Global defaults · all maps'})+@(foreach($game in $context.native.plan.games){
+    $targets=@(@{id='global';map='global';label='Global'})+@(foreach($game in $context.native.plan.games){
         if([string]$game.map -cnotmatch '^(?:Survival|DeepDesert)_[1-9][0-9]*$'){continue}
         $name=switch([string]$game.map){'Survival_1'{'Hagga Basin'};'Overmap'{'Overmap'};'SH_Arrakeen'{'Arrakeen'};'SH_HarkoVillage'{'Harko Village'};'DeepDesert_1'{'Deep Desert'};default{([string]$game.map -replace '^(CB_Story_|DLC_Story_)','') -replace '_',' '}}
-        @{id=[string]$game.partition;map=[string]$game.map;label="$name · partition $($game.partition)"}
+        if([string]$game.map -match '^Survival_'){$name='Hagga Basin'}elseif([string]$game.map -match '^DeepDesert_'){$name='Deep Desert'}
+        @{id=[string]$game.partition;map=[string]$game.map;label="$name - partition $($game.partition)"}
     })
     if(-not $Target){return @{targets=$targets}}
     if($Target -cnotin @($targets|ForEach-Object {$_.id})){throw 'Choose Global defaults, a Hagga map or a Deep Desert map.'}
+    if($Target -cne 'global' -and $File -ne 'server'){throw 'Per-map settings support only Custom Server Settings. Use Global for Game.ini and Engine.ini.'}
     $reply=Invoke-DuneDockerManager -Request @{action='map-settings.read';target=$Target;file=$File}
     if(-not $reply.ok){throw $reply.error}
     return @{targets=$targets;target=$Target;file=$File;revision=$reply.data.revision;raw=$reply.data.raw;

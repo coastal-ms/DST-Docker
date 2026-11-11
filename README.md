@@ -4,7 +4,7 @@ Run Dune Server Tool from a browser, with the server and management services ins
 
 DST Docker is a standalone browser application for hosting and managing Dune Awakening servers on Linux and Windows WSL. It has its own releases and installer, separate from the Windows Dune Server Tool application.
 
-## Install DST Docker 1.0.3
+## Install DST Docker 1.0.4
 
 Windows users prepare Ubuntu below, then run the Linux installation command. Native Linux users can go directly to **Linux or WSL: install**.
 
@@ -150,3 +150,7 @@ Run the installation command again to upgrade. Keep the same installation path; 
 [Release notes](CHANGELOG.md) · [Downloads](https://github.com/coastal-ms/DST-Docker/releases)
 
 Created by Coastal. Licensed under [Apache 2.0](LICENSE).
+
+## Storage capacity
+
+WSL storage grows within its virtual disk limit and the free space on the Windows drive. See [WSL disk capacity and expansion](docs/wsl-storage.md) if additional capacity is needed.

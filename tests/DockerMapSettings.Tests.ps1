@@ -41,6 +41,13 @@ Describe 'Per-map settings use the selected scope and established writers' {
         $writes[0].raw | Should -Match 'FutureKey=42'
         $result.pendingRestart | Should -BeTrue
     }
+    It 'provides validated PvP and Sandworm choices in the same custom settings schema' {
+        $fields=@(Get-DuneDockerMapSettingFields -File server -Raw $script:raw)
+        ($fields | Where-Object key -eq PVPMode).type | Should -Be 'select'
+        ($fields | Where-Object key -eq PVPMode).options | Should -Be @('NoPVP','Limited','Full')
+        ($fields | Where-Object key -eq SandwormConsequences).type | Should -Be 'select'
+        {Save-DuneDockerMapSettings @{target='8';file='server';revision=$script:revision;updates=@{PVPMode='invalid'};inherit=$false}} | Should -Throw '*invalid*'
+    }
     It 'offers Global defaults and only Hagga and Deep Desert gameplay scopes' {
         Mock Get-DuneDockerSettingsContext { @{ok=$true;native=@{plan=@{games=@(
             @{partition=1;map='Survival_1'},@{partition=2;map='Overmap'},@{partition=3;map='SH_Arrakeen'},

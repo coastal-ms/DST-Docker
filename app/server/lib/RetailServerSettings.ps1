@@ -106,8 +106,9 @@ $script:DuneRetailServerBooleanKeys = @(
     'bLandsraadDisableDecreeRerollLimit'
 )
 $script:DuneRetailServerIntegerKeys = @('FiefdomLimit')
-$script:DuneRetailServerTextKeys = @('DifficultyLevel', 'PVPMode')
+$script:DuneRetailServerTextKeys = @('DifficultyLevel')
 $script:DuneRetailServerSelectOptions = @{
+    PVPMode = @('NoPVP', 'Limited', 'Full')
     DropEquipmentOnDeath = @('Default', 'None', 'Backpack', 'All')
     SandwormConsequences = @('Default', 'None', 'Backpack', 'All')
     PlayerDeathLootRule = @('DependsOnSecurityZone', 'NeverAllowOtherPlayers', 'AlwaysAllowOtherPlayers')

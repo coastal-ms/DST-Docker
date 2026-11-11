@@ -13,7 +13,7 @@ import service_generations
 def hagga_components(state):
     plan = state.get('worldPlan') or {}
     return ['game-' + str(game['partition']) for game in plan.get('games', [])
-            if game.get('map') == 'Survival_1' and 'game-' + str(game['partition']) in state.get('services', {})]
+            if re.fullmatch(r'Survival_[1-9][0-9]*',game.get('map','')) and 'game-' + str(game['partition']) in state.get('services', {})]
 
 
 def apply_image_policy(state, partition, spec, policy=None, plan=None):
@@ -21,7 +21,7 @@ def apply_image_policy(state, partition, spec, policy=None, plan=None):
     if policy is None:
         policy = state.get('regisSupport') or {}
     selected = next((game for game in plan['games'] if game['partition'] == partition), None)
-    if selected and selected['map'] == 'Survival_1' and policy.get('enabled') is True:
+    if selected and re.fullmatch(r'Survival_[1-9][0-9]*',selected.get('map','')) and policy.get('enabled') is True:
         identifier = policy.get('image', '')
         if not isinstance(identifier, str) or not re.fullmatch(r'sha256:[a-f0-9]{64}', identifier):
             raise ValueError('The selected Tank compatibility image needs recovery before creating a Hagga map.')

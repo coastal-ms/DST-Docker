@@ -135,9 +135,9 @@ def observe_backup_jobs(state,engine):
     if changed:save(state)
 
 
-def public_state(state, engine):
+def public_state(state, engine, *, observe=True):
     job=state.get('migration')
-    if job and state['phase']=='database-migrating' and state.get('operation',{}).get('phase')!='running':
+    if observe and job and state['phase']=='database-migrating' and state.get('operation',{}).get('phase')!='running':
         observed=engine.assert_owned(job['id'],state['id'],'db-migrate')
         if observed.get('State',{}).get('Status')=='exited':
             database=state['database']
@@ -186,7 +186,7 @@ def public_state(state, engine):
                 if heartbeat and heartbeat['observedAt']>=row.get('startedAt',float('inf')) and row.get('state')=='running':
                     row['gameReady']=heartbeat['ready'];row['players']=heartbeat['players'];row['heartbeatAt']=heartbeat['observedAt']
                     if heartbeat.get('serverId'):row['gameServerId']=heartbeat['serverId']
-    if state.get('operation',{}).get('phase')!='running':
+    if observe and state.get('operation',{}).get('phase')!='running':
         observe_backup_jobs(state,engine)
         observe_backup_cleanup(state,engine)
         backup_mirror_control.observe(state,engine,save)
@@ -207,7 +207,9 @@ def public_state(state, engine):
                           'port': browser['port'], 'phase': observed['State']['Status']}
     update, changed = asset_updates.observe_stage(state, engine)
     if changed and state.get('operation',{}).get('phase')!='running': save(state)
-    return {'projectId': state['id'], 'phase': state['phase'], 'assets': assets, 'assetUpdate': update,
+    try: installed_build=installed_version()['installedBuild']
+    except (ValueError,OSError,KeyError): installed_build=None
+    return {'projectId': state['id'], 'phase': state['phase'], 'assets': assets, 'assetUpdate': update, 'installedBuild':installed_build,
             'fileBrowser': browser_status,
             'regisPending':bool(state.get('pendingRegisChange')),
             'swapPending':bool(state.get('pendingSwapChange')),
@@ -1038,13 +1040,10 @@ def control_map(state,engine,partition,running,force=False,automatic=False):
         budget=next(row['memoryBytes'] for row in plan['maps'] if row['map']==game['map'])
         resource_policy.admit(state,engine,[partition])
         counters={line.split(':',1)[0]:int(line.split(':',1)[1].strip().split()[0])*1024 for line in Path('/proc/meminfo').read_text().splitlines() if ':' in line and line.split(':',1)[1].strip().split()[0].isdigit()}
-        reserved=budget
-        for name,row in state.get('services',{}).items():
-            if not name.startswith('game-') or name==component:continue
-            current=engine.assert_owned(row['id'],state['id'],name)
-            if current['State']['Status']=='running':reserved+=current['HostConfig']['Memory']
-        if counters['MemAvailable']<budget+2*1024**3 or counters['MemTotal']<reserved+2*1024**3:
-            raise ValueError('There is not enough memory for this map and 2 GiB host headroom. Stop an unused map first.')
+        # Existing map limits are ceilings, not committed reservations.
+        # MemAvailable already accounts for their current resident usage.
+        if counters['MemAvailable']<budget+2*1024**3:
+            raise ValueError(f"This start needs {budget/1024**3:.1f} GiB plus 2 GiB host headroom; {counters['MemAvailable']/1024**3:.1f} GiB is available. Stop an unused map or review the host allocation.")
         if not entry:
             template=read_template();credentials=read_credentials(state)
             bridge=engine.request('GET','/networks/'+plan['network'])['IPAM']['Config'][0]['Gateway']
@@ -1201,7 +1200,21 @@ def request_scale(state,engine,name,patch):
 def apply_scale(state,engine,request):
     try:
         for partition in request['availablePartitions']:
+            # Director stop requests can have been decided before a player
+            # returned to Overmap. Recheck before signalling the game process.
+            stopping=partition not in request['partitions']
+            game=next((row for row in state['worldPlan'].get('games',[]) if row['partition']==partition),{}) if stopping else {}
+            following=state.get('mapModes',{}).get(game.get('map'))=='overmap-active'
+            if stopping and following and follow_overmap_demand(state,engine) is not False:
+                set_map_floor(state,engine,game['map'],True)
+                control_map(state,engine,partition,True,automatic=True)
+                continue
             control_map(state,engine,partition,partition in request['partitions'],automatic=True)
+            # A signalled process must finish draining. Renewed demand must
+            # then restart it, rather than leave a warm-but-stopped target.
+            if stopping and following and follow_overmap_demand(state,engine) is True:
+                set_map_floor(state,engine,game['map'],True)
+                control_map(state,engine,partition,True,automatic=True)
         state['scalePending']['phase']='completed';save(state)
     except Exception:
         for component,previous in request['previousTargets'].items():
@@ -1291,10 +1304,75 @@ def set_map_mode(state,engine,map_name,mode):
     return {'map':map_name,'mode':mode,'message':'Map mode saved. The director reloads its rules within 60 seconds. Running maps are not forcibly stopped.'}
 
 
+def scheduler_occupancy(state,engine):
+    """Use current process identities and online rows, never heartbeat player lists."""
+    counts={row['partition']:None for row in state['worldPlan']['games']}
+    director=state.get('services',{}).get('director')
+    if not director:return counts
+    heartbeats=engine.game_heartbeats(director['id'],state['id'])
+    identities={}
+    for game in state['worldPlan']['games']:
+        partition=game['partition'];component='game-'+str(partition)
+        entry=state.get('services',{}).get(component)
+        if not entry:
+            counts[partition]=0;continue
+        observed=engine.assert_owned(entry['id'],state['id'],component)
+        if observed['State']['Status'] not in {'running','restarting'}:
+            counts[partition]=0;continue
+        heartbeat=heartbeats.get(partition,{})
+        started=datetime.fromisoformat(observed['State']['StartedAt'].replace('Z','+00:00')).timestamp()
+        identity=heartbeat.get('serverId','')
+        if heartbeat.get('observedAt',0)>=started and re.fullmatch(r'[A-Za-z0-9_+/-]{22}',identity):
+            identities[partition]=identity
+    if not identities:return counts
+    quoted=','.join("'"+value+"'" for value in sorted(set(identities.values())))
+    query="SELECT coalesce(json_object_agg(server_id,players),'{}'::json) FROM (SELECT server_id::text,count(*) AS players FROM dune.encrypted_player_state WHERE online_status::text <> 'Offline' AND server_id IN ("+quoted+") GROUP BY server_id) AS online;"
+    raw=engine.exec_internal(state['database']['id'],state['id'],'postgres',
+        ['psql','-X','-U','dune','-d','dune','-v','ON_ERROR_STOP=1','-t','-A','-c',
+         "BEGIN READ ONLY; SET LOCAL statement_timeout='3s'; "+query+' COMMIT;'])
+    # psql can include transaction command tags around the one JSON row.
+    values=json.loads(next(line for line in raw.splitlines() if line.strip().startswith('{')))
+    for partition,identity in identities.items():
+        value=values.get(identity,0)
+        if type(value) is not int or value<0:raise ValueError('Invalid online map occupancy.')
+        counts[partition]=value
+    return counts
+
+
+def follow_overmap_demand(state,engine):
+    counts=scheduler_occupancy(state,engine)
+    partitions=[row['partition'] for row in state['worldPlan']['games'] if row['map']=='Overmap']
+    if not partitions or any(counts.get(p) is None for p in partitions):return None
+    return sum(counts[p] for p in partitions)>0
+
+
+def queue_follow_overmap_starts(state,engine,rows):
+    partitions=[]
+    for row in rows:
+        for partition in row['partitions']:
+            component='game-'+str(partition);entry=state.get('services',{}).get(component)
+            running=bool(entry and engine.assert_owned(entry['id'],state['id'],component)['State']['Status']=='running')
+            if not running or state.get('mapTargets',{}).get(component)!='running':partitions.append(partition)
+    if not partitions:return
+    previous={'game-'+str(p):state.get('mapTargets',{}).get('game-'+str(p)) for p in partitions}
+    for p in partitions:state.setdefault('mapTargets',{})['game-'+str(p)]='running'
+    state['scaleRevision']=state.get('scaleRevision',0)+1
+    request={'action':'scale.apply','partitions':partitions,'availablePartitions':partitions,'previousTargets':previous}
+    state['operation']={'id':uuid.uuid4().hex,'action':'scale.apply','phase':'running','startedAt':time.time()}
+    state['scalePending']={**request,'operationId':state['operation']['id'],'phase':'running'};save(state)
+    threading.Thread(target=run_operation,args=(state,engine,request),daemon=True).start()
+
+
 def map_mode_tick(engine=None,now=None):
     engine=engine or Engine();now=time.time() if now is None else now
+    # Occupancy I/O must not monopolize the management lock or socket listener.
+    with LOCK:snapshot=project_state()
+    if snapshot.get('desiredState')!='running':return
+    if not any(map_modes.mode_for(snapshot,row)=='overmap-active' for row in snapshot.get('worldPlan',{}).get('maps',[])):return
+    counts=scheduler_occupancy(snapshot,engine)
     with LOCK:
         state=project_state()
+        if state.get('id')!=snapshot.get('id') or state.get('services')!=snapshot.get('services'):return
         if state.get('desiredState')!='running' or state.get('operation',{}).get('phase')=='running':return
         if any(state.get(key) for key in ('pendingMemoryChange','pendingResourceChange','pendingSwapChange','pendingRegisChange','pendingAddressChange','pendingMapMode')):return
         if state.get('restore',{}).get('phase') in {'stopping','preparing','restoring','recovering','recovery-required'}:return
@@ -1303,21 +1381,21 @@ def map_mode_tick(engine=None,now=None):
         if state.get('worldResearchRecovery',{}).get('phase','completed') not in {'completed','rolled-back','failed-preflight'}:return
         rows=[row for row in state.get('worldPlan',{}).get('maps',[]) if map_modes.mode_for(state,row)=='overmap-active']
         if not rows:return
-        observed=public_state(state,engine)
         games=state['worldPlan']['games']
         def occupancy(map_name):
             partitions={row['partition'] for row in games if row['map']==map_name}
-            services=[row for row in observed['services'] if row['component'] in {'game-'+str(p) for p in partitions} and row.get('state') in {'running','restarting'}]
-            if any(row.get('players') is None for row in services):return None
-            return sum(row.get('players',0) for row in services)
+            if not partitions or any(counts.get(p) is None for p in partitions):return None
+            return sum(counts[p] for p in partitions)
         players=occupancy('Overmap')
+        # One shared inactivity clock; joining Overmap resets it for every map.
+        _,since=map_modes.overmap_floor(players,0,state.get('overmapEmptySince'),now)
+        state['overmapEmptySince']=since
         for row in rows:
-            idle=state.setdefault('overmapIdleSince',{}).get(row['map'])
-            floor,since=map_modes.overmap_floor(players,occupancy(row['map']),idle,now)
-            state['overmapIdleSince'][row['map']]=since
+            floor,_=map_modes.overmap_floor(players,occupancy(row['map']),since,now)
             if floor is not None and any(state.get('manualPins',{}).get('game-'+str(p),False)!=floor for p in row['partitions']):
                 set_map_floor(state,engine,row['map'],floor)
         state.pop('mapModeError',None);save(state)
+        if players is not None and players>0:queue_follow_overmap_starts(state,engine,rows)
 
 
 def run_map_mode_scheduler():
@@ -1590,6 +1668,20 @@ def run_operation(state,engine,request):
 def dispatch(request, engine=None, *, resume_running_only=False):
     engine = engine or Engine()
     action = request.get('action')
+    if action in {'status','maps.management'}:
+        # Read the atomically saved state without waiting behind director I/O.
+        # Job transitions are observed only by the request owning the lock.
+        acquired=LOCK.acquire(blocking=False)
+        try:
+            state=project_state()
+            metadata=public_state(state,engine,observe=acquired)
+            if action=='status':return metadata
+            return {'metadata':metadata,'resources':resource_policy.snapshot(state,engine),
+                    'modes':{row['map']:map_modes.mode_for(state,row) for row in state.get('worldPlan',{}).get('maps',[])},
+                    'modeError':state.get('mapModeError'),'swapPolicy':state.get('memorySwap',{'enabled':False}),
+                    'pendingMapMode':state.get('pendingMapMode'),'memoryBalancingEnabled':state.get('memoryBalancingEnabled',True)}
+        finally:
+            if acquired:LOCK.release()
     if action in {'tailscale.get','tailscale.set','tailscale.link'}:
         return tailscale_access.request(engine,project_state()['id'],STATE,CONFIG,action.split('.')[1],request.get('mode'),request.get('port',8088))
     with LOCK:
@@ -1692,6 +1784,8 @@ def dispatch(request, engine=None, *, resume_running_only=False):
             game=next(row for row in state['worldPlan']['games'] if str(row['partition'])==target)
             if not re.fullmatch(r'(?:Survival|DeepDesert)_[1-9][0-9]*',game.get('map','')):
                 raise ValueError('Gameplay settings can be scoped only to Hagga and Deep Desert maps. Use Global defaults for the shared file.')
+            if request.get('file') != 'server':
+                raise ValueError('Per-map settings support only Custom Server Settings. Use Global for Game.ini and Engine.ini.')
             payload={key:request.get(key) for key in ('target','file','revision','raw','inherit') if key in request}
             payload['action']='maps.read' if action.endswith('.read') else 'maps.write'
             entry=state.get('services',{}).get('game-'+target)
@@ -1799,7 +1893,12 @@ class Handler(socketserver.StreamRequestHandler):
         except OperationBusyError as error:response={'ok':False,'code':'operation-busy','error':str(error)}
         except (ValueError, EngineError) as error: response={'ok':False,'error':str(error)}
         except Exception: response={'ok':False,'error':'Docker management request failed. Existing server data was preserved.'}
-        self.wfile.write(json.dumps(response).encode('utf-8')+b'\n')
+        try:self.wfile.write(json.dumps(response).encode('utf-8')+b'\n')
+        except (BrokenPipeError,ConnectionResetError):pass
+
+
+class ManagementServer(socketserver.ThreadingMixIn,socketserver.UnixStreamServer):
+    daemon_threads=True
 
 
 def resume_interrupted_update(state,engine):
@@ -1893,7 +1992,7 @@ if __name__ == '__main__':
     tailscale_access.resume(Engine(),recovered['id'],STATE,CONFIG)
     SOCKET.parent.mkdir(parents=True, exist_ok=True)
     if SOCKET.exists(): SOCKET.unlink()
-    server = socketserver.UnixStreamServer(str(SOCKET), Handler)
+    server = ManagementServer(str(SOCKET), Handler)
     os.chown(SOCKET, -1, 10001)
     SOCKET.chmod(0o660)
     BACKUP_WORKER=threading.Thread(target=run_backup_scheduler,name='DuneBackupScheduler',daemon=True)

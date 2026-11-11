@@ -1,3 +1,62 @@
+function Get-DuneDockerGamePhase {
+    param($Service,$Operation)
+    $partition=[int]([string]$Service.component).Substring(5)
+    $active=$Operation.phase -eq 'running'
+    $stopping=$Service.desiredState -eq 'stopped' -or ($active -and ($Operation.action -eq 'services.stop' -or ($Operation.action -eq 'maps.stop' -and $Operation.partition -eq $partition)))
+    if($Service.state -in @('running','restarting') -and $stopping){return 'Unloading'}
+    if($Service.state -eq 'running'){
+        if($Service.gameReady -eq $true){return 'Running'}
+        if($active -and ($Operation.action -eq 'services.start' -or ($Operation.action -in @('maps.start','maps.restart') -and $Operation.partition -eq $partition))){return 'Loading'}
+        return 'Loading/Unloading'
+    }
+    if($Service.state -eq 'restarting'){return 'Loading'}
+    if($Service.state -eq 'created'){return 'Pending'}
+    if($active -and $Operation.action -eq 'maps.restart' -and $Operation.partition -eq $partition){return 'Loading'}
+    return 'Failed'
+}
+
+function Get-DuneDockerPlayerCounts {
+    param($Metadata)
+    $counts=@{}
+    $ids=@($Metadata.services | Where-Object {$_.state -eq 'running' -and $_.component -match '^game-[0-9]+$' -and [string]$_.gameServerId -cmatch '^[A-Za-z0-9_+/-]{22}$'} | ForEach-Object {[string]$_.gameServerId} | Sort-Object -Unique)
+    if(-not $ids.Count -or $Metadata.database.health -ne 'healthy' -or $Metadata.database.state -ne 'running'){return $counts}
+    try {
+        $quoted=($ids | ForEach-Object {"'$_'"}) -join ','
+        $result=Invoke-DuneSqlQuery -Ip docker -ReadOnly $true -Sql "SELECT server_id::text AS server_id, count(*)::text AS players FROM encrypted_player_state WHERE online_status::text <> 'Offline' AND server_id IN ($quoted) GROUP BY server_id;"
+        if(-not $result.ok){return $counts}
+        foreach($id in $ids){$counts[$id]=0}
+        foreach($row in (ConvertTo-DuneRowMaps -Result $result)){
+            if([string]$row.server_id -cin $ids -and [string]$row.players -match '^\d+$'){$counts[[string]$row.server_id]=[int]$row.players}
+        }
+    } catch {return @{}}
+    return $counts
+}
+
+function Sync-DuneFuncomInstalledBuild {
+    param([string]$InstalledBuild)
+    if ($InstalledBuild -notmatch '^\d+$') { return $false }
+    $sync = {
+        $state = Get-DuneRestartSchedule
+        $available = [bool]$state.updateAvailable
+        if ([string]$state.latestBuild -match '^\d+$') {
+            $available = ([int64]$state.latestBuild -gt [int64]$InstalledBuild)
+        }
+        if ([string]$state.installedBuild -eq $InstalledBuild -and $state.updateAvailable -eq $available) { return $false }
+        $state.installedBuild = $InstalledBuild
+        $state.updateAvailable = $available
+        # Prevent an older maintenance result or in-flight check from restoring
+        # the pre-update build after this newer installed-build observation.
+        $state.updateCheckedAt = (Get-Date).ToString('o')
+        Save-DuneRestartSchedule -State $state
+        return $true
+    }
+    if (Get-Command Invoke-WithDuneLock -ErrorAction SilentlyContinue) {
+        return Invoke-WithDuneLock -Name 'docker-restart-schedule' -TimeoutSec 5 -Script $sync
+    }
+    return & $sync
+}
+
+
 function Invoke-DuneDockerManager {
     param([Parameter(Mandatory)][hashtable]$Request,[switch]$HostSession)
     $start = [Diagnostics.ProcessStartInfo]::new()
@@ -43,6 +102,8 @@ function Get-DuneDockerFuncomUpdateStatus {
         if($Persist){
             Invoke-WithDuneLock -Name 'docker-restart-schedule' -Script {
                 $state=Get-DuneRestartSchedule
+                $previousCheck=[datetimeoffset]::MinValue
+                if([datetimeoffset]::TryParse([string]$state.updateCheckedAt,[ref]$previousCheck) -and $previousCheck -gt [datetimeoffset]::Parse($checkedAt)){return}
                 $state.updateAvailable=$available;$state.installedBuild=$installed;$state.latestBuild=$latest;$state.updateCheckedAt=$checkedAt
                 Save-DuneRestartSchedule $state
             }|Out-Null
@@ -93,19 +154,21 @@ function Get-DuneDockerStatus {
     } catch { }
     $reply=Invoke-DuneDockerManager -Request @{action='status'}
     $metadata=if($reply.ok){$reply.data}else{$null}
+    if($metadata -and [string]$metadata.installedBuild -match '^\d{1,18}$'){
+        try {Sync-DuneFuncomInstalledBuild -InstalledBuild ([string]$metadata.installedBuild)|Out-Null} catch {}
+    }
     $connected=[bool]$snapshot.available -and -not $snapshot.stale -and [bool]$reply.ok
     $hostState=@{exists=[bool]$snapshot.available;running=$connected;name='Docker Engine';state=$(if($connected){'Running'}else{'Unavailable'});ip=$metadata.profile.address;uptime=0;kind='docker'}
     # Retired Docker containers are diagnostic history, not current game pods.
     # Lifecycle controls use the complete manager catalogue separately.
+    $playerCounts=Get-DuneDockerPlayerCounts -Metadata $metadata
     $games=@(foreach($service in @($metadata.services | Where-Object { $_.component -match '^game-[0-9]+$' -and ($_.state -in @('running','restarting') -or $_.desiredState -eq 'running') })) {
         $partition=[int]$service.component.Substring(5)
         $definition=@($metadata.plan.games | Where-Object { $_.partition -eq $partition }) | Select-Object -First 1
-        $phase=if($service.state-eq'running'){'Running'}elseif($service.state-eq'created'){'Pending'}elseif($service.state-eq'restarting'){'Starting'}else{'Failed'}
+        $phase=Get-DuneDockerGamePhase -Service $service -Operation $metadata.operation
         $ready=if($service.ContainsKey('gameReady')){if($service.gameReady){'True'}else{'False'}}else{'Unknown'}
-        if($phase-eq'Running' -and $ready-ne'True'){$phase='Starting'}
-        if($metadata.operation.phase-eq'running' -and $metadata.operation.action-eq'maps.restart' -and $metadata.operation.partition-eq$partition -and $phase-eq'Failed'){$phase='Starting'}
         $age=if($service.startedAt){Format-DuneKubeAge -Start ([DateTimeOffset]::FromUnixTimeSeconds([long]$service.startedAt).UtcDateTime)}else{''}
-        $players=if($service.ContainsKey('players')){[string]$service.players}elseif($service.state-eq'running'){'Unknown'}else{'0'}
+        $players=if($service.state -ne 'running'){'0'}elseif($service.gameServerId -and $playerCounts.ContainsKey([string]$service.gameServerId)){[string]$playerCounts[[string]$service.gameServerId]}elseif($service.ContainsKey('players') -and [int]$service.players -gt 0){[string]$service.players}else{'Unknown'}
         @{map=[string]$definition.map;phase=$phase;ready=$ready;players=$players;age=$age;desiredState=$service.desiredState}
     })
     $coreRunning=@($metadata.services | Where-Object { $_.component -notmatch '^game-[0-9]+$' -and $_.state-ne'running' }).Count-eq 0 -and @($metadata.services).Count-gt 0
@@ -143,7 +206,8 @@ function Get-DuneDockerStatus {
     # Legacy screens consume vm as their managed-host availability field,
     # including fresh lifecycle checks outside useStatus. Supply the same
     # Docker host facts there; kind/backend identify Docker, and no VM probe runs.
-    return @{hostingBackend='docker';host=$hostState;vm=$hostState;
+    try {$schedule=Get-DuneRestartSchedule} catch {$schedule=@{}}
+    return @{funcomUpdate=@{available=[bool]$schedule.updateAvailable;installedBuild=[string]$schedule.installedBuild;latestBuild=[string]$schedule.latestBuild;autoApply=[bool]$schedule.applyFuncomUpdates};hostingBackend='docker';host=$hostState;vm=$hostState;
              bg=$group;ports=$ports;serverName=[string]$metadata.profile.name;docker=$snapshot;ts=(Get-Date).ToString('o')}
 }
 
