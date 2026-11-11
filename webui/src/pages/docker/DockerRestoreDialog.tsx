@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api, withOnlinePlayerGuard } from '../../api/client'
 
-type Backup = { id: string; name: string; phase: string; createdAt: number; verification?: { phase: string } }
+type Backup = { id: string; name: string; originalFilename?: string; phase: string; createdAt: number; verification?: { phase: string } }
 type State = { backups: Backup[]; operation?: { id: string; phase: string; error?: string }; restore?: { phase: string } }
 type Reply = { ok: boolean; data?: State; error?: string }
 
@@ -45,7 +45,7 @@ export default function DockerRestoreDialog({ onClose, onComplete }: { onClose: 
     <div className="card w-full max-w-xl p-5 sm:p-6">
       <h2 id="docker-restore-title" className="text-lg font-semibold">Restore Backup</h2>
       <p className="mt-3 text-sm text-text-muted">This rolls all players, bases, inventory and world data back to the selected snapshot. Changes made since that snapshot will be replaced.</p>
-      <label className="mt-4 block text-sm">Verified backup<select className="input mt-2 w-full" aria-label="Verified backup" disabled={busy} value={selected} onChange={event => setSelected(event.target.value)}>{backups.map(backup => <option key={backup.id} value={backup.id}>{new Date(backup.createdAt * 1000).toLocaleString()} · {backup.name}</option>)}</select></label>
+      <label className="mt-4 block text-sm">Verified backup<select className="input mt-2 w-full" aria-label="Verified backup" disabled={busy} value={selected} onChange={event => setSelected(event.target.value)}>{backups.map(backup => <option key={backup.id} value={backup.id}>{new Date(backup.createdAt * 1000).toLocaleString()} · {backup.originalFilename || backup.name}</option>)}</select></label>
       {!backups.length && <p className="mt-2 text-sm text-warning">Verify a saved backup before restoring it.</p>}
       {busy && <p role="status" className="mt-4 text-sm text-accent">{progress}</p>}
       {error && <p role="alert" className="mt-4 text-sm text-danger">{error}</p>}

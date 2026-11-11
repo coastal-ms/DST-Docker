@@ -50,6 +50,19 @@ Describe 'Docker backup adapters' {
 }
 Describe 'Bounded browser database backup uploads' {
     BeforeAll { . (Join-Path (Get-DstRepoRoot) 'app/server/lib/DockerBackups.ps1') }
+    It 'keeps the original filename as metadata and rejects path-like names before creating files' {
+        $bytes=[Text.Encoding]::UTF8.GetBytes('PGDMPfixture-data')
+        $directory=Join-Path $TestDrive 'named-upload'
+        $stream=[IO.MemoryStream]::new($bytes)
+        try{$result=Receive-DuneDockerBackupUpload -Stream $stream -Length $bytes.Length -TrustedSource $true -OriginalFilename 'My world 100%.backup' -Directory $directory}finally{$stream.Dispose()}
+        $result.originalFilename|Should -BeExactly 'My world 100%.backup'
+        @(Get-ChildItem $directory).Name|Should -BeExactly ($result.uploadId+'.upload')
+        foreach($name in @('../world.backup','C:\world.backup',"bad`nname",('.'*256))){
+            $stream=[IO.MemoryStream]::new($bytes)
+            try{{Receive-DuneDockerBackupUpload -Stream $stream -Length $bytes.Length -TrustedSource $true -OriginalFilename $name -Directory (Join-Path $TestDrive 'invalid-name')}|Should -Throw}finally{$stream.Dispose()}
+        }
+        Test-Path (Join-Path $TestDrive 'invalid-name')|Should -BeFalse
+    }
     It 'stores exact bytes with a stable checksum and an internal identity' {
         $bytes=[Text.Encoding]::UTF8.GetBytes('PGDMPfixture-data')
         $stream=[IO.MemoryStream]::new($bytes)

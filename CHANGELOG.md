@@ -1,5 +1,11 @@
 # DST Docker changelog
 
+## [1.0.3]
+
+- Keep stopped containers from blocking backup imports.
+- Show original filenames for newly imported backups in backup lists and restore choices.
+- Clarify required game ports and optional browser access.
+
 ## [1.0.2]
 
 - Keep Overmap first in the Game Servers list.

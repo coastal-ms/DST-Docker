@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api } from '../../api/client'
 
-type Backup = { id: string; name: string; phase: string; createdAt: number; bytes?: number; error?: string; verification?: { phase: string; error?: string; restored?: { duneTables: number; partitions: number; players: number } } }
+type Backup = { id: string; name: string; originalFilename?: string; phase: string; createdAt: number; bytes?: number; error?: string; verification?: { phase: string; error?: string; restored?: { duneTables: number; partitions: number; players: number } } }
 type State = { phase: string; backups: Backup[]; operation: null | { phase: string; error?: string } }
 type Reply = { ok: boolean; data?: State; error?: string }
 
@@ -38,6 +38,7 @@ export default function DockerBackups() {
     {state && !state.backups.length && <div className="dc-empty">No database backups yet.</div>}
     <div className="dc-backup-list">{state?.backups.map(backup => <article className="dc-setup-card" key={backup.id}>
       <h3>{new Date(backup.createdAt * 1000).toLocaleString()}</h3>
+      <p className="break-all">{backup.originalFilename || backup.name}</p>
       <p>{backup.phase === 'completed' ? `${((backup.bytes || 0) / 1024 ** 2).toFixed(1)} MiB · Saved` : backup.phase}</p>
       {backup.error && <p role="alert">{backup.error}</p>}
       {backup.verification?.error && <p role="alert">{backup.verification.error}</p>}

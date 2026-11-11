@@ -778,6 +778,7 @@ export type BackupSchedule = {
 }
 
 export type BackupFile = {
+  originalFilename?: string
   path: string
   sizeBytes: number
   mtimeEpoch: number

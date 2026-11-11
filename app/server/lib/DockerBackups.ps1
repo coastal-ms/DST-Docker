@@ -46,9 +46,10 @@ function Remove-DuneDockerBackupFiles {
     return @{ok=$true;pending=$true;operationId=$data.operation.id;deleted=@();failed=@();message='Backup deletion started. History updates after the files are checked and removed.'}
 }
 function Receive-DuneDockerBackupUpload {
-    param([Parameter(Mandatory)][IO.Stream]$Stream,[long]$Length,[bool]$TrustedSource,
+    param([Parameter(Mandatory)][IO.Stream]$Stream,[long]$Length,[bool]$TrustedSource,[string]$OriginalFilename='',
           [string]$Directory='/data/cache/backup-transfers')
     if(-not $TrustedSource){throw 'Confirm that this backup comes from a trusted source before importing.'}
+    if($OriginalFilename.Length -gt 255 -or $OriginalFilename -match '[\x00-\x1f\x7f/\\]' -or $OriginalFilename -in @('.','..')){throw 'Choose a backup filename without a folder path or control characters.'}
     if($Length -lt 5 -or $Length -gt 25GB){throw 'Choose a PostgreSQL custom backup between 5 bytes and 25 GiB.'}
     $existing=Get-Item -LiteralPath $Directory -ErrorAction SilentlyContinue
     if($existing -and (-not $existing.PSIsContainer -or $existing.LinkType)){throw 'Private upload storage needs review.'}
@@ -74,7 +75,7 @@ function Receive-DuneDockerBackupUpload {
         $output.Flush($true);$output.Dispose();$output=$null
         $digest=[Convert]::ToHexString($hash.GetHashAndReset()).ToLowerInvariant()
         [IO.File]::Move($partial,$target,$false)
-        return @{uploadId=$id;sha256=$digest;bytes=$total;trustedSource=$true}
+        return @{uploadId=$id;sha256=$digest;bytes=$total;trustedSource=$true;originalFilename=$OriginalFilename}
     }finally{
         if($output){$output.Dispose()};$hash.Dispose()
         if(Test-Path -LiteralPath $partial){[IO.File]::Delete($partial)}
