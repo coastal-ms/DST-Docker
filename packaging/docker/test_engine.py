@@ -228,6 +228,14 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(result[1]['serverId'],'A'*22)
         self.assertNotIn('private-',json.dumps(result))
 
+    def test_map_admission_memory_is_owned_current_working_set_and_unknown_is_not_zero(self):
+        client=RecordingEngine({'io.dst.managed':'true','io.dst.project':'a'*32,'io.dst.component':'game-1'})
+        with patch.object(client,'assert_owned'),patch.object(client,'request',return_value={'memory_stats':{'usage':1024,'stats':{'inactive_file':128}}}):
+            self.assertEqual(client.component_memory_usage('own','a'*32,'game-1'),896)
+        with patch.object(client,'assert_owned'),patch.object(client,'request',return_value={}):
+            with self.assertRaisesRegex(engine.EngineError,'could not be verified'):
+                client.component_memory_usage('own','a'*32,'game-1')
+
     def test_running_components_cannot_be_retired_or_deleted_for_an_update(self):
         class Running(RecordingEngine):
             def inspect(self,identifier):return {'Config':{'Labels':self.labels},'State':{'Status':'running'}}

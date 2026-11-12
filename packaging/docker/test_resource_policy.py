@@ -20,6 +20,19 @@ def change():
 
 
 class ResourcePolicyTests(unittest.TestCase):
+    def test_admission_uses_running_usage_not_the_sum_of_map_ceilings(self):
+        state=world();state['resourcePolicy']={'memoryGiB':27}
+        state['worldPlan']['maps'][0]['memoryBytes']=14*GIB
+        state['worldPlan']['maps'][1]['memoryBytes']=13*GIB
+        engine=Mock(spec=manager.Engine)
+        engine.assert_owned.return_value={'State':{'Status':'running'}}
+        engine.component_memory_usage.return_value=10*GIB
+        policy.admit(state,engine,[2])
+        engine.component_memory_usage.assert_called_once_with('owned','a'*32,'game-1')
+        engine.component_memory_usage.return_value=20*GIB
+        with self.assertRaisesRegex(ValueError,'current map usage|Current map usage'):
+            policy.admit(state,engine,[2])
+
     def setUp(self):
         self.host={'memoryBytes':32*GIB,'availableBytes':24*GIB,'cpus':8}
         self.engine=Mock(spec=manager.Engine);self.engine.assert_owned.return_value={'State':{'Status':'exited'}}
@@ -111,6 +124,7 @@ class ResourcePolicyTests(unittest.TestCase):
     def test_running_maps_count_against_ram_admission(self):
         state=world();state['resourcePolicy']={'memoryGiB':8,'cpuCount':2};state['mapCpuOverrides']={'Survival_1':2,'Story':1}
         self.engine.assert_owned.return_value={'State':{'Status':'running'}}
+        self.engine.component_memory_usage.return_value=4*GIB
         policy.admit(state,self.engine,[1])
         with self.assertRaisesRegex(ValueError,'exceed'):policy.admit(state,self.engine,[2,3])
         state['pendingResourceChange']=change()

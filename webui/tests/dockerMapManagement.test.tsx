@@ -13,6 +13,22 @@ const snapshot = () => ({
 })
 afterEach(() => { cleanup(); sessionStorage.clear(); vi.clearAllMocks() })
 describe('Map management', () => {
+  it('replaces queued-start feedback with the correlated failure instead of leaving a green request message', async () => {
+    let failed = false
+    vi.mocked(api).mockImplementation(async (_path, options) => {
+      if (options?.method === 'POST') {
+        failed = true
+        return { operation: { id: 'start-eight', phase: 'running', action: 'maps.start', partition: 8 } }
+      }
+      const data = snapshot()
+      return failed ? { ...data, metadata: { ...data.metadata, operation: { id: 'start-eight', phase: 'failed', action: 'maps.start', partition: 8, error: 'Memory is unavailable.' } } } : data
+    })
+    render(<DockerMapManagement />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Start and keep running' }))
+    await screen.findByText('Change not applied. Memory is unavailable.')
+    expect(screen.queryByText(/start in progress/)).toBeNull()
+    expect(screen.queryByText(/start completed/)).toBeNull()
+  })
   it('sorts names both ways and keeps the editor with its map', async () => {
     vi.mocked(api).mockResolvedValue(snapshot())
     render(<DockerMapManagement />)

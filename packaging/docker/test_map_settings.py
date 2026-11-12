@@ -13,50 +13,50 @@ class MapSettingsTests(unittest.TestCase):
         self.temp=tempfile.TemporaryDirectory()
         self.saved=Path(self.temp.name)
         (self.saved/'UserSettings').mkdir()
-        self.global_file=self.saved/'UserSettings/UserGame.ini'
+        self.global_file=self.saved/'UserSettings/UserServerCustomSettings.ini'
         self.global_file.write_text('; keep comment\n[Rules]\nMultiplier=1\n+Array=keep\n')
         self.store=SavedSettings(self.saved)
 
     def tearDown(self):self.temp.cleanup()
 
     def write(self,target,raw=None,inherit=False,revision=None):
-        return self.store.dispatch({'action':'maps.write','target':target,'file':'game','raw':raw,
-            'inherit':inherit,'revision':revision or self.store.map_read(target,'game')['revision']})
+        return self.store.dispatch({'action':'maps.write','target':target,'file':'server','raw':raw,
+            'inherit':inherit,'revision':revision or self.store.map_read(target,'server')['revision']})
 
     def test_partition_save_never_changes_global_or_another_partition(self):
         original=self.global_file.read_bytes()
         first=self.write('1','[Rules]\nMultiplier=3\n')
         self.assertTrue(first['overridden'])
-        self.assertEqual(self.store.map_read('8','game')['raw'],original.decode())
+        self.assertEqual(self.store.map_read('8','server')['raw'],original.decode())
         self.assertEqual(self.global_file.read_bytes(),original)
         self.write('8','[Rules]\nMultiplier=5\n')
-        self.assertEqual(self.store.map_read('1','game')['raw'],'[Rules]\nMultiplier=3\n')
+        self.assertEqual(self.store.map_read('1','server')['raw'],'[Rules]\nMultiplier=3\n')
 
     def test_global_defaults_flow_to_both_supported_maps_without_replacing_an_own_copy(self):
-        current=self.store.read('game')
-        self.store.write('game','[Rules]\nMultiplier=2\n',current['revision'],current['fileExists'])
+        current=self.store.read('server')
+        self.store.write('server','[Rules]\nMultiplier=2\n',current['revision'],current['fileExists'])
         for target in ('1','8'):
-            self.assertFalse(self.store.map_read(target,'game')['overridden'])
-            self.assertEqual(self.store.map_read(target,'game')['raw'],'[Rules]\nMultiplier=2\n')
+            self.assertFalse(self.store.map_read(target,'server')['overridden'])
+            self.assertEqual(self.store.map_read(target,'server')['raw'],'[Rules]\nMultiplier=2\n')
         self.write('1','[Rules]\nMultiplier=5\n')
-        current=self.store.read('game')
-        self.store.write('game','[Rules]\nMultiplier=3\n',current['revision'],current['fileExists'])
-        self.assertEqual(self.store.map_read('1','game')['raw'],'[Rules]\nMultiplier=5\n')
-        self.assertEqual(self.store.map_read('8','game')['raw'],'[Rules]\nMultiplier=3\n')
+        current=self.store.read('server')
+        self.store.write('server','[Rules]\nMultiplier=3\n',current['revision'],current['fileExists'])
+        self.assertEqual(self.store.map_read('1','server')['raw'],'[Rules]\nMultiplier=5\n')
+        self.assertEqual(self.store.map_read('8','server')['raw'],'[Rules]\nMultiplier=3\n')
 
     def test_inherited_draft_conflicts_with_global_edit_and_identical_override_creation(self):
-        before=self.store.map_read('1','game')
+        before=self.store.map_read('1','server')
         self.global_file.write_text('[Rules]\nMultiplier=2\n')
         with self.assertRaises(SettingsConflict):self.write('1','stale',revision=before['revision'])
-        before=self.store.map_read('1','game')
+        before=self.store.map_read('1','server')
         self.write('1',before['raw'])
         with self.assertRaises(SettingsConflict):self.write('1','stale',revision=before['revision'])
 
     def test_override_is_independent_and_reset_backs_up_then_resumes_global(self):
         self.write('1','[Rules]\nMultiplier=3\n')
-        before=self.store.map_read('1','game')
+        before=self.store.map_read('1','server')
         self.global_file.write_text('[Rules]\nMultiplier=9\n')
-        self.assertEqual(self.store.map_read('1','game')['revision'],before['revision'])
+        self.assertEqual(self.store.map_read('1','server')['revision'],before['revision'])
         result=self.write('1',inherit=True)
         self.assertFalse(result['overridden'])
         self.assertEqual(result['raw'],self.global_file.read_text())
@@ -65,20 +65,20 @@ class MapSettingsTests(unittest.TestCase):
 
     def test_invalid_targets_and_symlinked_directories_are_rejected(self):
         for target in ['../1','0','01',1,None,'9999999']:
-            with self.assertRaises(ValueError):self.store.map_read(target,'game')
+            with self.assertRaises(ValueError):self.store.map_read(target,'server')
         root=self.saved/'UserSettings/.dst-map-settings'
         root.symlink_to(self.saved,target_is_directory=True)
-        with self.assertRaises(ValueError):self.store.map_read('1','game')
+        with self.assertRaises(ValueError):self.store.map_read('1','server')
 
     def test_inherited_source_change_during_replacement_does_not_save_a_stale_copy(self):
-        before=self.store.map_read('1','game')
+        before=self.store.map_read('1','server')
         real=tempfile.mkstemp
         def change(*args,**kwargs):
             self.global_file.write_text('new manual settings')
             return real(*args,**kwargs)
         with patch('settings_service.tempfile.mkstemp',side_effect=change):
             with self.assertRaises(SettingsConflict):self.write('1','stale',revision=before['revision'])
-        self.assertFalse(self.store.map_read('1','game')['overridden'])
+        self.assertFalse(self.store.map_read('1','server')['overridden'])
 
     def test_real_startup_projection_uses_each_partition_and_keeps_running_snapshot(self):
         # Execute the actual launcher through its projection boundary in an
@@ -110,6 +110,15 @@ class MapSettingsTests(unittest.TestCase):
 
 
 class ManagerMapSettingsTests(unittest.TestCase):
+    def test_map_local_game_and_engine_files_are_rejected_without_writes(self):
+        state={'id':'a'*32,'worldPlan':{'games':[{'partition':1,'map':'Survival_1'}]}}
+        with patch.object(manager,'project_state',return_value=state),patch.object(manager,'settings_request') as request:
+            for key in ('game','engine'):
+                for action in ('map-settings.read','map-settings.write'):
+                    with self.assertRaisesRegex(ValueError,'only Custom Server Settings'):
+                        manager.dispatch({'action':action,'target':'1','file':key},Mock())
+            request.assert_not_called()
+
     def test_gameplay_scopes_reject_overmap_and_story_maps(self):
         state={'id':'a'*32,'worldPlan':{'games':[{'partition':2,'map':'Overmap'},{'partition':3,'map':'SH_Arrakeen'},{'partition':9,'map':'CB_Story_Test'}]}}
         with patch.object(manager,'project_state',return_value=state),patch.object(manager,'settings_request') as request:

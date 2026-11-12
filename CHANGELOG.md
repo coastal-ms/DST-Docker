@@ -1,5 +1,13 @@
 # DST Docker changelog
 
+## [1.0.4]
+
+- Keep Game.ini and Engine.ini global, with separate Custom Server Settings for each Hagga and Deep Desert partition.
+- Update Tank compatibility for Funcom 1.5.20.2.
+- Show current player counts and server update availability on Server Overview.
+- Use current memory usage when admitting map starts and show the final result of map operations.
+- Clarify map startup modes and WSL storage capacity.
+
 ## [1.0.3]
 
 - Keep stopped containers from blocking backup imports.

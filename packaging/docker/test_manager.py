@@ -458,7 +458,17 @@ class ManagerTests(unittest.TestCase):
         engine=FakeEngine();engine.create_component=Mock()
         with patch.object(manager,'Path') as path:
             path.return_value.read_text.return_value='MemAvailable: 1024 kB\nMemTotal: 65536 kB\n'
-            with self.assertRaisesRegex(ValueError,'not enough memory'):manager.control_map(state,engine,8,True)
+            with self.assertRaisesRegex(ValueError,'This start needs'):manager.control_map(state,engine,8,True)
+    def test_map_start_does_not_reserve_unused_memory_in_other_maps_limits(self):
+        gib=1024**3
+        state={'id':'a'*32,'desiredState':'running','services':{f'game-{n}':{'id':str(n),'phase':'prepared'} for n in (1,2,8)},
+               'worldPlan':{'games':[{'map':'DeepDesert_1','partition':8}],
+                            'maps':[{'map':'DeepDesert_1','partitions':[8],'memoryBytes':13*gib,'initialReplicas':0}]}}
+        engine=Mock(spec=manager.Engine)
+        engine.assert_owned.side_effect=lambda identifier,*args:{'State':{'Status':'created' if identifier=='8' else 'running'},'HostConfig':{'Memory':(14 if identifier=='1' else 2)*gib}}
+        with patch.object(manager.Path,'read_text',return_value='MemAvailable: 17406361 kB\nMemTotal: 30828134 kB\n'),patch.object(manager,'save'),patch.object(manager,'set_map_floor'),patch.object(manager,'prepare_map_observers'),patch.object(manager,'public_state',return_value={}),patch.object(manager.regis_compatibility,'assert_prepared_images'):
+            manager.control_map(state,engine,8,True)
+        engine.lifecycle.assert_called_once_with('8','a'*32,'start')
         engine.create_component.assert_not_called()
 
     def test_unknown_map_occupancy_requires_an_explicit_confirmed_stop(self):

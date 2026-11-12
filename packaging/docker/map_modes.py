@@ -1,6 +1,6 @@
 """Map lifecycle policy decisions. No timers, I/O or game starts here."""
 MODES={'dynamic','always-on','overmap-active','disabled'}
-IDLE_SECONDS=300
+IDLE_SECONDS=60
 
 
 def mode_for(state,row):

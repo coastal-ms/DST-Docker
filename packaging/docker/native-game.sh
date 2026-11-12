@@ -35,7 +35,7 @@ for name in UserGame.ini UserEngine.ini UserServerCustomSettings.ini; do
             echo 'The map settings file is not a regular file.' >&2; exit 1
         fi
     done
-    if [ -f "$overrides/$name" ]; then source="$overrides/$name"; fi
+    if [ "$name" = UserServerCustomSettings.ini ] && [ -f "$overrides/$name" ]; then source="$overrides/$name"; fi
     if [ -f "$source" ]; then
         temporary=$(mktemp "$effective/.dst-settings.XXXXXX")
         cp "$source" "$temporary"; chmod 600 "$temporary"; mv -f "$temporary" "$effective/$name"
