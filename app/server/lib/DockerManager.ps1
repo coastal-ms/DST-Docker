@@ -7,7 +7,7 @@ function Get-DuneDockerGamePhase {
     if($Service.state -eq 'running'){
         if($Service.gameReady -eq $true){return 'Running'}
         if($active -and ($Operation.action -eq 'services.start' -or ($Operation.action -in @('maps.start','maps.restart') -and $Operation.partition -eq $partition))){return 'Loading'}
-        return 'Loading/Unloading'
+        return 'Configuring'
     }
     if($Service.state -eq 'restarting'){return 'Loading'}
     if($Service.state -eq 'created'){return 'Pending'}

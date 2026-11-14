@@ -36,7 +36,7 @@ export function DockerBackupMirror() {
   const copying = mirror?.phase === 'preparing' || mirror?.phase === 'running'
   return <CollapsibleCard id="database.backupMirror" icon="FolderSync" title="Local backup mirror">
     <p className="text-sm text-text-muted mb-3">Keep additional copies in a folder on the Docker host. DST never deletes these copies when the main backup files are pruned or deleted. Copying continues independently of this browser.</p>
-    {!mirror ? <p role="status" className="text-sm text-text-muted mb-3">Loading backup mirror…</p> : !mirror.available ? <p className="text-sm text-text-muted mb-3">From your DST installation folder on the Docker host, run <code>sh bin/dst-docker up</code> to prepare the backup folder, then refresh here. Copying stays off until you enable it.</p> : <div className="mb-3">
+    {!mirror ? <p role="status" className="text-sm text-text-muted mb-3">Loading backup mirror…</p> : !mirror.available ? <p className="text-sm text-text-muted mb-3">Reopen DST Docker using its normal host launcher to prepare the backup folder, then refresh here. Copying stays off until you enable it.</p> : <div className="mb-3">
       <span className="text-xs text-text-muted">Folder on the Docker host</span>
       <div className="flex items-center gap-2"><code className="text-xs break-all flex-1">{mirror.folder}</code><button className="btn-secondary" type="button" onClick={() => {
         void (navigator.clipboard ? navigator.clipboard.writeText(mirror.folder) : Promise.reject(new Error('Clipboard unavailable'))).then(() => setMessage('Folder path copied.')).catch(() => setMessage('Select and copy the folder path above.'))

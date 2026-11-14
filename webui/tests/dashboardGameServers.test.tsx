@@ -47,15 +47,15 @@ describe('Game Servers responsive layout', () => {
     expect(within(stacked as HTMLElement).getByText('6h23m')).toBeInTheDocument()
   })
 
-  it('preserves a fixed-layout desktop table without a minimum-width overflow trap', () => {
+  it('fits desktop columns to their contents and keeps phase labels on one line', () => {
     const { container } = render(<GameServerList servers={servers} />)
     const desktop = container.querySelector('[data-game-server-layout="table"]')
     const table = within(desktop as HTMLElement).getByRole('table')
 
-    expect(desktop).toHaveClass('min-w-0', 'md:block')
-    expect(desktop).not.toHaveClass('overflow-x-auto')
-    expect(table).toHaveClass('table-fixed', 'w-full')
+    expect(desktop).toHaveClass('min-w-0', 'md:block', 'overflow-x-auto')
+    expect(table).toHaveClass('table-auto', 'w-full')
     expect(table).not.toHaveClass('min-w-[540px]')
+    expect(table.querySelector('tbody tr td:nth-child(2)')).toHaveClass('whitespace-nowrap')
     for (const heading of ['Map', 'Phase', 'Ready', 'Players', 'Age']) {
       expect(within(table).getByRole('columnheader', { name: heading })).toBeInTheDocument()
     }
