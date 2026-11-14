@@ -120,6 +120,7 @@ class HostSessionTests(unittest.TestCase):
         events=self.sequence(maps=[{'component':'game-1','state':'running'}])
         self.assertEqual(events,['services.stop','status']);self.assertEqual(self.session.phase,'failed')
     def test_start_opens_interface_address_and_owns_only_one_session(self):
+        self.session.prepare_backup_mirror=Mock()
         self.session.compose=Mock();self.session.app_id=Mock(return_value='app')
         def docker(*args,**kwargs):
             if args[0]=='inspect':return json.dumps([{'State':{'Health':{'Status':'healthy'}}}])
@@ -276,7 +277,31 @@ class HostSessionTests(unittest.TestCase):
         self.assertIn(str(self.root/'https.compose.json'),self.session.config['composeFiles'])
         self.assertEqual(self.session.console_origin,'https://172.25.1.2:8443')
 
+    def test_desktop_start_prepares_and_retains_mirror_without_enabling_copying(self):
+        import mirror_config
+        folder=self.root/'backup-copies'
+        self.session.compose=Mock(return_value=json.dumps({'services':{'manager':{'volumes':[]}}}))
+        with patch.dict(host.os.environ,{'DST_BACKUP_MIRROR_DIR':str(folder)}):
+            self.session.prepare_backup_mirror()
+        override=self.root/'mirror.compose.json'
+        self.assertIn(str(override),self.session.config['composeFiles'])
+        saved=json.loads((self.root/'host-session/config.json').read_text())
+        self.assertIn(str(override),saved['composeFiles'])
+        self.assertEqual(json.loads((folder/mirror_config.MARKER).read_text())['composeProject'],'fixture')
+        canary=folder/'existing-copy';canary.write_text('preserve')
+        before=override.read_bytes()
+        with patch.dict(host.os.environ,{'DST_BACKUP_MIRROR_DIR':str(self.root/'different')}):
+            self.session.prepare_backup_mirror()
+        self.assertEqual(override.read_bytes(),before);self.assertEqual(canary.read_text(),'preserve')
+        self.assertEqual(self.session.config['composeFiles'].count(str(override)),1)
+        self.assertNotIn('backupMirror',saved)
+    def test_existing_custom_mirror_mount_is_preserved(self):
+        self.session.compose=Mock(return_value=json.dumps({'services':{'manager':{'volumes':[{'type':'bind','source':'/custom/copies','target':'/mirror'}]}}}))
+        self.session.prepare_backup_mirror()
+        self.assertFalse((self.root/'mirror.compose.json').exists())
+        self.assertEqual(self.session.config['composeFiles'],['/home/test/current/compose.yaml'])
     def ready_console(self):
+        self.session.prepare_backup_mirror=Mock()
         self.session.compose=Mock();self.session.app_id=Mock(return_value='app')
         self.session.docker=lambda *args,**kwargs:json.dumps([{'State':{'Health':{'Status':'healthy'}}}]) if args[0]=='inspect' else 'http://127.0.0.1:8088/'
 

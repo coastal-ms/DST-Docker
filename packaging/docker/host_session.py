@@ -10,6 +10,7 @@ import hashlib
 import json
 import ipaddress
 import os
+import pwd
 from pathlib import Path
 import shlex
 import signal
@@ -313,6 +314,24 @@ Write-Output $path
         finally:
             with self.lock:self.busy=False
             self.open_finished.set()
+    def prepare_backup_mirror(self):
+        import mirror_config
+        # Preserve an existing custom mount, including folders configured by
+        # the command-line launcher. Never silently replace a user's target.
+        effective=json.loads(self.compose('config','--format','json'))
+        volumes=effective.get('services',{}).get('manager',{}).get('volumes',[])
+        if any(row.get('target')=='/mirror' for row in volumes):return
+        override=self.root/'mirror.compose.json'
+        account=pwd.getpwuid(self.root.stat().st_uid)
+        if override.exists():
+            folder=json.loads(override.read_text(encoding='utf-8'))['x-dst-backup-mirror-folder']
+        else:
+            folder=os.environ.get('DST_BACKUP_MIRROR_DIR') or str(Path(account.pw_dir)/'.local/state/dst-docker/backups'/self.config['project'])
+        mirror_config.prepare(self.config['project'],folder,override,self.config['distribution'],owner=(account.pw_uid,account.pw_gid))
+        self.config['composeFiles']=list(dict.fromkeys([*self.config['composeFiles'],str(override)]))
+        config_path=self.directory/'config.json';previous=config_path.stat()
+        write_json(config_path,self.config)
+        os.chown(config_path,previous.st_uid,previous.st_gid)
     def start_console(self,open_browser):
         # Installer upgrades can replace the active release while this window
         # remains open. Reopen the saved current installation, not an old release.
@@ -324,6 +343,7 @@ Write-Output $path
         if tls.exists():files.append(str(tls))
         if host.exists():files.append(str(host))
         self.config['composeFiles']=files
+        self.prepare_backup_mirror()
         self.compose('up','-d','--no-build')
         deadline=time.monotonic()+120
         while time.monotonic()<deadline:

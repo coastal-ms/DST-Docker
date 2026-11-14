@@ -55,7 +55,7 @@ function GameServerRow({ s }: { s: BgGameServer }) {
       <td className="break-words py-1 pr-3 font-medium" title={s.sietchName ? `${s.sietchName} · ${mapLabel(s.map)}` : s.map}>
         {s.sietchName || mapLabel(s.map)}
       </td>
-      <td className={`break-words py-1 pr-3 ${healthClass(s.phase)}`}>{s.phase || '—'}</td>
+      <td className={`whitespace-nowrap py-1 pr-3 ${healthClass(s.phase)}`}>{s.phase || '—'}</td>
       <td className={`break-words py-1 pr-3 ${healthClass(s.ready)}`}>{s.ready || '—'}</td>
       <td className="py-1 pr-3 font-mono tabular-nums">{s.players || '0'}</td>
       <td className="py-1 font-mono tabular-nums text-text-dim">{s.age || '—'}</td>
@@ -110,15 +110,8 @@ export function GameServerList({ servers }: { servers: BgGameServer[] }) {
           />
         ))}
       </ul>
-      <div className="hidden min-w-0 md:block" data-game-server-layout="table">
-        <table className="w-full table-fixed text-sm leading-snug">
-          <colgroup>
-            <col className="w-[30%]" />
-            <col className="w-[20%]" />
-            <col className="w-[18%]" />
-            <col className="w-[16%]" />
-            <col className="w-[16%]" />
-          </colgroup>
+      <div className="hidden min-w-0 overflow-x-auto md:block" data-game-server-layout="table">
+        <table className="w-full table-auto text-sm leading-snug">
           <thead className="text-[10px] uppercase tracking-wider text-text-dim">
             <tr>
               <th className="pb-1 text-left">Map</th>

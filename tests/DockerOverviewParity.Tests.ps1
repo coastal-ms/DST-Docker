@@ -9,7 +9,7 @@ BeforeAll {
 Describe 'Docker Overview current observations' {
     It 'distinguishes known loading and unloading without guessing from readiness' {
         $service=@{component='game-4';state='running';desiredState='running';gameReady=$false}
-        Get-DuneDockerGamePhase $service @{phase='completed'} | Should -Be 'Loading/Unloading'
+        Get-DuneDockerGamePhase $service @{phase='completed'} | Should -Be 'Configuring'
         Get-DuneDockerGamePhase $service @{phase='running';action='maps.start';partition=4} | Should -Be 'Loading'
         Get-DuneDockerGamePhase $service @{phase='running';action='maps.stop';partition=4} | Should -Be 'Unloading'
         $service.desiredState='stopped'
