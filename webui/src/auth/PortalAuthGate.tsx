@@ -17,6 +17,12 @@ interface PortalAuthContextValue {
 
 const PortalAuthContext = createContext<PortalAuthContextValue | null>(null)
 const PlayerPortal = lazy(() => import('../pages/PlayerPortal'))
+const DockerFirstRun = lazy(() => import('../pages/docker/DockerFirstRun'))
+
+function ServerSetupGate({ children, canSetup = true }: { children: ReactNode; canSetup?: boolean }) {
+  if (import.meta.env.VITE_DST_EDITION !== 'docker') return <>{children}</>
+  return <Suspense fallback={<p role="status">Checking your server setup…</p>}><DockerFirstRun canSetup={canSetup}>{children}</DockerFirstRun></Suspense>
+}
 
 export function usePortalAuth() {
   return useContext(PortalAuthContext)
@@ -226,7 +232,7 @@ export function PortalAuthGate({ children }: { children: ReactNode }) {
         <button className="btn-secondary mt-4" onClick={() => void refresh()}>Check again</button>
       </AuthFrame>
   }
-  if (!status.accountLoginEnabled) return <>{children}</>
+  if (!status.accountLoginEnabled) return <ServerSetupGate>{children}</ServerSetupGate>
   if (!status.authenticated) return <Login onSuccess={setStatus} />
   if (status.mustChangePassword) {
     return <ForcedPasswordChange username={status.account?.username ?? ''} onSuccess={() => void refresh()} />
@@ -238,6 +244,6 @@ export function PortalAuthGate({ children }: { children: ReactNode }) {
   return <PortalAuthContext.Provider value={{ status, logout }}>
     {status.account?.role === 'player'
       ? <Suspense fallback={<p role="status">Loading Player Portal…</p>}><PlayerPortal /></Suspense>
-      : children}
+      : <ServerSetupGate canSetup={status.account?.role === 'owner'}>{children}</ServerSetupGate>}
   </PortalAuthContext.Provider>
 }
