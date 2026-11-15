@@ -81,6 +81,10 @@
 .first-run dd { margin: 0; overflow-wrap: anywhere; }
 .first-run footer { max-width: 1800px; margin: 30px auto 4px; text-align: center; color: var(--color-text-dim); font-size: 12px; }
 .first-run input:disabled { opacity: .65; }
+.first-run-network { margin: 0 0 22px; padding: 14px 16px; border: 1px solid var(--color-border); border-radius: 8px; }
+.first-run-network p { margin: 0; font-size: 13px; }
+.first-run-network strong { color: var(--color-text); }
+.first-run-network button { margin-top: 12px; font-size: 13px; }
 .first-run-loading { grid-template-columns: minmax(0, 1fr); max-width: 900px; }
 .first-run-loading .first-run-card { min-height: 260px; }
 @media (max-width: 900px) {

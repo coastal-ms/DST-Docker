@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { useNavigate } from '../../router'
+import { api } from '../../api/client'
 import { prepareFirstWorld, readSetup, setupComplete } from './firstRun'
 import type { SetupState } from './DockerSetup'
 import './firstRun.css'
@@ -59,6 +60,12 @@ function FirstWorld({ initial, onFinish }: { initial: SetupState; onFinish: () =
   const [region, setRegion] = useState(initial.profile?.region ?? 'North America')
   const [address, setAddress] = useState(initial.profile?.address ?? '')
   const [access, setAccess] = useState<'private' | 'public'>(!initial.profile || isPrivateAddress(initial.profile.address) ? 'private' : 'public')
+  const [detectedIp, setDetectedIp] = useState('')
+  const [detecting, setDetecting] = useState(false)
+  const [detectionError, setDetectionError] = useState('')
+  const [detectionAttempt, setDetectionAttempt] = useState(0)
+  const accessRef = useRef(access)
+  const addressEdited = useRef(!!initial.profile?.address)
   const [gamePort, setGamePort] = useState(String(initial.profile?.gamePortBase ?? 7777))
   const [port, setPort] = useState(String(initial.database?.port ?? 18932))
   const [token, setToken] = useState('')
@@ -70,6 +77,27 @@ function FirstWorld({ initial, onFinish }: { initial: SetupState; onFinish: () =
   const locked = useRef(false)
   useEffect(() => () => controller.current?.abort(), [])
   useEffect(() => { document.getElementById('first-run-title')?.focus() }, [step])
+  useEffect(() => {
+    if (step !== 2) return
+    const request = new AbortController()
+    setDetecting(true); setDetectionError('')
+    void api<{ dockerIp?: string }>('/api/docker/network', { signal: request.signal }).then(network => {
+      if (request.signal.aborted) return
+      if (!network.dockerIp || !isPrivateAddress(network.dockerIp)) throw new Error('No private Docker-host IPv4 address was detected.')
+      setDetectedIp(network.dockerIp)
+      if (accessRef.current === 'private' && !addressEdited.current) setAddress(network.dockerIp)
+    }).catch(() => {
+      if (!request.signal.aborted) setDetectionError('Could not detect the Docker host IP. Retry detection or enter the address below.')
+    }).finally(() => { if (!request.signal.aborted) setDetecting(false) })
+    return () => request.abort()
+  }, [step, detectionAttempt])
+  function chooseAccess(value: 'private' | 'public') {
+    accessRef.current = value
+    setAccess(value); setError('')
+    // Only replace an automatically supplied address. A typed or saved address
+    // belongs to the user, including an intentional empty field.
+    if (!addressEdited.current) setAddress(value === 'private' ? detectedIp : '')
+  }
   // Observing progress never starts or retries server operations.
   useEffect(() => {
     if (busy || step === 7) return
@@ -144,9 +172,14 @@ function FirstWorld({ initial, onFinish }: { initial: SetupState; onFinish: () =
           <p>Choose how your world appears and the address your players will use to connect.</p>
           <fieldset disabled={state.partitionsPrepared}>
             <label>World name<input required maxLength={50} pattern=".*\S.*" value={name} onChange={event => setName(event.target.value)} /></label>
-            <label>Player access<select value={access} onChange={event => { setAccess(event.target.value as 'private' | 'public'); setError('') }}><option value="private">Private / LAN</option><option value="public">Public / External</option></select></label>
+            <label>Player access<select value={access} onChange={event => chooseAccess(event.target.value as 'private' | 'public')}><option value="private">Private / LAN</option><option value="public">Public / External</option></select></label>
+            <div className="first-run-network" role="status">
+              {detectedIp && <p>Detected Docker IP: <strong>{detectedIp}</strong></p>}
+              {detecting && <p>Detecting Docker host IP…</p>}
+              {detectionError && <><p>{detectionError}</p><button type="button" onClick={() => setDetectionAttempt(value => value + 1)}>Retry IP detection</button></>}
+            </div>
             <div className="first-run-fields"><label>Region<select value={region} onChange={event => setRegion(event.target.value)}>{['Asia', 'Europe', 'North America', 'Oceania', 'South America'].map(item => <option key={item}>{item}</option>)}</select></label>
-              <label>Server address<input aria-label="Server address" aria-describedby="setup-address-help" required pattern=".*\S.*" placeholder={access === 'private' ? 'Docker host’s private IPv4 address' : 'Public IP address or hostname'} value={address} onChange={event => { setAddress(event.target.value); setError('') }} /><small id="setup-address-help">{access === 'private' ? 'Use the private Docker-host address your players can reach. A public IP is not required.' : 'Use your public IP or hostname for outside players. Router port forwarding may be required.'}</small></label></div>
+              <label>Server address<input aria-label="Server address" aria-describedby="setup-address-help" required pattern=".*\S.*" placeholder={access === 'private' ? 'Docker host’s private IPv4 address' : 'Public IP address or hostname'} value={address} onChange={event => { addressEdited.current = true; setAddress(event.target.value); setError('') }} /><small id="setup-address-help">{access === 'private' ? 'The detected Docker IP is filled in automatically. You can edit it if your players use another private address.' : 'Use your public IP or hostname for outside players. Router port forwarding may be required.'}</small></label></div>
           </fieldset>
           {state.partitionsPrepared && <p className="first-run-saved">✓ Your saved world details will be kept.</p>}
         </>}

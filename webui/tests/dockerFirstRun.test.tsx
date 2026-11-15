@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen } from '@testing-library/react'
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, expect, it, vi } from 'vitest'
 import DockerFirstRun from '../src/pages/docker/DockerFirstRun'
@@ -12,10 +12,11 @@ const fresh = (): SetupState => ({ phase: 'new', assets: { state: 'downloaded', 
 const prepared = (): SetupState => ({ ...fresh(), profile: { name: 'Test world', region: 'Europe', address: 'example.test', gamePortBase: 7777 }, partitionsPrepared: true, services: ['director', 'gateway', 'text-router', 'game-1'].map(component => ({ component, phase: 'prepared', state: 'exited' })) })
 const details = { name: 'Test world', region: 'Europe', address: 'example.test', gamePortBase: 7777, port: 18932, token: 'synthetic-service-token' }
 afterEach(() => { cleanup(); vi.clearAllMocks(); vi.useRealTimers(); window.history.replaceState({}, '', '/') })
-function mockWorld(initial = fresh(), fail?: string) {
+function mockWorld(initial = fresh(), fail?: string, network = '') {
   let current = initial
   const actions: string[] = []
   vi.mocked(api).mockImplementation(async (_path, init) => {
+    if (_path === '/api/docker/network') return { dockerIp: network } as never
     if (init?.method === 'POST') {
       const request = JSON.parse(init.body as string)
       actions.push(request.action)
@@ -177,6 +178,71 @@ it('does not label a private address as Public / External', async () => {
   await user.click(screen.getByRole('button', { name: 'Next', exact: true }))
   expect(screen.getByRole('alert')).toHaveTextContent('Choose Private / LAN')
   expect(actions).toEqual([])
+})
+it('shows and fills the detected Docker IP for a fresh Private / LAN world', async () => {
+  const actions = mockWorld(fresh(), undefined, '172.25.199.100'); renderGate()
+  const user = userEvent.setup()
+  await worldForm(user)
+  await waitFor(() => expect(screen.getByLabelText('Server address')).toHaveValue('172.25.199.100'))
+  expect(screen.getByText('172.25.199.100', { exact: true })).toBeVisible()
+  expect(actions).toEqual([])
+  await user.click(screen.getByRole('button', { name: 'Next', exact: true }))
+  await user.type(screen.getByLabelText('Funcom service token'), details.token)
+  await user.click(screen.getByRole('button', { name: 'Next', exact: true }))
+  await user.click(screen.getByRole('button', { name: 'Next', exact: true }))
+  expect(screen.getByText('172.25.199.100', { exact: true })).toBeInTheDocument()
+  await user.click(screen.getByRole('button', { name: 'Prepare server', exact: true }))
+  await screen.findByRole('heading', { name: 'Your world is ready' })
+  const configured = vi.mocked(api).mock.calls.find(([, init]) => init?.method === 'POST' && JSON.parse(init.body as string).action === 'world.configure')
+  expect(JSON.parse(configured![1]!.body as string).profile.address).toBe('172.25.199.100')
+})
+it('preserves an address typed before detection finishes', async () => {
+  mockWorld()
+  const setupApi = vi.mocked(api).getMockImplementation()!
+  let finish!: (value: never) => void
+  vi.mocked(api).mockImplementation((path, init) => path === '/api/docker/network' ? new Promise(resolve => { finish = resolve }) : setupApi(path, init))
+  renderGate()
+  const user = userEvent.setup()
+  await worldForm(user)
+  await user.type(screen.getByLabelText('Server address'), '192.168.1.50')
+  await act(async () => { finish({ dockerIp: '172.25.199.100' } as never) })
+  expect(screen.getByText('172.25.199.100', { exact: true })).toBeInTheDocument()
+  expect(screen.getByLabelText('Server address')).toHaveValue('192.168.1.50')
+})
+it('does not fill a private IP into Public / External when detection completes late', async () => {
+  mockWorld()
+  const setupApi = vi.mocked(api).getMockImplementation()!
+  let finish!: (value: never) => void
+  vi.mocked(api).mockImplementation((path, init) => path === '/api/docker/network' ? new Promise(resolve => { finish = resolve }) : setupApi(path, init))
+  renderGate()
+  const user = userEvent.setup()
+  await worldForm(user)
+  await user.selectOptions(screen.getByLabelText('Player access'), 'public')
+  await act(async () => { finish({ dockerIp: '172.25.199.100' } as never) })
+  expect(screen.getByLabelText('Server address')).toHaveValue('')
+  await user.selectOptions(screen.getByLabelText('Player access'), 'private')
+  expect(screen.getByLabelText('Server address')).toHaveValue('172.25.199.100')
+})
+it('preserves a saved address when another Docker IP is detected', async () => {
+  mockWorld({ ...fresh(), profile: { ...prepared().profile!, address: '192.168.1.50' } }, undefined, '172.25.199.100')
+  renderGate()
+  const user = userEvent.setup()
+  await worldForm(user)
+  await screen.findByText('172.25.199.100', { exact: true })
+  expect(screen.getByLabelText('Server address')).toHaveValue('192.168.1.50')
+})
+it('offers retry after detection fails and still accepts a manually supplied address', async () => {
+  mockWorld(); renderGate()
+  const user = userEvent.setup()
+  await worldForm(user)
+  const retry = await screen.findByRole('button', { name: 'Retry IP detection' })
+  mockWorld(fresh(), undefined, '172.25.199.100')
+  await user.click(retry)
+  await waitFor(() => expect(screen.getByLabelText('Server address')).toHaveValue('172.25.199.100'))
+  await user.clear(screen.getByLabelText('Server address'))
+  await user.type(screen.getByLabelText('Server address'), '192.168.1.50')
+  await user.click(screen.getByRole('button', { name: 'Next', exact: true }))
+  expect(screen.getByRole('heading', { name: 'Connect to Funcom' })).toBeInTheDocument()
 })
 it('keeps failed preparation on the preparation stage without retrying automatically', async () => {
   const actions = mockWorld(fresh(), 'database.initialize'); renderGate()
