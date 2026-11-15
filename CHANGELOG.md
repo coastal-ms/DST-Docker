@@ -1,5 +1,10 @@
 # DST Docker changelog
 
+## [1.0.8]
+
+- Guide fresh installations through numbered setup stages with Back/Next controls and a settings review before preparing the server.
+- Keep the management portal hidden until setup finishes, with saved progress and clear errors when preparation needs attention.
+
 ## [1.0.7]
 
 - Recover SteamCMD 0x6 download failures automatically with manifest cleanup and bounded retries.
