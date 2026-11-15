@@ -26,13 +26,15 @@ You need an x86_64 Linux environment and a Funcom self-host service token. The i
 
 Run the commands below in **Ubuntu or your Linux terminal**, where the prompt looks like `name@host:~$`. A Windows PowerShell prompt starts with `PS`; GitHub CLI installed or signed in there is separate from GitHub CLI inside Ubuntu.
 
+These Ubuntu/Debian commands require an account with `sudo` access. If your prompt shows you are logged in as `root`, omit `sudo` from the package commands.
+
 ### Private repository: prepare GitHub CLI first
 
-For the current private repository, install GitHub CLI and the download tools **inside Ubuntu**:
+For the current private repository, install Git, GitHub CLI, HTTPS certificates and the download tool **inside Ubuntu before signing in**:
 
 ```sh
 sudo apt update
-sudo apt install -y gh ca-certificates curl
+sudo apt install -y git gh ca-certificates curl
 gh auth login --hostname github.com --git-protocol https --web
 ```
 
