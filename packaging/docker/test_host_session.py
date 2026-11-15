@@ -15,6 +15,8 @@ class HostSessionTests(unittest.TestCase):
         self.temp=tempfile.TemporaryDirectory();self.root=Path(self.temp.name);(self.root/'host-session').mkdir()
         (self.root/'host-session/config.json').write_text(json.dumps({'project':'fixture','distribution':'Ubuntu','source':'/home/test/current','composeFiles':['/home/test/current/compose.yaml']}))
         self.session=host.HostSession(self.root)
+        self.session.windows_console_reachable=Mock(side_effect=lambda origin: '127.0.0.1' not in origin)
+        self.session.network_info=Mock(return_value={'dockerIp':'192.168.1.5','wslIp':'172.25.1.2','networkingMode':'nat'})
         self.state={'projectId':'world','desiredState':'running','operation':{'phase':'completed'},'services':[],'backups':[]}
     def tearDown(self):self.temp.cleanup()
     def test_browser_choice_survives_new_session_and_config_refresh(self):
@@ -73,6 +75,38 @@ class HostSessionTests(unittest.TestCase):
         self.session.containers=Mock(return_value=[])
         with patch.object(host,'running_distros',return_value=['Ubuntu','Other']):
             self.assertEqual(self.session.preflight(),self.state)
+    def test_network_restart_rejects_other_distribution_before_stopping_games(self):
+        (self.session.directory/'lan-settings.json').write_text('{}')
+        self.session.manager=Mock()
+        with patch.object(host,'running_distros',return_value=['Ubuntu','Other']):
+            with self.assertRaisesRegex(ValueError,'Close other'):self.session.preflight()
+        self.session.manager.assert_not_called()
+    def test_saved_network_configuration_uses_global_shutdown_only_when_alone(self):
+        (self.session.directory/'lan-settings.json').write_text('{}')
+        events=self.sequence()
+        self.assertEqual(events[-1],[host.WSL,'--shutdown'])
+    def test_new_distribution_prevents_global_shutdown(self):
+        (self.session.directory/'lan-settings.json').write_text('{}')
+        self.session.manager=Mock(return_value={'operation':{'id':'op','phase':'completed'},'projectId':'world','services':[]})
+        self.session.containers=lambda:[];self.session.select_owned=lambda *_:[]
+        with patch.object(host,'running_distros',return_value=['Ubuntu','Other']),patch.object(host.time,'sleep'),patch.object(host,'run') as command:
+            self.session.shutdown(self.state)
+        command.assert_not_called()
+        self.assertEqual(self.session.phase,'failed')
+    def test_private_reconciliation_preserves_resume_intent(self):
+        (self.session.directory/'lan-settings.json').write_text(json.dumps({'mode':'bridged'}))
+        host.write_json(self.session.directory/'resume.json',{'world':'world','resume':True,'stopOperation':'old'})
+        self.session.network_info=Mock(return_value={'networkingMode':'bridged','dockerIp':'192.168.23.220'})
+        self.session.manager=Mock(side_effect=[{'profile':{'address':'172.25.1.2'}},{'operation':{'id':'new'}},{'operation':{'id':'new','phase':'completed'}}])
+        self.session.reconcile_private_address()
+        self.session.manager.assert_any_call('network.set',mode='private',address='192.168.23.220',expectedAddress='172.25.1.2')
+        self.assertEqual(json.loads((self.session.directory/'resume.json').read_text()),{'world':'world','resume':True,'stopOperation':'new'})
+    def test_public_address_is_preserved_when_host_lan_changes(self):
+        (self.session.directory/'lan-settings.json').write_text(json.dumps({'mode':'bridged'}))
+        self.session.network_info=Mock(return_value={'networkingMode':'bridged','dockerIp':'192.168.23.220'})
+        self.session.manager=Mock(return_value={'profile':{'address':'8.8.8.8'}})
+        self.session.reconcile_private_address()
+        self.session.manager.assert_called_once_with('status')
     def test_foreign_workload_is_rejected(self):
         with self.assertRaisesRegex(ValueError,'Another Docker'):self.session.select_owned([{'Id':'foreign','Config':{'Labels':{}}}],'world')
     def test_only_owned_installation_world_and_settings_are_selected(self):
@@ -140,6 +174,32 @@ class HostSessionTests(unittest.TestCase):
 
     def test_unknown_request_cannot_execute_a_command(self):
         with self.assertRaises(ValueError):self.session.request({'action':'exec','command':'arbitrary'})
+
+    def test_loopback_read_never_starts_a_route_change(self):
+        with patch.object(host,'windows_script',return_value='{"publicIp":"8.8.4.4","target":"192.168.23.219","multiple":false}'),patch.object(host.threading,'Thread') as thread:
+            value=self.session.request({'action':'loopback.get','publicIp':'8.8.4.4'})
+        self.assertEqual(value['target'],'192.168.23.219');thread.assert_not_called()
+
+    def test_loopback_change_requires_confirmation_before_reading_windows(self):
+        with patch.object(host,'windows_script') as windows:
+            with self.assertRaisesRegex(ValueError,'Confirm'):self.session.request({'action':'loopback.set','publicIp':'8.8.4.4','target':'192.168.23.106','expectedTarget':'192.168.23.219'})
+        windows.assert_not_called()
+
+    def test_loopback_stale_or_identical_target_never_starts_elevation(self):
+        request={'action':'loopback.set','publicIp':'8.8.4.4','target':'192.168.23.106','expectedTarget':'192.168.23.219','confirmation':'CHANGE LOOPBACK TARGET'}
+        with patch.object(host,'windows_script',return_value='{"publicIp":"8.8.4.4","target":"192.168.23.218","multiple":false}'),patch.object(host.threading,'Thread') as thread:
+            with self.assertRaisesRegex(ValueError,'changed'):self.session.request(request)
+            self.session.request({**request,'expectedTarget':'192.168.23.218','target':'192.168.23.218'})
+        thread.assert_not_called()
+
+    def test_failed_loopback_elevation_records_error_without_restarting_games(self):
+        operation={'id':'route','phase':'running'}
+        self.session.manager=Mock()
+        with patch('wsl_loopback.apply',side_effect=ValueError('Windows approval cancelled')):
+            self.session.change_loopback({'publicIp':'8.8.4.4','target':'192.168.23.106'},operation)
+        result=json.loads((self.session.directory/'loopback-operation.json').read_text())
+        self.assertEqual(result['phase'],'failed');self.assertEqual(result['error'],'Windows approval cancelled')
+        self.session.manager.assert_not_called();self.assertFalse(self.session.busy)
 
     def test_owner_recovery_lists_then_resets_exact_owner_after_confirmation(self):
         self.session.compose=Mock(side_effect=['Enabled\tOwner With Spaces','One-time password: synthetic-only'])
@@ -304,6 +364,32 @@ class HostSessionTests(unittest.TestCase):
         self.session.prepare_backup_mirror=Mock()
         self.session.compose=Mock();self.session.app_id=Mock(return_value='app')
         self.session.docker=lambda *args,**kwargs:json.dumps([{'State':{'Health':{'Status':'healthy'}}}]) if args[0]=='inspect' else 'http://127.0.0.1:8088/'
+
+    def test_http_console_prefers_windows_loopback_when_wsl_interface_is_blocked(self):
+        self.ready_console();self.session.windows_console_reachable=Mock(return_value=True)
+        self.session.open_browser=Mock()
+        with patch.object(host,'run',return_value=Mock(stdout=b'172.25.1.2')):
+            self.session.start_console(True)
+        self.assertEqual(self.session.console_origin,'http://127.0.0.1:8088')
+        self.session.windows_console_reachable.assert_called_once_with('http://127.0.0.1:8088')
+        self.session.open_browser.assert_called_once()
+
+    def test_unreachable_windows_console_never_reports_available_or_opens_a_dead_url(self):
+        self.ready_console();self.session.windows_console_reachable=Mock(return_value=False)
+        self.session.open_browser=Mock()
+        with patch.object(host,'run',return_value=Mock(stdout=b'172.25.1.2')),redirect_stdout(io.StringIO()):
+            self.session.recover_console(True)
+        self.assertEqual(self.session.phase,'failed')
+        self.assertIn('Windows cannot reach',self.session.message)
+        self.session.open_browser.assert_not_called()
+
+    def test_windows_console_probe_checks_http_without_proxy_or_redirect_and_has_a_timeout(self):
+        with patch.object(host,'windows_script',return_value='ready') as script:
+            self.assertTrue(host.HostSession.windows_console_reachable(self.session,'http://127.0.0.1:8088'))
+        command=script.call_args.args[0]
+        self.assertIn('$request.Proxy=$null',command)
+        self.assertIn('$request.Timeout=3000',command)
+        self.assertIn('$request.AllowAutoRedirect=$false',command)
 
     def test_accepted_world_start_keeps_resume_until_completion(self):
         self.ready_console();path=self.root/'host-session/resume.json'

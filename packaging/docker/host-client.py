@@ -4,7 +4,7 @@ import socket
 import sys
 try:
     request=json.loads(sys.stdin.buffer.read(4097))
-    if request.get('action') not in {'status','shortcut','shutdown','memory.get','memory.set'}:raise ValueError()
+    if request.get('action') not in {'status','shortcut','shutdown','memory.get','memory.set','network.get','network.settings.get','network.settings.set','loopback.get','loopback.set'}:raise ValueError()
     with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as connection:
         connection.settimeout(15);connection.connect('/host-control/host.sock')
         connection.sendall(json.dumps(request).encode()+b'\n')

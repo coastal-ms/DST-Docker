@@ -181,6 +181,28 @@ Register-DuneRoute -Method GET -Path '/api/docker/resources' -Handler {
     Write-DuneJson -Response $res -Body $reply.data
 }
 
+Register-DuneRoute -Method GET -Path '/api/docker/network/public-ip' -Handler {
+    param($req,$res,$routeParams,$body)
+    if($env:DST_HOSTING_BACKEND -ne 'docker'){Write-DuneError -Response $res -Status 404 -Message 'Docker hosting is not enabled.';return}
+    $address=Get-DunePublicIp
+    if(-not (Test-DunePublicIPv4 -Ip $address).ok){Write-DuneError -Response $res -Status 503 -Message 'Could not detect a public IPv4 address. Enter it manually or retry.';return}
+    Write-DuneJson -Response $res -Body @{publicIp=$address}
+}
+
+Register-DuneRoute -Method GET -Path '/api/docker/network' -Handler {
+    param($req,$res,$routeParams,$body)
+    if($env:DST_HOSTING_BACKEND -ne 'docker'){Write-DuneError -Response $res -Status 404 -Message 'Docker hosting is not enabled.';return}
+    $addresses=Get-DuneDockerNetworkAddresses
+    if(Test-DuneDockerWslHost){
+        $publicIp=[string]$req.QueryString['publicIp']
+        if($publicIp -and -not (Test-DunePublicIPv4 -Ip $publicIp).ok){Write-DuneError -Response $res -Status 400 -Message 'Choose a public IPv4 address for loopback status.';return}
+        $reply=Invoke-DuneDockerManager -HostSession -Request @{action='network.get';publicIp=$publicIp}
+        if(-not $reply.ok){Write-DuneError -Response $res -Status 503 -Message 'Open DST Docker using its desktop icon to detect the Docker host address.';return}
+        $addresses=$reply.data
+    }
+    Write-DuneJson -Response $res -Body $addresses
+}
+
 Register-DuneRoute -Method PUT -Path '/api/docker/resources' -Handler {
     param($req,$res,$routeParams,$body)
     if($env:DST_HOSTING_BACKEND -ne 'docker'){Write-DuneError -Response $res -Status 404 -Message 'Docker hosting is not enabled.';return}
@@ -201,10 +223,13 @@ Register-DuneRoute -Method POST -Path '/api/docker/setup' -Handler {
     param($req, $res, $routeParams, $body)
     if ($env:DST_HOSTING_BACKEND -ne 'docker') { Write-DuneError -Response $res -Status 404 -Message 'Docker hosting is not enabled.'; return }
     $action = [string]$body.action
-    if ($action -notin @('database.create','database.initialize','database.migrate','database.start','database.stop','world.configure','credentials.save','connections.prepare','services.prepare','services.start','services.stop','games.refresh-adapters','backups.create','backups.verify','backups.restore','backups.cleanup.recover','backups.export','backups.schedule.recover','backups.mirror.set','backups.mirror.sync','backups.mirror.recover','backups.mirror.cancel','world-restart.apply','world-restart.recover','world-restart.rollback','world-restart.research-audit','world-restart.research','world-restart.research-recover')) {
+    if ($action -notin @('network.set','database.create','database.initialize','database.migrate','database.start','database.stop','world.configure','credentials.save','connections.prepare','services.prepare','services.start','services.stop','games.refresh-adapters','backups.create','backups.verify','backups.restore','backups.cleanup.recover','backups.export','backups.schedule.recover','backups.mirror.set','backups.mirror.sync','backups.mirror.recover','backups.mirror.cancel','world-restart.apply','world-restart.recover','world-restart.rollback','world-restart.research-audit','world-restart.research','world-restart.research-recover')) {
         Write-DuneError -Response $res -Status 400 -Message 'Unsupported setup action.'; return
     }
     $request = @{action=$action}
+    if($action -eq 'network.set' -and $body.mode -ceq 'private' -and [string]$body.address -cne [string](Get-DuneDockerNetworkAddresses).dockerIp){
+        Write-DuneError -Response $res -Status 400 -Message 'Private access must use the detected Docker address. Assign a different IP in Docker LAN address first.';return
+    }
     if ($action -in @('world-restart.apply','world-restart.rollback','world-restart.research')) { $request.confirmation=[string]$body.confirmation }
     if ($action -eq 'world-restart.research') {
         if ($body.characterName -isnot [string] -or $body.characterName.Length -gt 200 -or $body.funcomId -isnot [string] -or $body.funcomId.Length -gt 200 -or @($body.itemKeys).Count -notin 1..500 -or @($body.itemKeys | Where-Object {$_ -isnot [string] -or $_.Length -gt 200}).Count) {
@@ -212,7 +237,7 @@ Register-DuneRoute -Method POST -Path '/api/docker/setup' -Handler {
         }
         $request.characterName=$body.characterName; $request.funcomId=$body.funcomId; $request.itemKeys=@($body.itemKeys)
     }
-    if ($action -in @('services.stop','backups.restore','games.refresh-adapters')) {
+    if ($action -in @('network.set','services.stop','backups.restore','games.refresh-adapters')) {
         $description = if($action -eq 'backups.restore'){'restoring the battlegroup database'}else{'stopping the battlegroup'}
         if (-not (Test-DuneDisruptiveActionGuard -Req $req -Res $res -Action $description)) { return }
     }
@@ -224,6 +249,7 @@ Register-DuneRoute -Method POST -Path '/api/docker/setup' -Handler {
     if ($action -eq 'backups.mirror.set') { $request.enabled=$body.enabled }
     if ($action -eq 'credentials.save') { $request.token=[string]$body.token }
     if ($action -eq 'world.configure') { $request.profile=$body.profile }
+    if ($action -eq 'network.set') { $request.mode=$body.mode; $request.address=$body.address; $request.expectedAddress=$body.expectedAddress }
     if ($action -in @('backups.verify','backups.restore','backups.export')) { $request.backupId=[string]$body.backupId }
     if ($action -eq 'backups.restore') { $request.confirmation=[string]$body.confirmation }
     $result = Invoke-DuneDockerManager -Request $request
@@ -259,10 +285,13 @@ Register-DuneRoute -Method POST -Path '/api/docker/backup-import' -StreamBody -H
 Register-DuneRoute -Method GET -Path '/api/docker/host' -Handler {
     param($req,$res,$routeParams,$body)
     try {
-        $action=if($req.QueryString['detail'] -ceq 'memory'){'memory.get'}else{'status'}
-        $reply=Invoke-DuneDockerManager -HostSession -Request @{action=$action}
+        $action=switch -CaseSensitive ($req.QueryString['detail']) {'memory' {'memory.get'} 'network' {'network.settings.get'} 'loopback' {'loopback.get'} default {'status'}}
+        if($action -eq 'loopback.get' -and -not (Test-DuneDockerWslHost)){
+            Write-DuneJson -Response $res -Body @{available=$false;platform='linux';message='Same-PC loopback settings require a Windows WSL host.'};return
+        }
+        $reply=Invoke-DuneDockerManager -HostSession -Request @{action=$action;publicIp=$req.QueryString['publicIp']}
         if(-not $reply.ok){
-            $platform=if($env:DST_HOST_PLATFORM -ceq 'wsl'){'wsl'}else{'linux'}
+            $platform=if(Test-DuneDockerWslHost){'wsl'}else{'linux'}
             Write-DuneJson -Response $res -Body @{available=$false;platform=$platform;message=$reply.error};return
         }
         Write-DuneJson -Response $res -Body $reply.data
@@ -271,9 +300,9 @@ Register-DuneRoute -Method GET -Path '/api/docker/host' -Handler {
 Register-DuneRoute -Method POST -Path '/api/docker/host' -Handler {
     param($req,$res,$routeParams,$body)
     try {
-        if($body -isnot [hashtable] -or $body.action -cnotin @('shortcut','shutdown','memory.set')){throw 'Choose a supported host action.'}
+        if($body -isnot [hashtable] -or $body.action -cnotin @('shortcut','shutdown','memory.set','network.settings.set','loopback.set')){throw 'Choose a supported host action.'}
         if($body.action -ceq 'memory.set' -and (-not $body.ContainsKey('memoryGiB') -or ($null -ne $body.memoryGiB -and $body.memoryGiB -isnot [int] -and $body.memoryGiB -isnot [long]))){throw 'Choose a whole RAM limit in GiB or the WSL default.'}
-        $reply=Invoke-DuneDockerManager -HostSession -Request @{action=$body.action;confirmation=$body.confirmation;memoryGiB=$body.memoryGiB}
+        $reply=Invoke-DuneDockerManager -HostSession -Request @{action=$body.action;confirmation=$body.confirmation;memoryGiB=$body.memoryGiB;settings=$body.settings;publicIp=$body.publicIp;target=$body.target;expectedTarget=$body.expectedTarget}
         if(-not $reply.ok){throw $reply.error}
         Write-DuneJson -Response $res -Body $reply.data
     }catch{Write-DuneError -Response $res -Status 409 -Message $_.Exception.Message}

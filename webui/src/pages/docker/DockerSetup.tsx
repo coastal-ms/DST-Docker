@@ -28,7 +28,7 @@ export default function DockerSetup() {
   const [worldName, setWorldName] = useState('Dune Server')
   const [region, setRegion] = useState('North America')
   const [address, setAddress] = useState('127.0.0.1')
-  const [gamePortBase, setGamePortBase] = useState('28777')
+  const [gamePortBase, setGamePortBase] = useState('7777')
   const [editingWorld, setEditingWorld] = useState(false)
   function editWorld() {
     if (state?.profile) {

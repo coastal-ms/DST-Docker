@@ -2,6 +2,7 @@ import { Fragment, useEffect, useRef, useState, type ReactNode } from 'react'
 import { api, withOnlinePlayerGuard } from '../../api/client'
 import { mapLabel } from '../../util/mapLabel'
 import { MemoryBalancingControl } from '../../components/MemoryBalancingControl'
+import { CollapsibleCard } from '../../components/CollapsibleCard'
 import { Link } from '../../router'
 
 type Service = { component: string; state: string; gameReady?: boolean; players?: number; startedAt?: number; desiredState?: string; exitCode?: number }
@@ -168,6 +169,7 @@ export function DockerMapManagement({ legacyTools }: { legacyTools?: ReactNode }
   </section>
   return <div className="space-y-4">
     <div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="text-xl font-semibold">Maps &amp; memory</h2><p className="mt-1 text-sm text-text-muted">Manage map availability and memory.</p></div><div className="flex flex-wrap gap-2"><button type="button" className="btn-secondary" onClick={() => void load()}>Refresh</button></div></div>
+    {legacyTools && <div><button type="button" className="btn-secondary" aria-expanded={more} aria-controls="docker-additional-map-tools" onClick={() => setMore(value => !value)}>{more ? 'Hide additional map tools' : 'Additional map tools'}</button>{more && <div id="docker-additional-map-tools" className="mt-3">{legacyTools}</div>}</div>}
     {data && <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
       <div className="card p-4"><p className="text-xs text-text-muted">Host RAM</p><strong className="text-xl">{hostFresh ? `${gb(data.resources.host.memoryBytes - data.resources.host.availableBytes)} used` : 'Sample unavailable'}</strong><p className="text-xs text-text-muted">{hostFresh ? `${gb(data.resources.host.availableBytes)} available · ${gb(data.resources.host.memoryBytes)} total` : 'Refresh to read current availability'}</p></div>
       <div className="card p-4"><p className="text-xs text-text-muted">Maps using RAM</p><strong className="text-xl">{measured.length ? `${measured.length < working.length ? 'At least ' : ''}${gb(measured.reduce((sum, value) => sum + value, 0))}` : working.length ? 'Awaiting sample' : 'No maps running'}</strong><p className="text-xs text-text-muted">{measured.length} of {working.length} running maps measured</p></div>
@@ -177,7 +179,6 @@ export function DockerMapManagement({ legacyTools }: { legacyTools?: ReactNode }
     {data && <p className="text-xs text-text-muted" role="status">{fresh ? `Map samples updated ${sampleAge}s ago` : 'Map samples unavailable or stale'} · {data.memoryBalancingEnabled === false ? 'Classic map policy' : 'Empty dynamic maps can unload'} · {data.swapPolicy?.enabled ? `Swap policy: up to ${data.swapPolicy.perServerGiB} GiB per map` : 'Swap policy: Docker default allowance'}</p>}
     <details className="card p-4"><summary className="cursor-pointer font-semibold">Memory &amp; startup policy</summary><MemoryBalancingControl /><div className="mt-4 border-t border-border pt-3 text-sm"><strong>After a host restart</strong><p className="mt-1 text-text-muted">DST resumes maps saved as running. A stopped battlegroup stays stopped. Maps may load together. Startup checks their limits and keeps 2 GiB host headroom; the server budget also keeps {data?.resources.serviceReserveGiB ?? 2} GiB for supporting services.</p><p className="mt-2 text-text-muted">On demand follows player travel. Keep running maintains a warm map. Follow Overmap releases its warm setting after Overmap has been empty for one minute and this map has no players. Unknown occupancy does not qualify as empty.</p></div></details>
     <details className="rounded-lg border border-border p-3"><summary className="cursor-pointer text-sm">Choose when maps run</summary><div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">{Object.keys(modeNames).filter(mode => mode !== 'core').map(mode => <div key={mode} className="rounded-lg border border-border p-3"><strong>{modeNames[mode]}</strong><p className="mt-1 text-sm text-text-muted">{modeHelp[mode]}</p></div>)}</div></details>
-    <label className="block text-sm">Find a map<input className="map-management-input mt-1 w-full sm:max-w-md" type="search" value={query} onChange={event => setQuery(event.target.value)} placeholder="Map name" /></label>
     {loadError && <p role="alert" className="rounded-lg border border-danger/40 p-3 text-danger">{loadError}</p>}
     {pendingMemory && selectedMap?.map !== pendingMemory.map && <div className="flex flex-wrap items-center gap-3 rounded-lg border border-warning/40 p-3"><p>RAM allocation needs recovery: {mapLabel(pendingMemory.map)} → {gb(pendingMemory.bytes)} per partition. Some partitions may already have this limit.</p><button className="btn-secondary" disabled={busy || operationRunning} onClick={() => void update({ setting: 'memory', map: pendingMemory.map, memoryGiB: pendingMemory.bytes / GIB }, `${mapLabel(pendingMemory.map)} RAM allocation completed.`)}>Retry RAM allocation</button></div>}
     {data?.metadata.operation?.error && !operationBusy && <p role="alert" className="rounded-lg border border-danger/40 p-3 text-danger">Last server operation: {data.metadata.operation.error}</p>}
@@ -188,6 +189,8 @@ export function DockerMapManagement({ legacyTools }: { legacyTools?: ReactNode }
     {!data && !loadError && <p role="status">Loading maps and memory…</p>}
     {data && !maps.length && <p>Complete Server Setup to prepare the map catalogue.</p>}
     {data && maps.length > 0 && !maps.some(row => `${row.map} ${mapLabel(row.map)} ${row.partitions.join(' ')}`.toLowerCase().includes(query.toLowerCase())) && <p>No maps match this search.</p>}
+    <CollapsibleCard id="docker-map-catalogue" title="Map list" icon="Map" summary={`${maps.length} maps`} bodyClassName="px-5 pb-5 space-y-4">
+    <label className="block text-sm">Find a map<input className="map-management-input mt-1 w-full sm:max-w-md" type="search" value={query} onChange={event => setQuery(event.target.value)} placeholder="Map name" /></label>
     <div id="docker-map-list" className="scroll-mt-20 overflow-x-auto rounded-lg border border-border"><table className="w-full text-left text-sm"><thead className="bg-surface text-text-muted"><tr><th className="p-3" aria-sort={sortDirection('map')}>{sortButton('map', 'Map')}</th><th className="p-3" aria-sort={sortDirection('status', 'players')}>{sortButton('status', 'Status')} / {sortButton('players', 'Players')}</th><th className="hidden p-3 md:table-cell" aria-sort={sortDirection('mode')}>{sortButton('mode', 'Mode')}</th><th className="hidden p-3 md:table-cell" aria-sort={sortDirection('ram', 'swap')}>{sortButton('ram', 'RAM')} / {sortButton('swap', 'Swap')}</th><th className="hidden p-3 md:table-cell">Actions</th></tr></thead><tbody>{visibleMaps.map(row => {
       const rows = row.partitions.map(partition => services.find(service => service.component === `game-${partition}`))
       const running = rows.filter(service => service?.state === 'running').length
@@ -213,6 +216,6 @@ export function DockerMapManagement({ legacyTools }: { legacyTools?: ReactNode }
     })}</tbody></table></div>
 
     <p className="text-xs text-text-muted">Memory figures use fresh Docker samples and exclude reclaimable file cache. A saved limit is a ceiling, not RAM already consumed. Swap is emergency disk-backed memory; it does not enlarge the physical RAM budget.</p>
-    {legacyTools && <div><button type="button" className="btn-secondary" onClick={() => setMore(value => !value)}>{more ? 'Hide additional map tools' : 'Additional map tools'}</button>{more && <div className="mt-3">{legacyTools}</div>}</div>}
+    </CollapsibleCard>
   </div>
 }

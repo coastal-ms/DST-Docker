@@ -3,6 +3,11 @@ BeforeAll {
     Import-DstLib 'DockerRoutes.ps1'
 }
 Describe 'Docker adapter routing boundary' {
+    It 'exposes only read-only public IP discovery at the exact network route' {
+        Test-DuneDockerRouteQualified -Method GET -Path '/api/docker/network/public-ip' | Should -BeTrue
+        Test-DuneDockerRouteQualified -Method POST -Path '/api/docker/network/public-ip' | Should -BeFalse
+        Test-DuneDockerRouteQualified -Method GET -Path '/api/docker/network/public-ip/extra' | Should -BeFalse
+    }
     It 'exposes exact map management and scoped settings routes only' {
         foreach($method in @('GET','PUT','POST')){Test-DuneDockerRouteQualified -Method $method -Path '/api/docker/maps'|Should -BeTrue}
         foreach($method in @('GET','PUT')){Test-DuneDockerRouteQualified -Method $method -Path '/api/docker/map-settings'|Should -BeTrue}

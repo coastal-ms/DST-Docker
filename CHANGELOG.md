@@ -2,6 +2,11 @@
 
 ## [1.0.4]
 
+- Configure private or public player access, detect the public IP, and show the Docker address to use for router forwarding.
+- Use TCP 31982 and UDP 7777–7810 for player connections, with a confirmation before applying changes that restart the server.
+- Configure the WSL LAN address and same-PC public-IP loopback target from Settings.
+- Keep loopback controls visible during refreshes and reopen the console through a reachable local address.
+- Collapse the map list and access additional map tools near the top of the page.
 - Keep Game.ini and Engine.ini global, with separate Custom Server Settings for each Hagga and Deep Desert partition.
 - Update Tank compatibility for Funcom 1.5.20.2.
 - Show current player counts and server update availability on Server Overview.

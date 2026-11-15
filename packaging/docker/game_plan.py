@@ -41,8 +41,11 @@ def plan_world(project,profile,template,assets,database,memory_overrides=None,sw
     if database.get('network')!=prefix+'network' or database.get('name')!=prefix+'postgres':
         raise ValueError('World database does not belong to this installation.')
     base=profile['gamePortBase']
-    ports={key:base+offset for key,offset in {'director':1000,'rmq-admin':1001,'rmq-game':1002,
+    ports={key:base+offset for key,offset in {'director':1000,'rmq-admin':1001,
                                             'rmq-game-http':1003,'text-router':1004}.items()}
+    # Existing custom installations retain their ports until Settings applies
+    # the standard player connection layout explicitly.
+    ports['rmq-game']=31982 if base==7777 else base+1002
     sets=template['world']['spec']['serverGroup']['template']['spec']['sets']
     maps=[]
     names=set()
