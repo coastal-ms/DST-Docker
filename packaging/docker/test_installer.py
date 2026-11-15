@@ -73,6 +73,7 @@ esac
 
     def test_wsl_install_prepares_desktop_shortcut_after_activating_source(self):
         self.bundle();self.environment['WSL_DISTRO_NAME']='Ubuntu'
+        ps=self.fake/'ps';ps.write_text('#!/bin/sh\nprintf "systemd\\n"\n');ps.chmod(0o755)
         docker=self.fake/'docker';docker.write_text(docker.read_text().replace('compose) exit 0;;','compose) echo \'{"name":"fixture"}\'; exit 0;;'))
         result=self.run_installer('--prefix',str(self.root/'installed'))
         self.assertEqual(result.returncode,0,result.stderr)

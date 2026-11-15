@@ -5,6 +5,274 @@ umask 077
 # Packaging replaces this marker with a checksum-bound source payload. The
 # resulting single shell file also works when passed to bash through a pipe.
 # DST_EMBEDDED_SOURCE
+fail() { printf 'DST: %s\n' "$*" >&2; exit 1; }
+cleanup() { if [[ "$task_temp" == /tmp/dst-installer.* && -d "$task_temp" && ! -L "$task_temp" ]]; then rm -rf -- "$task_temp"; fi; }
+usage() {
+  cat <<'HELP'
+DST Docker installer (Linux x86_64 / Windows WSL)
+  bash dst-install [--prefix DIRECTORY] [--port PORT] [--non-interactive] [--restart-wsl] [--check] [--prepare-only]
+  bash bin/dst-install --source CHECKOUT [--prefix DIRECTORY]
+  bash bin/dst-install --source-archive FILE [--prefix DIRECTORY]
+
+The packaged installer contains its own DST source. Development mode accepts
+a committed checkout or a local source archive. --check only reports prerequisites;
+--prepare-only installs prerequisites and source without starting the portal.
+Configuration, game data and official packages remain in Docker volumes.
+The console defaults to port 8088. --port selects another port (1024..65535).
+Interactive installs ask for the console port. --non-interactive uses defaults.
+WSL setup enables systemd when needed and offers to restart this distribution
+and continue in a Windows setup window. --restart-wsl permits that restart
+without prompting, including with --non-interactive. Other distributions stay open.
+HELP
+}
+dst_prepare_source() {
+  [[ -z "$task_temp" ]] || return 0
+task_temp=$(mktemp -d -t dst-installer.XXXXXXXX)
+if [[ -n "$task_source" ]]; then
+  [[ -d "$task_source" ]] || fail 'The selected checkout does not exist.'
+  task_package_revision=$(git -C "$task_source" rev-parse --verify HEAD)
+  git -C "$task_source" archive --format=tar.gz HEAD > "$task_temp/source.tar"
+elif [[ -n "$task_archive" ]]; then
+  [[ -f "$task_archive" ]] || fail 'The source archive does not exist.'
+  cp -- "$task_archive" "$task_temp/source.tar"
+  task_package_revision=${task_package_revision:-local-archive}
+elif declare -F dst_embedded_source >/dev/null; then
+  dst_embedded_source > "$task_temp/source.tar"
+else
+  fail 'This development entry point needs --source CHECKOUT or --source-archive FILE. The packaged installer includes its own source.'
+fi
+task_actual_sha=$(sha256sum "$task_temp/source.tar" | cut -d ' ' -f 1)
+if [[ -n "$task_package_sha" && "$task_package_sha" != "$task_actual_sha" ]]; then fail 'The bundled source checksum did not match. No portal was started.'; fi
+task_package_sha=$task_actual_sha
+}
+# Kept in the installer itself: bootstrap and curl | bash need no extra download.
+dst_wsl_helper() {
+  local task_helper_sudo=()
+  if [[ "$1" == configure ]]; then task_helper_sudo=("${task_sudo[@]}"); fi
+  "${task_helper_sudo[@]}" python3 - "$@" <<'DST_WSL_PY'
+import base64, os, re, shlex, shutil, stat, subprocess, sys, tempfile, uuid
+from pathlib import Path
+
+
+def enable_systemd(path=Path('/etc/wsl.conf')):
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise ValueError('WSL configuration is not a regular file; it was left intact.')
+    old = path.read_bytes() if path.exists() else b''
+    if len(old) > 1024**2:
+        raise ValueError('WSL configuration is too large; it was left intact.')
+    text = old.decode('utf-8-sig')
+    newline = '\r\n' if '\r\n' in text else '\n'
+    lines = text.splitlines(keepends=True)
+    result, section, found = [], '', False
+    for line in lines:
+        header = re.match(r'^\s*\[([^]]+)\]', line)
+        if header:
+            if section == 'boot' and not found:
+                if result and not result[-1].endswith(('\r', '\n')): result[-1] += newline
+                result.append('systemd=true' + newline); found = True
+            section = header[1].strip().lower()
+        setting = re.match(r'^(\s*systemd\s*=\s*)[^#;\r\n]*([#;][^\r\n]*)?(\r?\n)?$', line, re.I) if section == 'boot' else None
+        if setting:
+            result.append(setting[1] + 'true' + ((' ' + setting[2]) if setting[2] else '') + (setting[3] or ''))
+            found = True
+        else: result.append(line)
+    if not found:
+        if result and not result[-1].endswith(('\r', '\n')): result[-1] += newline
+        if section != 'boot': result.append('[boot]' + newline)
+        result.append('systemd=true' + newline)
+    updated = (b'\xef\xbb\xbf' if old.startswith(b'\xef\xbb\xbf') else b'') + ''.join(result).encode('utf-8')
+    if updated == old: return
+    previous = path.stat() if path.exists() else None
+    backup = path.with_name(path.name + '.dst-backup-' + uuid.uuid4().hex)
+    if previous:
+        with backup.open('xb') as output: output.write(old)
+        os.chmod(backup, 0o600)
+    fd, temporary = tempfile.mkstemp(prefix='.dst-wsl-', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'wb') as output:
+            output.write(updated); output.flush(); os.fsync(output.fileno())
+            if previous: os.fchown(output.fileno(), previous.st_uid, previous.st_gid)
+            os.fchmod(output.fileno(), stat.S_IMODE(previous.st_mode) if previous else 0o644)
+        if path.is_symlink() or (path.read_bytes() if path.exists() else b'') != old:
+            raise ValueError('WSL settings changed during setup; rerun the installer.')
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary): os.unlink(temporary)
+
+
+def ps_literal(value):
+    return "'" + value.replace("'", "''") + "'"
+
+
+def initialize_machine_id(path=Path('/etc/machine-id')):
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise ValueError('The imported WSL machine-id needs review; it was left intact.')
+    old = path.read_bytes() if path.exists() else b''
+    if re.fullmatch(rb'[0-9a-f]{32}\s*', old) and int(old.strip(), 16): return
+    if old.strip() not in (b'', b'uninitialized', b'0' * 32):
+        raise ValueError('The imported WSL machine-id is invalid; it was left intact.')
+    # A fresh import has no identity yet. A random UUID without separators is
+    # the systemd machine-id format. Preserve every existing valid identity.
+    fd, temporary = tempfile.mkstemp(prefix='.dst-machine-id-', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'wb') as output:
+            output.write((uuid.uuid4().hex + '\n').encode()); output.flush(); os.fsync(output.fileno())
+            os.fchmod(output.fileno(), 0o444)
+        if path.is_symlink() or (path.read_bytes() if path.exists() else b'') != old:
+            raise ValueError('WSL machine-id changed during setup; rerun the installer.')
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary): os.unlink(temporary)
+
+
+def restart_script(distro, user, resume, interactive=True):
+    # Base64 PowerShell plus Windows argv quoting keeps names and Linux paths data.
+    template = r'''$ErrorActionPreference='Stop'
+$ProgressPreference='SilentlyContinue'
+$wsl=Join-Path $env:WINDIR 'System32\wsl.exe'
+$statusDirectory=Join-Path $env:LOCALAPPDATA 'DSTDocker\Setup'
+New-Item -ItemType Directory -Path $statusDirectory -Force | Out-Null
+$statusPath=Join-Path $statusDirectory STATUSFILE
+function SetupStatus($state,$message) {
+  @{state=$state;message=$message;distribution=DISTRO;updatedAt=[DateTime]::UtcNow.ToString('o')} | ConvertTo-Json | Set-Content -LiteralPath $statusPath -Encoding UTF8
+  Write-Host $message
+}
+function NativeArgs($items) {
+  ($items | ForEach-Object {
+    $arg=[string]$_
+    # WSL parses its leading switches before Windows argv unquoting. Quoting
+    # --terminate would make WSL try to execute a Linux command of that name.
+    if($arg -and $arg -notmatch '[\s"]') { $arg }
+    else { '"'+[regex]::Replace([regex]::Replace($arg,'(\\*)"','$1$1\"'),'(\\+)$','$1$1')+'"' }
+  }) -join ' '
+}
+function WslRun($items) {
+  $process=Start-Process -FilePath $wsl -ArgumentList (NativeArgs $items) -NoNewWindow -PassThru
+  $handle=$process.Handle
+  if(-not $process.WaitForExit(120000)) { $process.Kill(); throw 'WSL did not respond. Open the distribution and rerun setup.' }
+  return $process.ExitCode
+}
+$setupExitCode=0
+try {
+  SetupStatus 'restarting' 'DST Docker setup: restarting only the selected WSL distribution.'
+  Start-Sleep -Seconds 2
+  if((WslRun -items @('--terminate',DISTRO)) -ne 0) { throw 'Could not restart the WSL distribution.' }
+  SetupStatus 'resuming' 'Continuing DST Docker installation...'
+  # Keep this visible Windows setup window attached for the complete install.
+  $process=Start-Process -FilePath $wsl -ArgumentList (NativeArgs @('--distribution',DISTRO,'--user',USER,'--exec','bash',RESUME)) -NoNewWindow -Wait -PassThru
+  if($process.ExitCode -ne 0) { throw 'Installation did not complete. See the error above.' }
+  SetupStatus 'completed' 'DST Docker setup completed.'
+} catch {
+  $setupExitCode=1
+  SetupStatus 'failed' ([string]$_)
+  Write-Host $_ -ForegroundColor Red
+  Write-Host RECOVERYCMD
+} finally {
+  if(INTERACTIVE) { Read-Host 'Press Enter to close this setup window' }
+}
+exit $setupExitCode
+'''
+    values = {'DISTRO': ps_literal(distro), 'USER': ps_literal(user), 'RESUME': ps_literal(resume), 'INTERACTIVE': '$true' if interactive else '$false', 'STATUSFILE': ps_literal(Path(resume).parent.name + '.json'), 'RECOVERYCMD': ps_literal('To retry, open this distribution and run: bash ' + shlex.quote(resume))}
+    return re.sub(r'\b(DISTRO|USER|RESUME|INTERACTIVE|STATUSFILE|RECOVERYCMD)\b', lambda match: values[match[1]], template)
+
+
+def launch(distro, user, resume, non_interactive='0'):
+    powershell = shutil.which('powershell.exe')
+    if not powershell:
+        raise ValueError('Windows interoperability is unavailable. Restart this distribution from WSLUI, then run: bash ' + shlex.quote(resume))
+    child = base64.b64encode(restart_script(distro, user, resume, non_interactive != '1').encode('utf-16le')).decode()
+    script = "$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -ArgumentList @('-NoLogo','-NoProfile','-EncodedCommand','" + child + "') -PassThru | Out-Null"
+    encoded = base64.b64encode(script.encode('utf-16le')).decode()
+    subprocess.run([powershell, '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], check=True, timeout=30, stdin=subprocess.DEVNULL)
+
+
+def main(args):
+    if args[0] == 'stage':
+        # systemd-tmpfiles can clear /tmp on the very first boot. Keep the
+        # restart package in this Linux user's private persistent cache.
+        base = Path.home() / '.cache/dst-docker-setup'
+        if any(part.is_symlink() for part in (base, *base.parents)):
+            raise ValueError('WSL setup cache must not use symlink directories.')
+        base.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if base.stat().st_uid != os.getuid(): raise ValueError('WSL setup cache belongs to another Linux user.')
+        base.chmod(0o700)
+        print(tempfile.mkdtemp(prefix='dst-wsl-setup.', dir=base))
+    elif args[0] == 'configure':
+        missing = [name for name in ('systemd', 'systemd-sysv') if subprocess.run(['dpkg-query', '-W', '-f=${Status}', name], capture_output=True, text=True).stdout != 'install ok installed']
+        if missing:
+            subprocess.run(['apt-get', 'update'], check=True, stdin=subprocess.DEVNULL)
+            subprocess.run(['apt-get', 'install', '-y', *missing], check=True, stdin=subprocess.DEVNULL)
+        # Imported root filesystems may have no machine ID. Initialize it before
+        # the first systemd boot so interactive systemd-firstboot cannot block it.
+        initialize_machine_id()
+        enable_systemd()
+    elif args[0] == 'launch': launch(*args[1:])
+    else: raise ValueError('Unknown WSL setup action.')
+
+
+if __name__ == '__main__':
+    try: main(sys.argv[1:])
+    except Exception as error:
+        print('DST WSL setup: ' + str(error), file=sys.stderr)
+        sys.exit(1)
+DST_WSL_PY
+}
+
+dst_prepare_wsl() {
+  [[ -n "${WSL_DISTRO_NAME:-}" ]] || return 0
+  local task_init
+  task_init=$(ps -p 1 -o comm= | tr -d ' ')
+  if [[ "$task_init" == systemd ]]; then
+    # Finish only a currently waiting imported-image first boot. Do not mask
+    # the service or alter root passwords, locale or other host settings.
+    if [[ -e /run/systemd/first-boot ]] && [[ "$(systemctl show systemd-firstboot.service -p SubState --value)" == start ]]; then
+      printf 'Completing imported WSL first-boot setup.\n'
+      "${task_sudo[@]}" timeout 20 systemctl stop systemd-firstboot.service
+    fi
+    return 0
+  fi
+  ((task_wsl_resumed == 0)) || fail 'WSL did not start systemd after its restart. Update WSL using wsl --update in Windows PowerShell, then rerun setup.'
+  ((EUID == 0 || ${#task_sudo[@]} > 0)) || fail 'sudo is required to enable WSL systemd. Run setup with an administrator Linux account.'
+  command -v apt-get >/dev/null && command -v dpkg-query >/dev/null || fail 'Enable systemd for this Linux distribution, then rerun setup. Automatic WSL setup requires Ubuntu/Debian.'
+  local task_restart_allowed=$task_restart_wsl task_reply=''
+  if ((!task_restart_allowed && !task_non_interactive)); then
+    if { exec 3<>/dev/tty; } 2>/dev/null; then
+      printf '\nDST needs to enable systemd and restart WSL distribution "%s".\nAll processes in this distribution will stop. Other distributions stay open.\nRestart and continue setup automatically? [Y/n]: ' "$WSL_DISTRO_NAME" >&3
+      if IFS= read -r task_reply <&3 && [[ "$task_reply" =~ ^([Yy]([Ee][Ss])?)?$ ]]; then task_restart_allowed=1; fi
+      exec 3>&-
+    fi
+  fi
+  task_stage='preparing WSL startup'
+  # Keep the exact source and options before bootstrap's temporary files vanish.
+  dst_prepare_source
+  local task_resume task_user
+  task_resume=$(dst_wsl_helper stage)
+  cp -- "$task_temp/source.tar" "$task_resume/source.tar"
+  {
+    printf '#!/usr/bin/env bash\nset -Eeuo pipefail\numask 077\n'
+    declare -f fail cleanup usage dst_prepare_source dst_wsl_helper dst_prepare_wsl dst_main
+    printf 'task_package_sha=%q\ntask_package_revision=%q\ntask_product_version=%q\n' "$task_package_sha" "$task_package_revision" "$task_product_version"
+    printf 'dst_main --source-archive %q --prefix %q --wsl-resumed' "$task_resume/source.tar" "$task_root"
+    if [[ -n "$task_port" ]]; then printf ' --port %q' "$task_port"; fi
+    if ((task_prepare_only)); then printf ' --prepare-only'; fi
+    if ((task_non_interactive)); then printf ' --non-interactive'; fi
+    printf '\n'
+    printf 'rm -f -- %q %q\nrmdir -- %q\n' "$task_resume/source.tar" "$task_resume/resume.sh" "$task_resume"
+  } > "$task_resume/resume.sh"
+  dst_wsl_helper configure
+  printf 'WSL systemd is configured.\n'
+  if ((!task_restart_allowed)); then
+    printf 'Setup is waiting for a restart of WSL distribution "%s".\nIn Windows PowerShell run: wsl --terminate "%s"\nThen reopen that distribution and run: bash %q\nFor unattended automatic restart, rerun the original installer with --restart-wsl.\n' "$WSL_DISTRO_NAME" "$WSL_DISTRO_NAME" "$task_resume/resume.sh"
+    exit 75
+  fi
+  task_user=$(id -un)
+  printf 'Continuing setup in a new Windows setup window after restarting "%s".\n' "$WSL_DISTRO_NAME"
+  printf 'Setup progress is saved in Windows: %%LOCALAPPDATA%%\\DSTDocker\\Setup\\%s.json\n' "${task_resume##*/}"
+  dst_wsl_helper launch "$WSL_DISTRO_NAME" "$task_user" "$task_resume/resume.sh" "$task_non_interactive"
+  exit 0
+}
+
+dst_main() {
 task_package_sha=${task_package_sha:-}
 task_package_revision=${task_package_revision:-}
 task_product_version=${task_product_version:-}
@@ -20,25 +288,10 @@ task_non_interactive=0
 task_sudo=()
 task_docker=()
 
-fail() { printf 'DST: %s\n' "$*" >&2; exit 1; }
-cleanup() { if [[ "$task_temp" == /tmp/dst-installer.* && -d "$task_temp" && ! -L "$task_temp" ]]; then rm -rf -- "$task_temp"; fi; }
+task_restart_wsl=0
+task_wsl_resumed=0
 trap cleanup EXIT
 trap 'printf "DST installation stopped while %s. Existing Docker volumes were not removed.\n" "$task_stage" >&2' ERR
-usage() {
-  cat <<'HELP'
-DST Docker installer (Linux x86_64 / Windows WSL)
-  bash dst-install [--prefix DIRECTORY] [--port PORT] [--non-interactive] [--check] [--prepare-only]
-  bash bin/dst-install --source CHECKOUT [--prefix DIRECTORY]
-  bash bin/dst-install --source-archive FILE [--prefix DIRECTORY]
-
-The packaged installer contains its own DST source. Development mode accepts
-a committed checkout or a local source archive. --check only reports prerequisites;
---prepare-only installs prerequisites and source without starting the portal.
-Configuration, game data and official packages remain in Docker volumes.
-The console defaults to port 8088. --port selects another port (1024..65535).
-Interactive installs ask for the console port. --non-interactive uses defaults.
-HELP
-}
 while (($#)); do
   case "$1" in
     --prefix|--source|--source-archive|--port)
@@ -49,6 +302,8 @@ while (($#)); do
     --version) printf 'DST Docker %s (source %s)\n' "${task_product_version:-development}" "${task_package_revision:-checkout}"; exit 0;;
     --prepare-only) task_prepare_only=1; shift;;
     --non-interactive) task_non_interactive=1; shift;;
+    --restart-wsl) task_restart_wsl=1; shift;;
+    --wsl-resumed) task_wsl_resumed=1; shift;;
     -h|--help) usage; exit 0;;
     *) fail "Unknown option: $1";;
   esac
@@ -79,6 +334,10 @@ fi
 if ((EUID != 0)); then
   if command -v sudo >/dev/null 2>&1; then task_sudo=(sudo); fi
 fi
+
+# A blocked first-boot unit can also block apt's package configuration. Resolve
+# it before installing dependencies when systemd is already running.
+if [[ -n "${WSL_DISTRO_NAME:-}" && "$(ps -p 1 -o comm= | tr -d ' ')" == systemd ]]; then dst_prepare_wsl; fi
 task_need_apt=0
 if ((!task_has_cli || !task_has_python)); then task_need_apt=1; fi
 for task_swap_tool in findmnt mkswap swapon swapoff sysctl; do
@@ -127,6 +386,7 @@ docker compose version >/dev/null 2>&1 || fail 'Docker is present but its Compos
 # This hosting adapter intentionally operates only on the local Linux engine.
 task_endpoint=$(docker context inspect --format '{{.Endpoints.docker.Host}}')
 [[ "$task_endpoint" == unix:///var/run/docker.sock && -z "${DOCKER_HOST:-}" ]] || fail 'Select the local Linux Docker Engine at /var/run/docker.sock before installing.'
+dst_prepare_wsl
 if ! docker info --format '{{.OSType}}' >/dev/null 2>&1; then
   if ((${#task_sudo[@]})) && sudo docker info --format '{{.OSType}}' >/dev/null 2>&1; then task_docker=(sudo)
   else
@@ -175,23 +435,7 @@ fi
 
 printf '[3/5] Preparing DST\n'
 task_stage='preparing the source package'
-task_temp=$(mktemp -d -t dst-installer.XXXXXXXX)
-if [[ -n "$task_source" ]]; then
-  [[ -d "$task_source" ]] || fail 'The selected checkout does not exist.'
-  task_package_revision=$(git -C "$task_source" rev-parse --verify HEAD)
-  git -C "$task_source" archive --format=tar.gz HEAD > "$task_temp/source.tar"
-elif [[ -n "$task_archive" ]]; then
-  [[ -f "$task_archive" ]] || fail 'The source archive does not exist.'
-  cp -- "$task_archive" "$task_temp/source.tar"
-  task_package_revision=${task_package_revision:-local-archive}
-elif declare -F dst_embedded_source >/dev/null; then
-  dst_embedded_source > "$task_temp/source.tar"
-else
-  fail 'This development entry point needs --source CHECKOUT or --source-archive FILE. The packaged installer includes its own source.'
-fi
-task_actual_sha=$(sha256sum "$task_temp/source.tar" | cut -d ' ' -f 1)
-if [[ -n "$task_package_sha" && "$task_package_sha" != "$task_actual_sha" ]]; then fail 'The bundled source checksum did not match. No portal was started.'; fi
-task_package_sha=$task_actual_sha
+dst_prepare_source
 python3 - "$task_temp/source.tar" "$task_root" "$task_package_sha" "$task_package_revision" "$task_port" <<'PY'
 import json,os,shutil,sys,tarfile,uuid
 from pathlib import Path,PurePosixPath
@@ -245,7 +489,7 @@ if port:previous['pendingConsolePort']=int(port)
 temporary=root/('.installation-'+uuid.uuid4().hex+'.tmp');temporary.write_text(json.dumps(previous));temporary.chmod(0o600);temporary.replace(manifest)
 PY
 task_release="$task_root/releases/$task_package_sha"
-if ((task_prepare_only)); then printf 'DST source prepared at %s\nNo containers were started.\n' "$task_release"; exit 0; fi
+if ((task_prepare_only)); then printf 'DST source prepared at %s\nNo containers were started.\n' "$task_release"; return 0; fi
 printf '[4/5] Building and starting the Web UI\n'
 printf 'The first build can take several minutes. Progress will appear below.\n'
 task_stage='building and starting the portal'
@@ -286,3 +530,6 @@ fi
 printf 'Later: '
 if ((${#task_docker[@]})); then printf '%q ' "${task_docker[@]}"; fi
 printf 'bash %q/bin/dst-docker [up|url|status|logs|down]\n' "$task_root/current"
+
+}
+dst_main "$@"
