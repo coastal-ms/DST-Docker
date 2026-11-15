@@ -13,6 +13,16 @@ const snapshot = () => ({
 })
 afterEach(() => { cleanup(); sessionStorage.clear(); vi.clearAllMocks() })
 describe('Map management', () => {
+  it('shares the saved mode with detailed tools and refreshes after their manual Warm change', async () => {
+    let mode = 'overmap-active'
+    vi.mocked(api).mockImplementation(async () => ({ ...snapshot(), modes: { Survival_1: 'core', DeepDesert_1: mode } }))
+    render(<DockerMapManagement legacyTools={(modes, onPolicyChange) => <><p>Detailed mode: {modes.DeepDesert_1}</p><button onClick={() => { mode = 'always-on'; onPolicyChange() }}>Manual Warm</button></>} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Additional map tools' }))
+    await screen.findByText('Detailed mode: overmap-active')
+    fireEvent.click(screen.getByRole('button', { name: 'Manual Warm' }))
+    await screen.findByText('Detailed mode: always-on')
+    expect(screen.getByLabelText('Deep Desert mode')).toHaveValue('always-on')
+  })
   it('replaces queued-start feedback with the correlated failure instead of leaving a green request message', async () => {
     let failed = false
     vi.mocked(api).mockImplementation(async (_path, options) => {

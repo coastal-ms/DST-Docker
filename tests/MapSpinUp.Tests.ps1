@@ -21,6 +21,31 @@ BeforeAll {
 }
 
 Describe 'Map SpinUp partition-aware floors' {
+    Context 'Docker manual Warm selection' {
+        BeforeEach {
+            $script:priorHostingBackend=$env:DST_HOSTING_BACKEND
+            $env:DST_HOSTING_BACKEND='docker'
+            Mock _Get-DuneDirectorIni {
+                @{ok=$true;ini="[ SH_Arrakeen ]`nNumExtraServers=0`nMinServers=1`n";
+                  installedMaps=@('SH_Arrakeen');modes=@{SH_Arrakeen=$script:selection};
+                  info=@{Ns='Docker';Name='fixture';Bg=[pscustomobject]@{}}}
+            }
+        }
+        AfterEach { $env:DST_HOSTING_BACKEND=$script:priorHostingBackend }
+        It 'leaves manual Warm unchecked for a map warmed by Follow Overmap' {
+            $script:selection='overmap-active'
+            $map=(Get-DuneSpinUpMaps).maps | Where-Object map -eq SH_Arrakeen
+            $map.enabled | Should -BeFalse
+            $map.mode | Should -Be 'overmap-active'
+            $map.minServers | Should -Be 1
+        }
+        It 'shows a manual Keep running selection as Warm' {
+            $script:selection='always-on'
+            $map=(Get-DuneSpinUpMaps).maps | Where-Object map -eq SH_Arrakeen
+            $map.enabled | Should -BeTrue
+            $map.mode | Should -Be 'always-on'
+        }
+    }
     It 'uses every configured Deep Desert partition' {
         $bg = @'
 {"spec":{"database":{"template":{"spec":{"deployment":{"spec":{"worldPartitions":[

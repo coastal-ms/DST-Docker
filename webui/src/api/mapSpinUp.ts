@@ -7,6 +7,7 @@ export interface SpinUpMap {
   group: 'supported' | 'experimental'
   minServers: number
   enabled: boolean
+  mode?: string | null
   availablePartitions?: number
   supportsPartySharing?: boolean
   sharedParties?: boolean
