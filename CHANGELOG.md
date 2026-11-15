@@ -1,5 +1,10 @@
 # DST Docker changelog
 
+## [1.0.6]
+
+- Keep manual Warm independent of Follow Overmap: enabling Warm selects Keep running, and disabling it selects On demand.
+- Keep the Warm toggle and map mode controls consistent when switching between manual and automatic warming.
+
 ## [1.0.5]
 
 - Configure private or public player access, detect the public IP, and show the Docker address to use for router forwarding.
