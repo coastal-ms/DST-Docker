@@ -1,5 +1,10 @@
 # DST Docker changelog
 
+## [1.0.9]
+
+- Hold Installation check until official game files finish downloading and verifying, then enable Next automatically.
+- Offer Private / LAN and Public / External in server setup, with a required address, matching guidance and a review of the selected access.
+
 ## [1.0.8]
 
 - Guide fresh installations through numbered setup stages with Back/Next controls and a settings review before preparing the server.
