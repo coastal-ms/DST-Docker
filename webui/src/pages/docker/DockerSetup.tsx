@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api } from '../../api/client'
 
-type SetupState = {
+export type SetupState = {
   phase: string
   assets: { state: string; images: { archive: string; tags: string[] }[] }
   database: null | { name: string; port: number; state: string; health: string }
@@ -13,6 +13,7 @@ type SetupState = {
   services: { component: string; phase: string; state?: string }[]
   desiredState: string
   operation: null | { action: string; phase: string; error?: string }
+  startupRecoveryError?: string | null
 }
 type Reply = { ok: boolean; data?: SetupState; error?: string }
 
