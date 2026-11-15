@@ -1,5 +1,10 @@
 # DST Docker changelog
 
+## [1.0.10]
+
+- Show the detected Docker IP during first-run setup and fill the Private / LAN server address automatically.
+- Preserve saved and manually entered addresses, keep private detection out of Public / External, and offer retry when detection is unavailable.
+
 ## [1.0.9]
 
 - Hold Installation check until official game files finish downloading and verifying, then enable Next automatically.
