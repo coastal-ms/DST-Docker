@@ -1,12 +1,17 @@
 # DST Docker changelog
 
-## [1.0.4]
+## [1.0.5]
 
 - Configure private or public player access, detect the public IP, and show the Docker address to use for router forwarding.
-- Use TCP 31982 and UDP 7777–7810 for player connections, with a confirmation before applying changes that restart the server.
-- Configure the WSL LAN address and same-PC public-IP loopback target from Settings.
+- Use TCP 31982 and UDP 7777–7810 for player connections and propagate address changes across the game services.
+- Confirm before applying player-access changes that restart the server.
+- Configure the WSL LAN address and explicitly choose the same-PC public-IP loopback target from Settings.
 - Keep loopback controls visible during refreshes and reopen the console through a reachable local address.
 - Collapse the map list and access additional map tools near the top of the page.
+- Repair local backup mirror folder preparation and show Configuring consistently during map startup.
+
+## [1.0.4]
+
 - Keep Game.ini and Engine.ini global, with separate Custom Server Settings for each Hagga and Deep Desert partition.
 - Update Tank compatibility for Funcom 1.5.20.2.
 - Show current player counts and server update availability on Server Overview.
