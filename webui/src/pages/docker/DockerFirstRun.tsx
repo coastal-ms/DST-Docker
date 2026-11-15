@@ -26,6 +26,13 @@ export default function DockerFirstRun({ children, canSetup = true }: { children
 
 const steps = ['Welcome', 'Installation check', 'Server identity', 'Funcom token', 'Ports', 'Review', 'Prepare server', 'Finish']
 
+function isPrivateAddress(address: string) {
+  const parts = address.split('.')
+  if (parts.length !== 4 || parts.some(part => !/^(0|[1-9][0-9]{0,2})$/.test(part) || Number(part) > 255)) return false
+  const [a, b] = parts.map(Number)
+  return a === 10 || a === 127 || (a === 192 && b === 168) || (a === 172 && b >= 16 && b <= 31)
+}
+
 function SetupFrame({ children, step, onStep, locked = false }: {
   children: ReactNode; step?: number; onStep?: (step: number) => void; locked?: boolean
 }) {
@@ -51,6 +58,7 @@ function FirstWorld({ initial, onFinish }: { initial: SetupState; onFinish: () =
   const [name, setName] = useState(initial.profile?.name ?? 'Dune Server')
   const [region, setRegion] = useState(initial.profile?.region ?? 'North America')
   const [address, setAddress] = useState(initial.profile?.address ?? '')
+  const [access, setAccess] = useState<'private' | 'public'>(!initial.profile || isPrivateAddress(initial.profile.address) ? 'private' : 'public')
   const [gamePort, setGamePort] = useState(String(initial.profile?.gamePortBase ?? 7777))
   const [port, setPort] = useState(String(initial.database?.port ?? 18932))
   const [token, setToken] = useState('')
@@ -101,6 +109,16 @@ function FirstWorld({ initial, onFinish }: { initial: SetupState; onFinish: () =
   const headings = ['Welcome to DST Docker', 'Check your installation', 'Give your world an identity', 'Connect to Funcom', 'Choose your ports', 'Review your server', 'Preparing your server', 'Your world is ready']
   function next(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
+    if (running || ((step === 1 || step >= 5) && downloading)) return
+    if (step === 2 && !state.partitionsPrepared && access === 'private' && !isPrivateAddress(address.trim())) {
+      setError('Private / LAN requires a private or loopback IPv4 address for your Docker host.')
+      return
+    }
+    if (step === 2 && !state.partitionsPrepared && access === 'public' && isPrivateAddress(address.trim())) {
+      setError('Public / External requires a public address or hostname. Choose Private / LAN to use a private address.')
+      return
+    }
+    setError('')
     if (step === 5 || step === 6) { void prepare(event); return }
     goTo(step + 1)
   }
@@ -120,14 +138,15 @@ function FirstWorld({ initial, onFinish }: { initial: SetupState; onFinish: () =
         {step === 1 && <>
           <p>Your management portal is connected. The official game files must finish downloading before server preparation begins.</p>
           <dl className="first-run-checks"><div><dt>Management connection</dt><dd>Connected</dd></div><div><dt>Official game files</dt><dd>{downloading ? 'Downloading…' : 'Downloaded and verified'}</dd></div><div><dt>Server storage</dt><dd>{state.database ? 'Existing storage found' : 'Will be created during setup'}</dd></div></dl>
-          <p className="first-run-hint" role="status">{downloading ? 'Keep the installer terminal open. You can enter your settings while the download continues; this status updates automatically.' : 'You’re ready to continue. DST will prepare your game services after you review the settings.'}</p>
+          <p className="first-run-hint" role="status">{downloading ? 'Keep the installer terminal open. Next becomes available automatically when the official game files are downloaded and verified.' : 'You’re ready to continue. DST will prepare your game services after you review the settings.'}</p>
         </>}
         {step === 2 && <>
           <p>Choose how your world appears and the address your players will use to connect.</p>
           <fieldset disabled={state.partitionsPrepared}>
             <label>World name<input required maxLength={50} pattern=".*\S.*" value={name} onChange={event => setName(event.target.value)} /></label>
+            <label>Player access<select value={access} onChange={event => { setAccess(event.target.value as 'private' | 'public'); setError('') }}><option value="private">Private / LAN</option><option value="public">Public / External</option></select></label>
             <div className="first-run-fields"><label>Region<select value={region} onChange={event => setRegion(event.target.value)}>{['Asia', 'Europe', 'North America', 'Oceania', 'South America'].map(item => <option key={item}>{item}</option>)}</select></label>
-              <label>Server address<input aria-label="Server address" aria-describedby="setup-address-help" required pattern=".*\S.*" placeholder="Public IP address or hostname" value={address} onChange={event => setAddress(event.target.value)} /><small id="setup-address-help">Use the address your players can reach.</small></label></div>
+              <label>Server address<input aria-label="Server address" aria-describedby="setup-address-help" required pattern=".*\S.*" placeholder={access === 'private' ? 'Docker host’s private IPv4 address' : 'Public IP address or hostname'} value={address} onChange={event => { setAddress(event.target.value); setError('') }} /><small id="setup-address-help">{access === 'private' ? 'Use the private Docker-host address your players can reach. A public IP is not required.' : 'Use your public IP or hostname for outside players. Router port forwarding may be required.'}</small></label></div>
           </fieldset>
           {state.partitionsPrepared && <p className="first-run-saved">✓ Your saved world details will be kept.</p>}
         </>}
@@ -144,6 +163,7 @@ function FirstWorld({ initial, onFinish }: { initial: SetupState; onFinish: () =
           <p>Check your settings before preparing the server. You can go back to change any unfinished step.</p>
           <dl className="first-run-review">{[
             ['World name', state.profile?.name ?? name.trim()], ['Region', state.profile?.region ?? region],
+            ['Player access', access === 'private' ? 'Private / LAN' : 'Public / External'],
             ['Server address', state.profile?.address ?? address.trim()], ['Funcom token', state.credentialsSaved ? 'Saved on this host' : 'Provided · saved when setup begins'],
             ['Local database port', String(state.database?.port ?? port)], ['Game port base', String(state.profile?.gamePortBase ?? gamePort)],
             ['Official game files', downloading ? 'Still downloading' : 'Downloaded and verified'],
@@ -163,7 +183,7 @@ function FirstWorld({ initial, onFinish }: { initial: SetupState; onFinish: () =
       <div className="first-run-controls">
         <button type="button" disabled={step === 0 || running || step === 7} onClick={() => goTo(step - 1)}>Back</button>
         {step === 7 ? <button type="button" className="first-run-primary" onClick={onFinish}>Open management portal</button>
-          : <button type="submit" className="first-run-primary" disabled={running || (step >= 5 && downloading)}>{running ? 'Preparing…' : step === 5 ? 'Prepare server' : step === 6 ? 'Continue setup' : 'Next'}</button>}
+          : <button type="submit" className="first-run-primary" disabled={running || ((step === 1 || step >= 5) && downloading)}>{running ? 'Preparing…' : step === 5 ? 'Prepare server' : step === 6 ? 'Continue setup' : 'Next'}</button>}
       </div>
     </form>
   </SetupFrame>
