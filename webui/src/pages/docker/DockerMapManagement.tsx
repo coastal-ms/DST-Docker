@@ -37,7 +37,7 @@ function savedRamDrafts(): Record<string, string> {
   } catch { return {} }
 }
 
-export function DockerMapManagement({ legacyTools }: { legacyTools?: ReactNode }) {
+export function DockerMapManagement({ legacyTools }: { legacyTools?: ReactNode | ((modes: Record<string, string>, onPolicyChange: () => void) => ReactNode) }) {
   const [data, setData] = useState<Management | null>(null)
   const [error, setError] = useState('')
   const [loadError, setLoadError] = useState('')
@@ -169,7 +169,7 @@ export function DockerMapManagement({ legacyTools }: { legacyTools?: ReactNode }
   </section>
   return <div className="space-y-4">
     <div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="text-xl font-semibold">Maps &amp; memory</h2><p className="mt-1 text-sm text-text-muted">Manage map availability and memory.</p></div><div className="flex flex-wrap gap-2"><button type="button" className="btn-secondary" onClick={() => void load()}>Refresh</button></div></div>
-    {legacyTools && <div><button type="button" className="btn-secondary" aria-expanded={more} aria-controls="docker-additional-map-tools" onClick={() => setMore(value => !value)}>{more ? 'Hide additional map tools' : 'Additional map tools'}</button>{more && <div id="docker-additional-map-tools" className="mt-3">{legacyTools}</div>}</div>}
+    {legacyTools && <div><button type="button" className="btn-secondary" aria-expanded={more} aria-controls="docker-additional-map-tools" onClick={() => setMore(value => !value)}>{more ? 'Hide additional map tools' : 'Additional map tools'}</button>{more && <div id="docker-additional-map-tools" className="mt-3">{typeof legacyTools === 'function' ? legacyTools(data?.modes ?? {}, () => { void load() }) : legacyTools}</div>}</div>}
     {data && <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
       <div className="card p-4"><p className="text-xs text-text-muted">Host RAM</p><strong className="text-xl">{hostFresh ? `${gb(data.resources.host.memoryBytes - data.resources.host.availableBytes)} used` : 'Sample unavailable'}</strong><p className="text-xs text-text-muted">{hostFresh ? `${gb(data.resources.host.availableBytes)} available · ${gb(data.resources.host.memoryBytes)} total` : 'Refresh to read current availability'}</p></div>
       <div className="card p-4"><p className="text-xs text-text-muted">Maps using RAM</p><strong className="text-xl">{measured.length ? `${measured.length < working.length ? 'At least ' : ''}${gb(measured.reduce((sum, value) => sum + value, 0))}` : working.length ? 'Awaiting sample' : 'No maps running'}</strong><p className="text-xs text-text-muted">{measured.length} of {working.length} running maps measured</p></div>

@@ -1245,7 +1245,8 @@ def map_policy(state,engine):
     entry=state.get('services',{}).get('director')
     if not entry:raise ValueError('Prepare the world services first.')
     return {'ini':engine.read_director_config(entry['id'],state['id']).decode(),
-            'world':state['worldId'],'maps':state['worldPlan']['maps']}
+            'world':state['worldId'],'maps':state['worldPlan']['maps'],
+            'modes':{row['map']:map_modes.mode_for(state,row) for row in state['worldPlan']['maps']}}
 
 
 def set_map_floor(state,engine,map_name,enabled,allow_initial=False):
@@ -1301,7 +1302,18 @@ def set_map_mode(state,engine,map_name,mode):
     state.setdefault('overmapIdleSince',{}).pop(map_name,None)
     state.pop('pendingMapMode',None);state.pop('mapModeError',None)
     save(state)
-    return {'map':map_name,'mode':mode,'message':'Map mode saved. The director reloads its rules within 60 seconds. Running maps are not forcibly stopped.'}
+    return {'map':map_name,'mode':mode,'enabled':warm,'minServers':len(row['partitions']) if warm else 0,
+            'availablePartitions':len(row['partitions']),
+            'message':'Map mode saved. The director reloads its rules within 60 seconds. Running maps are not forcibly stopped.'}
+
+
+def set_manual_map_floor(state,engine,map_name,enabled):
+    if type(enabled) is not bool:raise ValueError('enabled must be a JSON boolean.')
+    # A user-selected warm map owns its lifecycle; the automatic Overmap
+    # scheduler continues using set_map_floor without changing that selection.
+    result=set_map_mode(state,engine,map_name,'always-on' if enabled else 'dynamic')
+    result['message']='Manual Warm enabled: Keep running.' if enabled else 'Manual Warm disabled: On demand.'
+    return result
 
 
 def scheduler_occupancy(state,engine):
@@ -1799,7 +1811,7 @@ def dispatch(request, engine=None, *, resume_running_only=False):
             return {'enabled':state['memoryBalancingEnabled']}
         if action=='maps.memory':return set_map_memory(state,engine,request.get('map'),request.get('memoryGiB'))
         if action=='scale.patch':return request_scale(state,engine,request.get('name'),request.get('patch'))
-        if action=='maps.floor':return set_map_floor(state,engine,request.get('map'),request.get('enabled'))
+        if action=='maps.floor':return set_manual_map_floor(state,engine,request.get('map'),request.get('enabled'))
         if action=='maps.mode':return set_map_mode(state,engine,request.get('map'),request.get('mode'))
         if action=='maps.party-sharing':return set_party_sharing(state,engine,request.get('map'),request.get('shared'))
         if action in {'chat.queue.declare','chat.queue.delete','chat.queue.drain'}:

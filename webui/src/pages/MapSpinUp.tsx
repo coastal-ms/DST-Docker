@@ -105,10 +105,10 @@ function reconcileOrder(saved: string[] | null, maps: SpinUpMap[]): string[] {
 }
 
 export function MapSpinUp({ embedded = false }: { embedded?: boolean }) {
-  return dockerEdition ? <DockerMapManagement legacyTools={<LegacyMapSpinUp embedded />} /> : <LegacyMapSpinUp embedded={embedded} />
+  return dockerEdition ? <DockerMapManagement legacyTools={(modes, onPolicyChange) => <LegacyMapSpinUp embedded modeRevision={JSON.stringify(modes)} onPolicyChange={onPolicyChange} />} /> : <LegacyMapSpinUp embedded={embedded} />
 }
 
-function LegacyMapSpinUp({ embedded = false }: { embedded?: boolean }) {
+function LegacyMapSpinUp({ embedded = false, modeRevision, onPolicyChange }: { embedded?: boolean; modeRevision?: string; onPolicyChange?: () => void }) {
   const [maps, setMaps] = useState<SpinUpMap[] | null>(null)
   const [missingSections, setMissingSections] = useState<SpinUpMissingSection[]>([])
   const [notStartedSections, setNotStartedSections] = useState<SpinUpNotStartedSection[]>([])
@@ -162,7 +162,7 @@ function LegacyMapSpinUp({ embedded = false }: { embedded?: boolean }) {
     }
   }, [])
 
-  useEffect(() => { void refresh() }, [refresh])
+  useEffect(() => { void refresh() }, [refresh, modeRevision])
 
   const onToggle = useCallback(async (m: SpinUpMap, next: boolean) => {
     setBusy(m.map); setMessage(null); setError(null)
@@ -176,6 +176,7 @@ function LegacyMapSpinUp({ embedded = false }: { embedded?: boolean }) {
       await refresh()
       if (r.ok) {
         setMessage(r.message ?? (next ? `${m.label} spin-up enabled.` : `${m.label} spin-up disabled.`))
+        onPolicyChange?.()
       } else {
         setError(r.message ?? 'The change may not have applied.')
       }
@@ -188,7 +189,7 @@ function LegacyMapSpinUp({ embedded = false }: { embedded?: boolean }) {
     } finally {
       setBusy(null)
     }
-  }, [refresh, startTracking, stopTracking, dismissLoadError])
+  }, [refresh, startTracking, stopTracking, dismissLoadError, onPolicyChange])
 
   const onStartRetail = useCallback(async (s: SpinUpNotStartedSection) => {
     const ok = confirmRoutineAction(
@@ -457,6 +458,7 @@ function LegacyMapSpinUp({ embedded = false }: { embedded?: boolean }) {
             {dockerEdition ? <>
               With memory balancing on, empty on-demand maps can unload to free RAM. A cold map can take several minutes to load.
               Turn on Warm before traveling to keep a map ready; it continues using memory until you turn Warm off.
+              Warm replaces Follow Overmap for that map. Turning Warm off selects On demand.
               Docker checks the available memory before starting another map. Occupied maps stay running.
             </> : <>
             Because the RAM allocated to each map can be customized, some maps may not spin up if the
@@ -673,7 +675,7 @@ function SortableMapCard({ map: m, busy, onToggle, onPartySharing, elapsed, load
               </span>
             ) : (
               <span className={m.enabled ? 'pill-success' : 'pill-muted'}>
-                {m.enabled ? 'Warm' : dockerEdition ? 'On demand' : 'Off'}
+                {m.enabled ? 'Warm' : dockerEdition ? m.mode === 'overmap-active' ? 'Follow Overmap' : m.mode === 'disabled' ? 'No new starts' : 'On demand' : 'Off'}
               </span>
             )}
             <input

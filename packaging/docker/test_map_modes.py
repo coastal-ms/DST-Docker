@@ -11,6 +11,45 @@ from scale_protocol import native_director_ini
 
 
 class MapModesTests(unittest.TestCase):
+    def test_manual_warm_replaces_follow_overmap_and_survives_an_expired_timer(self):
+        rows=[{'map':'SH_Arrakeen','partitions':[3],'initialReplicas':0}, {'map':'SH_HarkoVillage','partitions':[4],'initialReplicas':0}]
+        state={'id':'a'*32,'worldId':'fixture','desiredState':'running','services':{'director':{'id':'director'}},
+               'worldPlan':{'maps':rows,'games':[{'map':'Overmap','partition':2},{'map':'SH_Arrakeen','partition':3},{'map':'SH_HarkoVillage','partition':4}]},
+               'mapModes':{row['map']:'overmap-active' for row in rows},'manualPins':{'game-3':False,'game-4':True},'overmapEmptySince':0}
+        engine=Mock(spec=manager.Engine)
+        engine.read_director_config.side_effect=lambda *args:state.get('directorIni','[ SH_Arrakeen ]\nMinServers=0\nMaxParties=1\n[ SH_HarkoVillage ]\nMinServers=1\n').encode()
+        with patch.object(manager,'project_state',return_value=state),patch.object(manager,'save'),patch.object(manager,'scheduler_occupancy',return_value={2:0,3:0,4:0}):
+            result=manager.dispatch({'action':'maps.floor','map':'SH_Arrakeen','enabled':True},engine)
+            self.assertEqual(result['mode'],'always-on');self.assertEqual(result['minServers'],1)
+            manager.map_mode_tick(engine,1000)
+            self.assertTrue(state['manualPins']['game-3']);self.assertFalse(state['manualPins']['game-4'])
+            self.assertEqual(state['mapModes']['SH_Arrakeen'],'always-on')
+            self.assertIn('MaxParties=1',state['directorIni'])
+            policy=manager.map_policy(state,engine)
+            self.assertEqual(policy['modes']['SH_Arrakeen'],'always-on')
+            # Explicitly choosing Follow Overmap relinquishes the manual hold.
+            manager.set_map_mode(state,engine,'SH_Arrakeen','overmap-active')
+            manager.map_mode_tick(engine,1001)
+            self.assertFalse(state['manualPins']['game-3'])
+            self.assertEqual(manager.map_policy(state,engine)['modes']['SH_Arrakeen'],'overmap-active')
+
+    def test_manual_warm_off_selects_on_demand_and_cannot_be_reenabled_by_overmap(self):
+        state={'id':'a'*32,'worldId':'fixture','desiredState':'running','services':{'director':{'id':'director'}},
+               'worldPlan':{'maps':[{'map':'DeepDesert_1','partitions':[8,18],'initialReplicas':0}],
+                            'games':[{'map':'Overmap','partition':2},{'map':'DeepDesert_1','partition':8},{'map':'DeepDesert_1','partition':18}]},
+               'mapModes':{'DeepDesert_1':'overmap-active'},'manualPins':{'game-8':True,'game-18':True}}
+        engine=Mock(spec=manager.Engine);engine.read_director_config.return_value=b'[ DeepDesert_1 ]\nMinServers=2\n'
+        with patch.object(manager,'project_state',return_value=state),patch.object(manager,'save'),patch.object(manager,'scheduler_occupancy') as occupancy:
+            result=manager.dispatch({'action':'maps.floor','map':'DeepDesert_1','enabled':False},engine)
+            self.assertEqual(result['mode'],'dynamic');self.assertEqual(result['availablePartitions'],2)
+            self.assertFalse(state['manualPins']['game-8']);self.assertFalse(state['manualPins']['game-18'])
+            manager.map_mode_tick(engine,1000)
+            occupancy.assert_not_called()
+            self.assertEqual(state['mapModes']['DeepDesert_1'],'dynamic')
+            for enabled in (1,'true',None):
+                with self.assertRaisesRegex(ValueError,'JSON boolean'):
+                    manager.set_manual_map_floor(state,engine,'DeepDesert_1',enabled)
+
     def test_return_to_overmap_cancels_a_stop_before_signalling(self):
         state={'mapModes':{'SH_HarkoVillage':'overmap-active'},'worldPlan':{'games':[{'map':'SH_HarkoVillage','partition':4}]},'scalePending':{}}
         request={'availablePartitions':[4],'partitions':[],'previousTargets':{}}
