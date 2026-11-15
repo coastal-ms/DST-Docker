@@ -145,6 +145,26 @@ function Get-DuneDockerContainers {
     return @{ok=$true;pods=$pods;count=$pods.Count}
 }
 
+function Test-DuneDockerWslHost {
+    return $env:DST_HOST_PLATFORM -ceq 'wsl' -or (Test-Path -LiteralPath '/host-control/network-info.json')
+}
+
+function Get-DuneDockerNetworkAddresses {
+    $localAddress=''
+    $socket=[Net.Sockets.Socket]::new([Net.Sockets.AddressFamily]::InterNetwork,[Net.Sockets.SocketType]::Dgram,[Net.Sockets.ProtocolType]::Udp)
+    try {$socket.Connect('1.1.1.1',53);$localAddress=$socket.LocalEndPoint.Address.ToString()} catch {} finally {$socket.Dispose()}
+    $addresses=@{dockerIp=$localAddress;wslIp=$null;networkingMode='native'}
+    if(Test-DuneDockerWslHost){
+        $addresses.wslIp=$localAddress;$addresses.networkingMode='unknown'
+        try {
+            $cached=Get-Content -LiteralPath '/host-control/network-info.json' -Raw -ErrorAction Stop | ConvertFrom-Json -AsHashtable
+            $parsed=$null
+            if([Net.IPAddress]::TryParse([string]$cached.dockerIp,[ref]$parsed) -and $parsed.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetwork){$addresses=$cached}
+        } catch {}
+    }
+    return $addresses
+}
+
 function Get-DuneDockerStatus {
     param([string]$SnapshotPath='/data/docker/status.json',[switch]$ForcePorts,[switch]$LifecycleOnly)
     $snapshot = @{ available=$false; stale=$true; error='Waiting for Docker observations.' }
@@ -158,7 +178,7 @@ function Get-DuneDockerStatus {
         try {Sync-DuneFuncomInstalledBuild -InstalledBuild ([string]$metadata.installedBuild)|Out-Null} catch {}
     }
     $connected=[bool]$snapshot.available -and -not $snapshot.stale -and [bool]$reply.ok
-    $hostState=@{exists=[bool]$snapshot.available;running=$connected;name='Docker Engine';state=$(if($connected){'Running'}else{'Unavailable'});ip=$metadata.profile.address;uptime=0;kind='docker'}
+    $hostState=@{exists=[bool]$snapshot.available;running=$connected;name='Docker Engine';state=$(if($connected){'Running'}else{'Unavailable'});ip=(Get-DuneDockerNetworkAddresses).dockerIp;uptime=0;kind='docker'}
     # Retired Docker containers are diagnostic history, not current game pods.
     # Lifecycle controls use the complete manager catalogue separately.
     $playerCounts=Get-DuneDockerPlayerCounts -Metadata $metadata
@@ -193,7 +213,9 @@ function Get-DuneDockerStatus {
         $required=@(@{Port=[int]$metadata.profile.gamePortBase;Protocol='UDP';Label='Game (first)'},
                     @{Port=([int]$metadata.profile.gamePortBase+33);Protocol='UDP';Label='Game (last)'},
                     @{Port=[int]$metadata.plan.ports.'rmq-game';Protocol='TCP';Label='RabbitMQ'})
-        try {$ports=Get-DunePortStatus -Force:$ForcePorts -BattlegroupState $state -RequiredPorts $required} catch {}
+        $probeIp='';$address=[string]$metadata.profile.address
+        if ((Get-Command Test-DunePublicIPv4 -ErrorAction SilentlyContinue) -and (Test-DunePublicIPv4 -Ip $address).ok) { $probeIp=$address }
+        try {$ports=Get-DunePortStatus -Force:$ForcePorts -BattlegroupState $state -RequiredPorts $required -PublicIp $probeIp} catch {}
         if($ports -and -not $ports.cached){
             # External observers can take longer than a map state transition.
             # Publish freshly collected lifecycle facts after the probe rather

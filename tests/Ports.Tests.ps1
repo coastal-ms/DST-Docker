@@ -237,6 +237,16 @@ Describe 'Inconclusive port cache recovery' {
         (Get-DunePortStatus).results[0].port | Should -Be 31982
         Assert-MockCalled Get-DunePublicIp -Times 3
     }
+    It 'uses the configured public address and refreshes cached results when it changes' {
+        Mock Test-DunePortBuiltin { 'open' }
+        (Get-DunePortStatus -PublicIp '8.8.4.4').publicIp | Should -Be '8.8.4.4'
+        (Get-DunePortStatus -PublicIp '8.8.4.4').cached | Should -BeTrue
+        $changed=Get-DunePortStatus -PublicIp '1.1.1.1'
+        $changed.publicIp | Should -Be '1.1.1.1'
+        $changed.cached | Should -BeFalse
+        Should -Invoke Get-DunePublicIp -Times 0 -Exactly
+        Should -Invoke Test-DunePortBuiltin -ParameterFilter {$PublicIp -eq '1.1.1.1' -and $Port -eq 31982} -Times 1 -Exactly
+    }
     It 'refreshes a confirmed result when the six-hour interval expires' {
         Mock Test-DunePortBuiltin { 'open' }
         Get-DunePortStatus | Out-Null

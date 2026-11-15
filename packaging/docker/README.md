@@ -25,24 +25,32 @@ HTTP is the default on port8088. The installer prints addresses reachable from t
 
 ## Network details
 
-The [network ports table](../../README.md#network-ports) separates player connections from optional browser access. `B` is **Setup Wizard > Your world > Game-port base**, default **28777**. A partition's game UDP port is `B + partition ID - 1`; its ID comes from the installed official world layout. Include on-demand partitions when preparing game forwarding. A running console or a successful TCP check does not verify UDP reachability for every map.
+The [network ports table](../../README.md#network-ports) separates player connections from optional browser access. `B` is **Setup Wizard > Your world > Game-port base**, default **7777**. A partition's game UDP port is `B + partition ID - 1`; its ID comes from the installed official world layout. Include on-demand partitions when preparing game forwarding. A running console or a successful TCP check does not verify UDP reachability for every map.
 
 These additional service ports support the local installation. They are not player-facing router forwards:
 
 | Local service | Protocol | Default / configured port | Listener |
 | --- | --- | --- | --- |
-| Battlegroup director | TCP | `B + 1000` = **29777** | Linux loopback |
-| Administrative messaging | TCP | `B + 1001` = **29778** | Linux loopback |
-| Game messaging HTTP endpoint | TCP | `B + 1003` = **29780** | Linux loopback; used by the gateway |
-| Text router | TCP | `B + 1004` = **29781** | Linux loopback |
-| File Browser | TCP | `B + 1005` = **29782** | Linux loopback; open through the authenticated portal |
+| Battlegroup director | TCP | `B + 1000` = **8777** | Linux loopback |
+| Administrative messaging | TCP | `B + 1001` = **8778** | Linux loopback |
+| Game messaging HTTP endpoint | TCP | `B + 1003` = **8780** | Linux loopback; used by the gateway |
+| Text router | TCP | `B + 1004` = **8781** | Linux loopback |
+| File Browser | TCP | `B + 1005` = **8782** | Linux loopback; open through the authenticated portal |
 | PostgreSQL | TCP | Installation-selected host port | Linux loopback; database connections also use the private Docker network |
 
 Per-partition IGW endpoints use `B + 2000 + partition ID - 1` on the Docker bridge address for internal map communication, rather than a player-facing router forward.
 
-The publicly reachable messaging listener is **TCP `B + 1002`**, not the loopback HTTP endpoint. Browser HTTPS and the browser API use the selected console port; there is no additional fixed API port to forward. The internal HTTPS upstream stays on loopback. Tailscale Serve/Funnel publishes the browser on its own HTTPS address at port443 and proxies the console; game clients still need the game UDP ports and messaging TCP port.
+The publicly reachable messaging listener is **TCP 31982**, not the loopback HTTP endpoint. Browser HTTPS and the browser API use the selected console port; there is no additional fixed API port to forward. The internal HTTPS upstream stays on loopback. Tailscale Serve/Funnel publishes the browser on its own HTTPS address at port443 and proxies the console; game clients still need the game UDP ports and messaging TCP port.
 
 For WSL NAT, the Windows host and Linux guest have separate network addresses. `Enable-DstDockerLan.ps1` forwards only the chosen console TCP port and adds a private-LAN rule for that port. It does not forward game UDP or game messaging. Ensure your chosen WSL networking and firewall configuration makes the Linux game listeners reachable from players; a Windows TCP portproxy rule cannot carry game UDP. Native Linux hosts use the Linux host address directly.
+
+**Settings → IP configurations** separates the actual Docker LAN address from the address advertised to players. On WSL, choose an internal NAT address, share the Windows LAN address, or use an own LAN address through an existing external Hyper-V switch. Own LAN address uses WSL bridged networking, which Microsoft marks deprecated. DHCP selects a LAN address automatically; an optional unused static address is checked for conflicts before assignment. Saving stages the host network change. Shut down the Docker host and reopen its desktop icon to apply it; other running WSL distributions must be closed first. A desktop recovery shortcut restores the previous WSL configuration if the selected network prevents startup.
+
+Choose Private / LAN to advertise the detected Docker address, or Public / External to detect or enter the public IPv4 address. Public settings show the separate Docker address and router forwarding target for TCP31982 and UDP7777–7810. Applying player access restarts a running battlegroup and leaves an already stopped battlegroup stopped. A host LAN change updates private advertisement automatically; public advertisement is retained. Existing Windows same-PC public-IP routes are displayed without changing them. Router forwarding remains the operator's responsibility.
+
+The separate **Same-PC public-IP loopback** control shows the current Windows route and defaults to **Keep current target**. Choose Docker, another server IP, or router NAT loopback, then apply and confirm that control to change the route. Windows asks for administrator approval. Only that public IP's host route is changed; the game server keeps running. Changing player access, opening Settings, and installing an update leave the loopback target alone.
+
+When Docker is selected, DST also prepares same-PC game traffic for the Docker listeners. This applies only to the Windows host's connections to that public IP on TCP31982 and UDP7777–7810. The traffic setup is restored after a host restart while the route still targets the same Docker address, and removed when another loopback target is applied.
 
 ## Optional HTTPS
 

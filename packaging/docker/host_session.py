@@ -32,9 +32,9 @@ def run(args,**kwargs):
 
 def ps_literal(value):return "'"+str(value).replace("'","''")+"'"
 
-def windows_script(script):
+def windows_script(script,timeout=60):
     encoded=base64.b64encode(script.encode('utf-16le')).decode('ascii')
-    return run([POWERSHELL,'-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',encoded]).stdout.decode('utf-8',errors='replace').strip()
+    return run([POWERSHELL,'-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',encoded],timeout=timeout).stdout.decode('utf-8',errors='replace').strip()
 
 def write_json(path,value):
     temporary=path.with_suffix('.tmp');temporary.write_text(json.dumps(value),encoding='utf-8');temporary.chmod(0o600);temporary.replace(path)
@@ -57,8 +57,8 @@ class HostSession:
         for path in self.config['composeFiles']:command+=['-f',path]
         return self.docker(*command,*args,timeout=300)
     def app_id(self):return self.compose('ps','-q','dst')
-    def manager(self,action):
-        reply=json.loads(self.docker('exec','-i',self.app_id(),'python3','/opt/dst/packaging/docker/manager-client.py',input=json.dumps({'action':action}).encode()))
+    def manager(self,action,**values):
+        reply=json.loads(self.docker('exec','-i',self.app_id(),'python3','/opt/dst/packaging/docker/manager-client.py',input=json.dumps({'action':action,**values}).encode()))
         if not reply.get('ok'):raise ValueError(reply.get('error','Docker manager unavailable.'))
         return reply['data']
     def progress(self,phase,message):
@@ -174,6 +174,8 @@ foreach($path in $paths){
             else:raise ValueError('Another Docker workload is running. Stop it before shutting down WSL from DST.')
         return owned
     def preflight(self):
+        if (self.directory/'lan-settings.json').exists() and any(name!=self.config['distribution'] for name in running_distros()):
+            raise ValueError('Close other running WSL distributions before restarting the Docker host network.')
         state=self.manager('status')
         if (state.get('operation') or {}).get('phase') in {'running','preparing'}:raise ValueError('Wait for the current server operation before shutting down.')
         # A host stop cannot interrupt a backup still completing after its manager operation.
@@ -234,7 +236,11 @@ Write-Output $path
             if self.containers():raise ValueError('A Docker workload is still running; WSL remains running. Use the DST icon to reopen the console.')
             self.progress('shutting-down-wsl','DST containers stopped. Stopping the DST WSL distribution. Use the DST Docker icon to start again.')
             # All owned containers are stopped before the host-level request.
-            run([WSL,'--terminate',self.config['distribution']],timeout=60)
+            network_restart=(self.directory/'lan-settings.json').exists()
+            if network_restart and any(name!=self.config['distribution'] for name in running_distros()):
+                raise ValueError('Another WSL distribution started. Close it before restarting the Docker host network; WSL remains running.')
+            command=[WSL,'--shutdown'] if network_restart else [WSL,'--terminate',self.config['distribution']]
+            run(command,timeout=60)
         except Exception as error:
             self.progress('failed',str(error) if isinstance(error,ValueError) else 'Host shutdown failed. WSL was not deliberately shut down; inspect this DST console.')
         finally:
@@ -255,6 +261,32 @@ Write-Output $path
             return {'accepted':True}
         if action=='status':
             with self.lock:return {'available':True,'platform':'wsl','phase':self.phase,'message':self.message,'busy':self.busy,'localMenuAvailable':bool(getattr(self,'menu_thread',None) and self.menu_thread.is_alive())}
+        if action=='network.get':return self.network_info(request.get('publicIp'))
+        if action=='loopback.get':
+            import wsl_loopback
+            result=wsl_loopback.snapshot(windows_script,request.get('publicIp'))
+            operation=wsl_loopback.operation(self.directory)
+            if operation and operation.get('publicIp')==result['publicIp']:result['operation']=operation
+            return result
+        if action=='loopback.set':
+            import wsl_loopback
+            change=wsl_loopback.validate(request)
+            with self.lock:
+                if self.busy:raise ValueError('Wait for the current host operation to finish.')
+                current=wsl_loopback.snapshot(windows_script,change['publicIp'])
+                if current.get('multiple') or current.get('target')!=change['expectedTarget']:raise ValueError('The loopback route changed. Refresh and review it before applying.')
+                if current.get('target')==change['target']:return current
+                operation={'id':uuid.uuid4().hex,'phase':'running',**change}
+                write_json(self.directory/'loopback-operation.json',operation)
+                self.busy=True
+                self.phase='applying-loopback';self.message='Approve the Windows permission prompt to change the same-PC loopback target.'
+            threading.Thread(target=self.change_loopback,args=(change,operation),daemon=True).start()
+            return {**current,'operation':operation}
+        if action in {'network.settings.get','network.settings.set'}:
+            import wsl_lan
+            with self.lock:
+                if self.busy:raise ValueError('Wait for the current host operation to finish.')
+                return wsl_lan.settings(windows_script,self.directory,self.network_info(),request.get('settings') if action.endswith('.set') else None)
         if action in {'memory.get','memory.set'}:
             import wsl_memory
             if action=='memory.set' and 'memoryGiB' not in request:raise ValueError('Choose a RAM limit or the WSL default.')
@@ -279,6 +311,37 @@ Write-Output $path
             threading.Thread(target=self.shutdown,args=(state,),daemon=True).start()
             return {'accepted':True}
         raise ValueError('Choose a supported host action.')
+    def change_loopback(self,change,operation):
+        import wsl_loopback
+        import loopback_ingress
+        path=self.directory/'loopback-ingress.json'
+        previous=json.loads(path.read_text()) if path.exists() else None
+        prepared=False
+        try:
+            network=self.network_info()
+            if change['target']==network['dockerIp']:
+                loopback_ingress.configure(self.directory,change,network)
+                prepared=True
+            wsl_loopback.apply(lambda script:windows_script(script,timeout=180),change)
+            current=wsl_loopback.snapshot(windows_script,change['publicIp'])
+            if current.get('target')!=change['target']:raise ValueError('Windows did not confirm the new loopback target.')
+            loopback_ingress.configure(self.directory,change,network)
+            operation['phase']='completed'
+        except Exception as error:
+            if prepared:
+                try:
+                    current=wsl_loopback.snapshot(windows_script,change['publicIp'])
+                    if current.get('target')!=change['target']:
+                        loopback_ingress.reconcile(self.directory,previous)
+                        if previous:write_json(path,previous)
+                        else:path.unlink(missing_ok=True)
+                except Exception:pass
+            operation['phase']='failed'
+            operation['error']=str(error) if isinstance(error,ValueError) else 'Windows could not apply the loopback route. Check the Windows permission prompt, then refresh the current target.'
+        finally:
+            write_json(self.directory/'loopback-operation.json',operation)
+            with self.lock:
+                self.busy=False;self.phase='ready';self.message='DST host session is running.'
     def start(self,open_browser=True):
         # This foreground process, rather than a systemd service, owns WSL lifetime.
         self.session_lock=(self.directory/'session.lock').open('a')
@@ -336,6 +399,19 @@ Write-Output $path
         # Installer upgrades can replace the active release while this window
         # remains open. Reopen the saved current installation, not an old release.
         self.config=json.loads((self.directory/'config.json').read_text(encoding='utf-8'))
+        self.network_error=None
+        self.network_pending=False
+        if (self.directory/'lan-settings.json').exists():
+            import wsl_lan
+            try:
+                wsl_lan.apply(self.directory,run)
+                desired=json.loads((self.directory/'lan-settings.json').read_text())
+                actual=run(['wslinfo','--networking-mode']).stdout.decode().strip().lower()
+                self.network_pending=desired['mode']!=actual
+                write_json(self.directory/'lan-settings-status.json',{})
+            except (ValueError,OSError,subprocess.SubprocessError) as error:
+                self.network_error=str(error)
+                write_json(self.directory/'lan-settings-status.json',{'error':self.network_error})
         # HTTPS can be enabled or disabled after this hosting window opened.
         # Follow the active override, including a return to the HTTP listener.
         tls=self.root/'https.compose.json';host=self.root/'host.compose.json'
@@ -364,8 +440,21 @@ Write-Output $path
             if file.endswith('.json'):
                 value=json.loads(Path(file).read_text(encoding='utf-8'))
                 if value.get('x-dst-https-origin'):origin=value['x-dst-https-origin']
+        if origin.startswith('http://'):
+            loopback=f'http://127.0.0.1:{parts.port or 8088}'
+            if self.windows_console_reachable(loopback):origin=loopback
+            elif not self.windows_console_reachable(origin):
+                raise ValueError('DST is running inside WSL, but Windows cannot reach its console. Check the Windows network/firewall settings and retry Open browser.')
         self.console_origin=origin
-        if (self.directory/'resume.json').exists():
+        try:
+            network=self.network_info()
+            import loopback_ingress
+            loopback_ingress.restore(self.directory,network,windows_script)
+        except (ValueError,OSError,KeyError,subprocess.SubprocessError) as error:
+            print('Same-PC network check: '+str(error),flush=True)
+        if (self.directory/'lan-settings.json').exists() and not self.network_error:
+            self.reconcile_private_address()
+        if (self.directory/'resume.json').exists() and not self.network_error and not self.network_pending:
             resume=json.loads((self.directory/'resume.json').read_text())
             state=self.manager('status')
             same_stop=not resume.get('stopOperation') or state.get('operation',{}).get('id')==resume['stopOperation']
@@ -381,6 +470,51 @@ Write-Output $path
                     self.resume_worker=threading.Thread(target=self.finish_resume,daemon=True)
                     self.resume_worker.start()
         if open_browser:self.open_browser()
+    def reconcile_private_address(self):
+        state=self.manager('status');profile=state.get('profile') or {}
+        try:private=ipaddress.ip_address(profile.get('address','')).is_private
+        except ValueError:return
+        network=self.network_info()
+        desired=json.loads((self.directory/'lan-settings.json').read_text())
+        if network['networkingMode']!=desired['mode']:return
+        address=network['dockerIp']
+        if not private or profile.get('address')==address:return
+        result=self.manager('network.set',mode='private',address=address,expectedAddress=profile['address'])
+        operation=result.get('operation',{}).get('id');deadline=time.monotonic()+120
+        while time.monotonic()<deadline:
+            current=self.manager('status');op=current.get('operation') or {}
+            if op.get('id')!=operation:raise ValueError('The address operation changed during host startup.')
+            if op.get('phase')=='completed':
+                path=self.directory/'resume.json'
+                if path.exists():
+                    resume=json.loads(path.read_text());resume['stopOperation']=operation;write_json(path,resume)
+                return
+            if op.get('phase') in {'failed','interrupted'}:raise ValueError(op.get('error','Docker address update failed.'))
+            time.sleep(1)
+        raise ValueError('The Docker address update is still running. Review its status before starting maps.')
+    def network_info(self,public_ip=None):
+        import wsl_network
+        value=wsl_network.snapshot(windows_script,run,public_ip)
+        saved=self.directory/'lan-settings.json'
+        if value['networkingMode']=='bridged' and saved.exists():
+            desired=json.loads(saved.read_text()).get('address')
+            addresses=json.loads(run(['ip','-j','-4','address']).stdout)
+            if desired and any(row.get('local')==desired for iface in addresses for row in iface.get('addr_info',[])):
+                value['dockerIp']=desired;value['routerForwardIp']=desired
+        write_json(self.directory/'network-info.json',value)
+        (self.directory/'network-info.json').chmod(0o644)
+        return value
+    def windows_console_reachable(self,origin):
+        # Probe from the browser's Windows host. Linux health alone cannot
+        # detect a blocked WSL interface or disabled localhost forwarding.
+        script=("$ErrorActionPreference='Stop';$response=$null;try {"
+                "$request=[Net.HttpWebRequest]::Create("+ps_literal(origin+'/')+");"
+                "$request.Proxy=$null;$request.Timeout=3000;$request.ReadWriteTimeout=3000;"
+                "$request.AllowAutoRedirect=$false;$response=$request.GetResponse();"
+                "if([int]$response.StatusCode -eq 200 -and $response.ContentType -like 'text/html*'){'ready'}else{'unavailable'}"
+                "} catch {'unavailable'} finally {if($response){$response.Dispose()}}")
+        try:return windows_script(script)=='ready'
+        except subprocess.SubprocessError:return False
     def browser_url(self):
         origin=getattr(self,'console_origin',None)
         if not origin:raise ValueError('The console address is not ready.')

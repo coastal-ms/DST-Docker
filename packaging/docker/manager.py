@@ -1450,6 +1450,45 @@ def refresh_game_adapters(state,engine):
     return public_state(state,engine)
 
 
+def network_profile(state,request):
+    if state.get('pendingAddressChange') or state.get('generationChange'):
+        raise ValueError('Recover the interrupted network update before applying another change.')
+    if not state.get('profile') or not state.get('services'):
+        raise ValueError('Finish preparing your world before changing player access.')
+    if request.get('expectedAddress')!=state['profile']['address']:
+        raise ValueError('The server address changed. Refresh Settings before applying.')
+    mode=request.get('mode')
+    if mode not in {'private','public'}:raise ValueError('Choose Private / LAN or Public / External.')
+    if not isinstance(request.get('address'),str):raise ValueError('Enter a valid IPv4 address.')
+    try:address=ipaddress.IPv4Address(request.get('address'))
+    except (ValueError,TypeError):raise ValueError('Enter a valid IPv4 address.') from None
+    local=address.is_loopback or any(address in ipaddress.IPv4Network(cidr) for cidr in ('10.0.0.0/8','172.16.0.0/12','192.168.0.0/16'))
+    if mode=='public' and (not address.is_global or address.is_multicast):
+        raise ValueError('Public / External requires a public IPv4 address.')
+    if mode=='private' and not local:
+        raise ValueError('Private / LAN requires a LAN or loopback IPv4 address.')
+    return validate_profile({**state['profile'],'address':str(address),'gamePortBase':7777})
+
+
+def set_network(state,engine,request):
+    profile=network_profile(state,request)
+    if profile==state['profile'] and state['worldPlan']['ports']['rmq-game']==31982:return
+    # Reject an incompatible package before stopping a healthy world.
+    template=read_template()
+    if template['sha256']!=state['worldPlan']['templateSha256']:
+        raise ValueError('The installed game package changed; review the server update before changing network settings.')
+    plan_world(state['id'],profile,template,assets_state(),state['database'],state.get('mapMemoryOverrides'),state.get('memorySwap'))
+    resume=state.get('desiredState')=='running'
+    if state.get('operation',{}).get('action')=='network.set':
+        state['operation'].update(stage='stopping',targetAddress=profile['address'],targetMode=request['mode'],resume=resume);save(state)
+    stop_services(state,engine)
+    if state.get('operation',{}).get('action')=='network.set':state['operation']['stage']='reconfiguring';save(state)
+    reconfigure_address(state,engine,profile)
+    if resume:
+        if state.get('operation',{}).get('action')=='network.set':state['operation']['stage']='restarting';save(state)
+        start_services(state,engine)
+
+
 def reconfigure_address(state,engine,profile):
     if state.get('desiredState')!='stopped':raise ValueError('Stop the world before changing its connection address.')
     if state.get('pendingAddressChange'):raise ValueError('The previous address update needs recovery before another can start.')
@@ -1612,6 +1651,7 @@ def run_operation(state,engine,request):
         elif action=='database.start':ensure_database_ready(state,engine)
         elif action=='database.stop':stop_database_only(state,engine)
         elif action=='world.configure':configure_world(state,engine,request.get('profile',{}))
+        elif action=='network.set':set_network(state,engine,request)
         elif action=='world.rename':rename_world(state,engine,request.get('name'))
         elif action=='connections.prepare':prepare_connections(state,engine)
         elif action=='services.prepare':prepare_services(state,engine)
@@ -1819,9 +1859,10 @@ def dispatch(request, engine=None, *, resume_running_only=False):
             reply=settings_client.request({'action':'backups.create','files':request.get('files')})
             if not reply.get('ok'):raise ValueError(reply.get('error','Settings backups could not be created.'))
             return reply['data']
-        if action in {'memory-swap.set','memory-swap.recover','database.create','database.initialize','database.migrate','database.start','database.stop','world.configure','world.rename','connections.prepare',
+        if action in {'network.set','memory-swap.set','memory-swap.recover','database.create','database.initialize','database.migrate','database.start','database.stop','world.configure','world.rename','connections.prepare',
                       'services.prepare','services.start','services.stop','services.restart','services.refresh-core-adapters','scale.prepare','maps.start','maps.stop','maps.restart','maps.observers.prepare','files.prepare','settings.prepare','regis.set','regis.recover','logs.export','updates.stage','updates.apply','updates.recover','rmq.publish','rmq.courier','games.refresh-adapters','backups.create','backups.verify','backups.restore','backups.delete','backups.cleanup.recover','backups.export','backups.import','backups.schedule.recover','backups.mirror.sync','backups.mirror.recover','world-restart.apply','world-restart.recover','world-restart.rollback','world-restart.research','world-restart.research-recover'}:
             if action=='memory-swap.set':memory_swap.validate(request)
+            if action=='network.set':network_profile(state,request)
             if action=='memory-swap.recover' and (type(request.get('restorePrevious',False)) is not bool or request.get('confirmation')!='RECOVER MEMORY SWAP'):
                 raise ValueError('Confirm Memory Swap recovery and supply a JSON boolean for restoring its previous policy.')
             if action in {'world-restart.apply','world-restart.rollback'} and request.get('confirmation')!=('RESTART WORLD' if action=='world-restart.apply' else 'ROLL BACK WORLD'):
@@ -1832,7 +1873,7 @@ def dispatch(request, engine=None, *, resume_running_only=False):
             if action=='updates.apply' and (not isinstance(request.get('expectedBuild'),str) or not re.fullmatch(r'[0-9]{1,18}',request['expectedBuild']) or type(request.get('allowOnline',False)) is not bool or type(request.get('withTanks',False)) is not bool):raise ValueError('Supply a valid build and JSON boolean online-player and Tank authorization.')
             if 'publishGateway' in request and (action!='services.start' or type(request['publishGateway']) is not bool):raise ValueError('Only a typed start can select gateway publication.')
             if action=='logs.export' and request.get('scope') not in {'battlegroup','operator','diagnostics'}:raise ValueError('Choose battlegroup, operator or diagnostics logs.')
-            if action in {'updates.apply','updates.recover','database.migrate','database.initialize','services.restart','world-restart.apply','world-restart.rollback','world-restart.research'} and any(
+            if action in {'network.set','updates.apply','updates.recover','database.migrate','database.initialize','services.restart','world-restart.apply','world-restart.rollback','world-restart.research'} and any(
                 entry.get('phase') in {'preparing','running'} or entry.get('verification',{}).get('phase') in {'preparing','running'}
                 for entry in state.get('backups',{}).values()):
                 raise OperationBusyError('Wait for the active backup or restore rehearsal before database maintenance.')
@@ -1842,6 +1883,7 @@ def dispatch(request, engine=None, *, resume_running_only=False):
                 if any(entry.get('phase') in {'preparing','running'} or entry.get('verification',{}).get('phase') in {'preparing','running'} for entry in state.get('backups',{}).values()):
                     raise OperationBusyError('A backup or restore rehearsal is still running.')
             state['operation']={'id':uuid.uuid4().hex,'action':action,'phase':'running','startedAt':time.time()}
+            if action=='network.set':state['operation'].update(stage='stopping',targetAddress=request['address'],targetMode=request['mode'],resume=state.get('desiredState')=='running')
             if action=='updates.apply':state['operation']['withTanks']=request.get('withTanks',False)
             if 'requestId' in request:
                 state['operation']['requestId']=request['requestId']

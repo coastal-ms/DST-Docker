@@ -1,4 +1,4 @@
-﻿# Ports — external TCP port checks; UDP is marked as skipped.
+# Ports — external TCP port checks; UDP is marked as skipped.
 # Cache confirmed open checks for six hours. Retry an inconclusive check on
 # the next status poll (at least ten seconds apart). Retry a closed
 # result after one minute so a stopped/restarting server can recover its badge.
@@ -187,9 +187,9 @@ function Test-DunePortCustom {
 }
 
 function Get-DunePortStatus {
-    param([switch]$Force, [string]$BattlegroupState, [object[]]$RequiredPorts)
+    param([switch]$Force, [string]$BattlegroupState, [object[]]$RequiredPorts, [string]$PublicIp)
     $table = $script:DuneApiLockTable
-    if (-not $table) { return Get-DunePortStatusCore -Force:$Force -BattlegroupState $BattlegroupState -RequiredPorts $RequiredPorts }
+    if (-not $table) { return Get-DunePortStatusCore -Force:$Force -BattlegroupState $BattlegroupState -RequiredPorts $RequiredPorts -PublicIp $PublicIp }
     # Share one result across HTTP workers and serialize checks so simultaneous
     # status refreshes cannot dispatch duplicate external probes.
     [System.Threading.Monitor]::Enter($table.SyncRoot)
@@ -205,7 +205,7 @@ function Get-DunePortStatus {
         $script:DunePortCheckFetched = if ($entry) { $entry.Fetched } else { [datetime]::MinValue }
         $script:DunePortCheckBgState = if ($entry) { $entry.BattlegroupState } else { $null }
         $script:DunePortCheckPortSignature = if ($entry) { $entry.PortSignature } else { $null }
-        $status = Get-DunePortStatusCore -Force:$Force -BattlegroupState $BattlegroupState -RequiredPorts $RequiredPorts
+        $status = Get-DunePortStatusCore -Force:$Force -BattlegroupState $BattlegroupState -RequiredPorts $RequiredPorts -PublicIp $PublicIp
         if ($script:DunePortCheckCache) {
             $table['ports.snapshot'] = @{
                 Results = $script:DunePortCheckCache
@@ -220,7 +220,7 @@ function Get-DunePortStatus {
 }
 
 function Get-DunePortStatusCore {
-    param([switch]$Force, [string]$BattlegroupState, [object[]]$RequiredPorts)
+    param([switch]$Force, [string]$BattlegroupState, [object[]]$RequiredPorts, [string]$PublicIp)
     if ((Get-Command Test-DuneSoloInstallation -ErrorAction SilentlyContinue) -and (Test-DuneSoloInstallation)) { return $null }
     $cfg  = Read-DuneConfig
     $mode = if ($cfg.PortCheckMode) { $cfg.PortCheckMode } else { 'builtin' }
@@ -243,6 +243,7 @@ function Get-DunePortStatusCore {
     }
     $portsToCheck = if ($RequiredPorts) { $RequiredPorts } else { $script:DuneRequiredPorts }
     $signature = ($portsToCheck | ForEach-Object { '{0}:{1}' -f $_.Protocol,$_.Port }) -join ','
+    if ($PublicIp) { $signature += '|'+$PublicIp }
     if ($signature -ne $script:DunePortCheckPortSignature) {
         $script:DunePortCheckCache = $null
         $script:DunePortCheckPortSignature = $signature
@@ -281,7 +282,7 @@ function Get-DunePortStatusCore {
         }
     }
 
-    $pubIp = Get-DunePublicIp
+    $pubIp = if ($PublicIp) { $PublicIp } else { Get-DunePublicIp }
     $results = @()
     foreach ($p in $portsToCheck) {
         $status = switch ($effectiveMode) {

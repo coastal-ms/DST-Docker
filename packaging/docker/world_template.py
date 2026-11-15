@@ -22,7 +22,7 @@ def validate_profile(value):
         labels=address.removesuffix('.').split('.')
         if not all(re.fullmatch(r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?',label) for label in labels):
             raise ValueError('Enter a valid IP address or hostname.')
-    base=value.get('gamePortBase',28777)
+    base=value.get('gamePortBase',7777)
     if type(base) is not int or not 1024<=base<=65535: raise ValueError('Choose a valid game-port base.')
     return {'name':name,'region':region,'address':address,'gamePortBase':base}
 

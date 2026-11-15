@@ -100,6 +100,8 @@ function Test-DuneDockerRouteQualified {
     if($Path -eq '/api/gameplay/vehicles/regis-tanks' -and $Method -in @('GET','POST')){return $true}
     if($Method -eq 'POST' -and $Path -in @('/api/docker/owner/setup','/api/portal-auth/login','/api/portal-auth/logout','/api/portal-auth/change-password')){return $true}
     if($Path -eq '/api/docker/resources' -and $Method -in @('GET','PUT')){return $true}
+    if($Path -eq '/api/docker/network/public-ip' -and $Method -eq 'GET'){return $true}
+    if($Path -eq '/api/docker/network' -and $Method -eq 'GET'){return $true}
     if($Path -eq '/api/docker/memory-balancing' -and $Method -in @('GET','PUT')){return $true}
     if($Path -eq '/api/docker/memory-swap' -and $Method -in @('GET','PUT')){return $true}
     if($Path -eq '/api/docker/memory-swap/recover' -and $Method -eq 'POST'){return $true}

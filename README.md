@@ -92,12 +92,12 @@ If YouTube or another video freezes while the portal is visible in Chrome despit
 
 ## Network ports
 
-Game connections and browser access use separate ports. Check **Setup Wizard > Your world > Game-port base** for your configured base, called `B` below; the default is **28777**. Changing the console port does not change the game ports.
+Game connections and browser access use separate ports. Check **Setup Wizard > Your world > Game-port base** for your configured base, called `B` below; the default is **7777**. Changing the console port does not change the game ports. In **Settings > Player connections**, choose **Private / LAN** or **Public / External** and apply the corresponding IPv4 address. Public access detects your public IPv4 automatically. The separate Docker IP is the router forwarding target; it stays visible when the advertised public address changes. Applying uses TCP **31982** and UDP **7777-7810**, updates the advertised addresses and restarts a running world. Existing custom-port installations keep their current ports until this change is applied.
 
 | Purpose | Protocol | Default / configured port | Who needs access |
 | --- | --- | --- | --- |
-| Game traffic for each map partition | UDP | `B + partition ID - 1`; Hagga **28777**, Overmap **28778** with the default base | Players. Allow every partition's game port, including maps that start on demand. |
-| Game login and messaging | TCP | `B + 1002` = **29779** | Players. Forward this along with the game UDP ports when hosting behind a router. |
+| Game traffic for each map partition | UDP | `B + partition ID - 1`; Hagga **7777**, Overmap **7778** with the default base | Players. Allow every partition's game port, including maps that start on demand. |
+| Game login and messaging | TCP | **31982** | Players. Forward this along with the game UDP ports when hosting behind a router. |
 | Browser portal and its API | TCP | **8088**, or your selected console port | Browser users only; it is not required for game login. HTTP is the default. Optional local HTTPS uses the same selected external port. |
 | Tailscale private browser access / public HTTPS Funnel | HTTPS | **443** on the address shown by Tailscale | Optional browser access. No inbound router forward is needed for this path; it does not carry game traffic. |
 
