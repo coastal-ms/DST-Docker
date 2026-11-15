@@ -5,7 +5,7 @@ import os
 import re
 import time
 import uuid
-from assets import package_inventory, MISSING_CONFIGURATION
+from assets import package_inventory, MISSING_CONFIGURATION, MANIFEST_RECOVERY_FAILED
 from asset_version import installed_version
 from world_template import read_template
 
@@ -72,11 +72,11 @@ def observe_stage(state, engine, assets=ASSETS):
                 record.update(phase='ready', installedBuild=version['installedBuild'], templateSha256=template['sha256'], images=inventory)
             except Exception:
                 message = 'The staged official package failed download or validation. The active installation was left unchanged.'
-                # Only this fixed installer message is safe for the public status.
+                # Only fixed installer messages are safe for the public status.
                 try:
                     failure = json.loads((assets / 'staged' / record['id'] / 'install-state.json').read_text())
-                    if failure.get('error') == MISSING_CONFIGURATION:
-                        message = MISSING_CONFIGURATION
+                    if failure.get('error') in (MISSING_CONFIGURATION, MANIFEST_RECOVERY_FAILED):
+                        message = failure['error']
                 except (OSError, ValueError):
                     pass
                 record.update(phase='failed', error=message)

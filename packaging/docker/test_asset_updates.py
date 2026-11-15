@@ -61,6 +61,16 @@ class AssetUpdateTests(unittest.TestCase):
             result,_=asset_updates.observe_stage(state,engine,root)
             self.assertEqual(result['error'],asset_updates.MISSING_CONFIGURATION)
 
+    def test_exhausted_manifest_recovery_is_reported_without_activating_the_package(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);stage=root/'staged'/('b'*32);stage.mkdir(parents=True)
+            (stage/'install-state.json').write_text(json.dumps({'state':'failed','error':asset_updates.MANIFEST_RECOVERY_FAILED}))
+            state={'id':'a'*32,'assetUpdate':{'id':'b'*32,'job':'owned','phase':'downloading','expectedBuild':'120'}}
+            engine=Mock(spec=Engine);engine.assert_owned.return_value={'Config':{'Labels':{'io.dst.stage':'b'*32}},'State':{'Status':'exited','ExitCode':1}}
+            result,_=asset_updates.observe_stage(state,engine,root)
+            self.assertEqual(result['phase'],'failed');self.assertEqual(result['error'],asset_updates.MANIFEST_RECOVERY_FAILED)
+            self.assertNotIn('worldPlan',state)
+
     def test_download_container_receives_only_owned_asset_storage_and_fixed_installer_identity(self):
         class Client(Engine):
             def request(self,method,path,body=None,**kwargs):

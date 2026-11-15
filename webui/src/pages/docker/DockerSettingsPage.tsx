@@ -1,5 +1,6 @@
 import { PageHeader } from '../../components/PageHeader'
 import { AppearanceCard } from '../settings/AppearanceCard'
+import { UsageCountCard } from '../settings/UsageCountCard'
 import { MemoryBalancingControl } from '../../components/MemoryBalancingControl'
 import { Link } from '../../router'
 import DockerResourcesCard from './DockerResourcesCard'
@@ -19,6 +20,7 @@ export default function DockerSettingsPage() {
       {canAccessOwnerSurfaces && <WslMemoryCard />}
       <MemoryBalancingControl />
       {canAccessOwnerSurfaces && <DockerTailscaleAccess />}
+      {canAccessOwnerSurfaces && <UsageCountCard />}
       <AppearanceCard />
       {canAccessOwnerSurfaces && <div className="card p-5"><PortalAccountsManager docker /></div>}
       <div className="card p-5 flex flex-wrap gap-4"><Link to="/server-settings" className="text-accent">Server settings</Link><Link to="/setup" className="text-accent">Server setup</Link></div>

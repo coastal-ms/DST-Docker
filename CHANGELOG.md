@@ -1,5 +1,12 @@
 # DST Docker changelog
 
+## [1.0.7]
+
+- Recover SteamCMD 0x6 download failures automatically with manifest cleanup and bounded retries.
+- Prepare fresh WSL imports and continue Docker installation after a confirmed distribution restart.
+- Avoid imported Ubuntu first-boot setup stalls while preserving existing WSL settings.
+- Add anonymous installation counting with a Settings opt-out, six-hour reporting and a manual refresh tool.
+
 ## [1.0.6]
 
 - Keep manual Warm independent of Follow Overmap: enabling Warm selects Keep running, and disabling it selects On demand.

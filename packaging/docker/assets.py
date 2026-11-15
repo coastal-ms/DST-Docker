@@ -13,6 +13,10 @@ ROOT = Path('/srv/dst')
 STEAM_URL = 'https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz'
 APP_ID = '4754530'
 MISSING_CONFIGURATION = "Steam did not provide the server package configuration after three attempts. Retry Update Server."
+MANIFEST_RECOVERY_FAILED = "Steam still reports server package state 0x6 after three attempts. Automatic app-manifest cleanup and retry did not resolve it. Check free disk space and Steam connectivity, then retry Update Server."
+MAX_ATTEMPTS = 3
+MANIFEST_RETRY_SECONDS = 20
+STATE_0X6 = re.compile(r"\bApp\s+['\"]4754530['\"]\s+state\s+is\s+0x0*6\b", re.IGNORECASE)
 
 
 def write_state(state, root=ROOT, **fields):
@@ -46,6 +50,27 @@ def package_inventory(server):
     return images
 
 
+def reset_app_manifest(root):
+    """Remove only this install's manifest, never follow a link out of its tree."""
+    server = root / 'server'
+    directory = server / 'steamapps'
+    manifest = directory / ('appmanifest_' + APP_ID + '.acf')
+    if any(path.is_symlink() for path in (server, directory, manifest)) or not manifest.resolve().is_relative_to(root.resolve()):
+        raise ValueError('App-manifest cleanup stopped because the download path is not local to this installation.')
+    if manifest.exists():
+        if not manifest.is_file():
+            raise ValueError('App-manifest cleanup stopped because the manifest is not a regular file.')
+        manifest.unlink()
+        return 'Removed the download app manifest; SteamCMD will regenerate it.'
+    return 'The download app manifest is already absent; SteamCMD will regenerate it.'
+
+
+def retry_message(log, message):
+    with log.open('a', encoding='utf-8') as output:
+        output.write('[DST] ' + message + '\n')
+    print(message, flush=True)
+
+
 def install(root=ROOT, expected_build=None):
     if expected_build is not None and not re.fullmatch(r'[0-9]{1,18}', expected_build):
         raise ValueError('Invalid expected official package build.')
@@ -69,18 +94,36 @@ def install(root=ROOT, expected_build=None):
                    '+@NoPromptForPassword', '1', '+@sSteamCmdForcePlatformType', 'linux',
                    '+force_install_dir', str(server), '+login', 'anonymous',
                    '+app_update', APP_ID, 'validate', '+logoff', '+quit']
-        for attempt in range(3):
+        for attempt in range(MAX_ATTEMPTS):
             with log.open('w' if attempt == 0 else 'a', encoding='utf-8') as output:
                 offset = output.tell()
                 result = subprocess.run(command, stdout=output, stderr=subprocess.STDOUT, env={**os.environ, 'HOME': '/home/dst'}, check=False)
-            if result.returncode == 0:
-                break
             with log.open(encoding='utf-8', errors='replace') as output:
                 output.seek(offset)
-                missing_configuration = "Failed to install app '4754530' (Missing configuration)" in output.read()
+                attempt_output = output.read()
+            state_0x6 = STATE_0X6.search(attempt_output) is not None
+            if state_0x6:
+                # Steam's app error takes precedence over a successful launcher
+                # exit. A later attempt must be judged from its own output only.
+                if attempt == MAX_ATTEMPTS - 1:
+                    retry_message(log, MANIFEST_RECOVERY_FAILED)
+                    raise RuntimeError(MANIFEST_RECOVERY_FAILED)
+                cleanup = reset_app_manifest(root)
+                message = (f'SteamCMD reported app {APP_ID} state 0x6. {cleanup} '
+                           f'Retrying in {MANIFEST_RETRY_SECONDS} seconds '
+                           f'(attempt {attempt + 2} of {MAX_ATTEMPTS}).')
+                retry_message(log, message)
+                write_state('downloading', root, appId=APP_ID, attempt=attempt + 2,
+                            maxAttempts=MAX_ATTEMPTS, retryReason='steam-state-0x6',
+                            retryAt=time.time() + MANIFEST_RETRY_SECONDS, message=message)
+                time.sleep(MANIFEST_RETRY_SECONDS)
+                continue
+            if result.returncode == 0:
+                break
+            missing_configuration = "Failed to install app '4754530' (Missing configuration)" in attempt_output
             if result.returncode != 8 or not missing_configuration:
                 raise RuntimeError(f'SteamCMD exited with code {result.returncode}. Inspect the local installation log.')
-            if attempt == 2:
+            if attempt == MAX_ATTEMPTS - 1:
                 raise RuntimeError(MISSING_CONFIGURATION)
             time.sleep(2 * (attempt + 1))
         images = package_inventory(server)
