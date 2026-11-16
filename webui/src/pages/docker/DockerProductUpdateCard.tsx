@@ -3,6 +3,7 @@ import { api } from '../../api/client'
 import { confirmAction } from '../../util/actionConfirmation'
 import { checkDockerProductUpdate, publishDockerProductUpdate, useDockerProductUpdate } from '../../hooks/useDockerProductUpdate'
 import type { DockerProductUpdate } from '../../hooks/useDockerProductUpdate'
+import { version as portalVersion } from '../../../package.json'
 
 export type { DockerProductUpdate } from '../../hooks/useDockerProductUpdate'
 
@@ -47,6 +48,8 @@ export function DockerProductUpdateCard() {
     finally { setBusy(false) }
   }
   const completed = status?.operation?.phase === 'completed' && status.currentVersion === status.operation.toVersion
+  const needsReload = completed && portalVersion !== status.currentVersion
+  const showOperation = status?.operation && (!completed || needsReload)
   return <section id="settings.docker-updates" className="card p-5 space-y-4" data-section-nav-id="settings.docker-updates" data-section-nav-label="DST Docker updates">
     <h2 className="text-lg font-semibold">DST Docker updates</h2>
     <p className="text-sm text-text-muted">Update the DST management portal and Docker services. Official game-server updates are managed separately in Server updates.</p>
@@ -58,14 +61,14 @@ export function DockerProductUpdateCard() {
     {status?.available && <p>Version {status.latestVersion} is available.</p>}
     <p className="text-sm text-text-muted">Stop the battlegroup in Commands before updating. Keep this tab open; the portal reconnects after its restart. Accounts, server data and the selected console port are kept.</p>
     {(error || status?.error) && <p role="alert" className="text-danger">{running && reconnecting ? 'The portal is reconnecting. Update completion has not been confirmed yet.' : error || status?.error}</p>}
-    {status?.operation && <p role="status" className={status.operation.phase === 'failed' ? 'text-danger' : completed ? 'text-success' : 'text-text-muted'}>
+    {showOperation && status?.operation && <p role="status" className={status.operation.phase === 'failed' ? 'text-danger' : completed ? 'text-success' : 'text-text-muted'}>
       {completed ? `DST Docker ${status.currentVersion} is installed. Reload the portal to use the updated interface.` : status.operation.phase === 'completed' ? 'Waiting for the updated portal to respond…' : status.operation.message}
     </p>}
     {status?.operation?.phase === 'failed' && <p className="text-sm text-text-muted">The update log is in portal-update/update.log under your installation folder. You can retry after correcting the reported problem.</p>}
     <div className="flex flex-wrap gap-3">
       <button type="button" className="btn-secondary" disabled={busy || running} onClick={() => void check()}>{busy ? 'Working…' : 'Check now'}</button>
       <button type="button" className="btn-primary" disabled={busy || running || !status?.supported || !status.available || !!status.error || !status.tag || !status.commit} onClick={() => void install()}>{running ? 'Updating DST Docker…' : 'Update DST Docker'}</button>
-      {completed && <button type="button" className="btn-secondary" onClick={() => window.location.reload()}>Reload portal</button>}
+      {needsReload && <button type="button" className="btn-secondary" onClick={() => window.location.reload()}>Reload portal</button>}
     </div>
   </section>
 }
