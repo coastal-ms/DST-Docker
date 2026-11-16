@@ -52,7 +52,11 @@ export async function prepareFirstWorld(details: WorldDetails, update: (state: S
   }
   if (state.startupRecoveryError) throw new Error(state.startupRecoveryError)
   await wait(() => state.operation?.phase !== 'running', 'Finishing the current step')
-  if (setupComplete(state)) return state
+  const failedPreparation = state.operation?.action === 'services.prepare'
+    && ['failed', 'interrupted'].includes(state.operation.phase)
+  // Prepared container records can exist even when the final helper failed.
+  // An explicit Continue must retry that unfinished preparation, not claim success.
+  if (setupComplete(state) && !failedPreparation) return state
   if (state.assets.state !== 'downloaded') throw new Error('The official game files are still downloading. Keep the installer open and continue when the download finishes.')
   if (!state.credentialsSaved) await action('credentials.save', 'Saving your service token', { token: details.token })
   if (!state.database) await action('database.create', 'Creating your server storage', { port: details.port })

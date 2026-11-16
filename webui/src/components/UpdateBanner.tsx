@@ -3,6 +3,7 @@ import { Icon } from './Icon'
 import { useUpdateCheck } from '../hooks/useUpdateCheck'
 import { installUpdate } from '../api/update'
 import { fmtToolVersion } from '../format'
+import { DockerUpdateBanner } from './DockerUpdateBanner'
 
 const DISMISS_KEY = 'dune.update.dismissed'
 
@@ -106,6 +107,10 @@ function UpdatingPage({ toVersion }: { toVersion?: string }) {
 }
 
 export function UpdateBanner() {
+  return import.meta.env.VITE_DST_EDITION === 'docker' ? <DockerUpdateBanner /> : <WindowsUpdateBanner />
+}
+
+function WindowsUpdateBanner() {
   const { data, error } = useUpdateCheck()
   const [installing, setInstalling] = useState(false)
   const [launched, setLaunched] = useState(false)

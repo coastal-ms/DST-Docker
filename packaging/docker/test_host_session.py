@@ -15,6 +15,7 @@ class HostSessionTests(unittest.TestCase):
         self.temp=tempfile.TemporaryDirectory();self.root=Path(self.temp.name);(self.root/'host-session').mkdir()
         (self.root/'host-session/config.json').write_text(json.dumps({'project':'fixture','distribution':'Ubuntu','source':'/home/test/current','composeFiles':['/home/test/current/compose.yaml']}))
         self.session=host.HostSession(self.root)
+        self.session.owner_setup_required=Mock(return_value=False)
         self.session.windows_console_reachable=Mock(side_effect=lambda origin: '127.0.0.1' not in origin)
         self.session.network_info=Mock(return_value={'dockerIp':'192.168.1.5','wslIp':'172.25.1.2','networkingMode':'nat'})
         self.state={'projectId':'world','desiredState':'running','operation':{'phase':'completed'},'services':[],'backups':[]}
@@ -23,6 +24,7 @@ class HostSessionTests(unittest.TestCase):
         self.session.browser_executable=Mock(return_value=r'C:\Program Files\Microsoft\Edge\Application\msedge.exe')
         with redirect_stdout(io.StringIO()):self.session.choose_browser(lambda _: '3')
         other=host.HostSession(self.root)
+        other.owner_setup_required=Mock(return_value=False)
         self.assertEqual(other.browser_preference(),'edge')
         self.assertNotIn('browser',other.config)
         other.console_origin='http://172.25.1.2:8088'
@@ -211,6 +213,28 @@ class HostSessionTests(unittest.TestCase):
         self.assertIn('One-time password:',output.getvalue())
         self.assertFalse(self.session.busy);self.assertEqual(self.session.phase,'ready')
 
+    def test_missing_owner_recovery_displays_current_setup_link_without_resetting_accounts(self):
+        self.session.console_origin='http://172.25.1.2:8088'
+        self.session.compose=Mock(side_effect=['','http://127.0.0.1:8088/?t=synthetic-only'])
+        with redirect_stdout(io.StringIO()) as output,patch.object(host,'windows_script') as windows:
+            self.session.owner_recovery()
+        self.assertIn('Create your first Owner account:',output.getvalue())
+        self.assertIn('http://172.25.1.2:8088/?t=synthetic-only',output.getvalue())
+        self.assertNotIn('printed by the installer',output.getvalue())
+        self.assertEqual(self.session.compose.call_count,2)
+        self.assertFalse(any('Reset' in call.args for call in self.session.compose.call_args_list))
+        windows.assert_not_called()
+        self.assertFalse(self.session.busy)
+
+    def test_first_browser_launch_displays_owner_link_without_an_unauthenticated_browser_dead_end(self):
+        self.session.owner_setup_required.return_value=True
+        self.session.console_origin='https://192.168.1.5:8443'
+        self.session.compose=Mock(return_value='http://127.0.0.1:18088/?t=synthetic-only')
+        with redirect_stdout(io.StringIO()) as output,patch.object(host,'windows_script') as windows:
+            self.session.open_browser()
+        self.assertIn('https://192.168.1.5:8443/?t=synthetic-only',output.getvalue())
+        windows.assert_not_called()
+
     def test_cancelled_owner_recovery_never_resets_an_account(self):
         self.session.compose=Mock(return_value='Enabled\tFirstOwner\nEnabled\tSecondOwner')
         with redirect_stdout(io.StringIO()):self.session.owner_recovery(lambda _: '')
@@ -225,7 +249,7 @@ class HostSessionTests(unittest.TestCase):
         self.session.owner_recovery=Mock()
         with redirect_stdout(io.StringIO()) as output:self.session.console_menu(read)
         self.session.owner_recovery.assert_called_once_with(read)
-        self.assertIn('Recover Owner password',output.getvalue())
+        self.assertIn('Create Owner account / recover password',output.getvalue())
 
     def test_console_shutdown_runs_from_menu_selection_without_another_prompt(self):
         answers=iter(['5'])

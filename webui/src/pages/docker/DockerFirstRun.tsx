@@ -185,6 +185,8 @@ function FirstWorld({ initial, onFinish }: { initial: SetupState; onFinish: () =
         </>}
         {step === 3 && <>
           <p>Your Funcom self-host service token connects this server to the game services.</p>
+          <p><a className="first-run-token-link" href="https://account.duneawakening.com/account" target="_blank" rel="noopener noreferrer">Get your Funcom token ↗</a></p>
+          <p className="first-run-hint">Sign in to your Dune: Awakening account, then return here to paste your self-host service token. Your setup stays open in this tab.</p>
           {state.credentialsSaved ? <p className="first-run-saved">✓ Your Funcom service token is saved on this host.</p> : <label>Funcom service token<textarea aria-label="Funcom service token" aria-describedby="setup-token-help" required minLength={20} maxLength={8192} autoComplete="off" spellCheck={false} rows={5} value={token} onChange={event => setToken(event.target.value)} /><small id="setup-token-help">Paste your self-host service token from Funcom. DST saves it on your Docker host when you begin preparation.</small></label>}
         </>}
         {step === 4 && <>

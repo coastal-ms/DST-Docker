@@ -1,20 +1,13 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api } from '../../api/client'
 import { confirmAction } from '../../util/actionConfirmation'
+import { checkDockerProductUpdate, publishDockerProductUpdate, useDockerProductUpdate } from '../../hooks/useDockerProductUpdate'
+import type { DockerProductUpdate } from '../../hooks/useDockerProductUpdate'
 
-export interface DockerProductUpdate {
-  supported: boolean
-  currentVersion?: string
-  latestVersion?: string
-  available: boolean
-  tag?: string
-  commit?: string
-  error?: string
-  operation?: { id: string; phase: 'running' | 'completed' | 'failed'; message: string; toVersion?: string }
-}
+export type { DockerProductUpdate } from '../../hooks/useDockerProductUpdate'
 
 export function DockerProductUpdateCard() {
-  const [status, setStatus] = useState<DockerProductUpdate | null>(null)
+  const status = useDockerProductUpdate()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [reconnecting, setReconnecting] = useState(false)
@@ -22,8 +15,8 @@ export function DockerProductUpdateCard() {
   const waiting = status?.operation?.phase === 'completed' && status.currentVersion !== status.operation.toVersion
   const load = useCallback(async (force = false) => {
     try {
-      const result = await api<DockerProductUpdate>(`/api/docker/product-update${force ? '?force=1' : ''}`)
-      setStatus(result); setError(''); setReconnecting(false)
+      await checkDockerProductUpdate(force)
+      setError(''); setReconnecting(false)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
       setReconnecting(true)
@@ -31,7 +24,8 @@ export function DockerProductUpdateCard() {
   }, [])
   useEffect(() => { void load() }, [load])
   useEffect(() => {
-    const timer = window.setInterval(() => { void load() }, running || waiting || reconnecting ? 3000 : 6 * 60 * 60 * 1000)
+    if (!running && !waiting && !reconnecting) return
+    const timer = window.setInterval(() => { void load() }, 3000)
     return () => window.clearInterval(timer)
   }, [load, running, waiting, reconnecting])
   async function check() {
@@ -45,7 +39,7 @@ export function DockerProductUpdateCard() {
       const result = await api<DockerProductUpdate>('/api/docker/product-update', {
         method: 'POST', body: JSON.stringify({ tag: status.tag, commit: status.commit, confirmation: 'UPDATE DST DOCKER' }),
       })
-      setStatus({ ...status, operation: result.operation })
+      publishDockerProductUpdate({ ...status, operation: result.operation })
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
       if (!(e instanceof Error) || !('status' in e)) setReconnecting(true)
@@ -53,7 +47,7 @@ export function DockerProductUpdateCard() {
     finally { setBusy(false) }
   }
   const completed = status?.operation?.phase === 'completed' && status.currentVersion === status.operation.toVersion
-  return <section className="card p-5 space-y-4" data-section-nav-id="settings.docker-updates" data-section-nav-label="DST Docker updates">
+  return <section id="settings.docker-updates" className="card p-5 space-y-4" data-section-nav-id="settings.docker-updates" data-section-nav-label="DST Docker updates">
     <h2 className="text-lg font-semibold">DST Docker updates</h2>
     <p className="text-sm text-text-muted">Update the DST management portal and Docker services. Official game-server updates are managed separately in Server updates.</p>
     <dl className="flex flex-wrap gap-x-10 gap-y-3 text-sm">

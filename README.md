@@ -4,7 +4,7 @@ Run Dune Server Tool from a browser, with the server and management services ins
 
 DST Docker is a standalone browser application for hosting and managing Dune Awakening servers on Linux and Windows WSL. It has its own releases and installer, separate from the Windows Dune Server Tool application.
 
-## Install DST Docker 1.0.14
+## Install DST Docker 1.0.15
 
 Windows users prepare Ubuntu below, then run the Linux installation command. Native Linux users can go directly to **Linux or WSL: install**.
 
@@ -74,7 +74,7 @@ The console uses **HTTP by default**; HTTPS is optional. To enable HTTPS for you
 
 Owners can manage browser accounts in **Settings → Browser Portal accounts**. Current Docker server roles are Owner and Admin. New accounts must replace their initial password at first sign-in. Owners can reset passwords, revoke sessions, change roles, disable accounts and delete accounts. The last enabled Owner is protected, and account sign-in stays enabled.
 
-If no Owner can sign in on Windows, open the **DST Docker** desktop icon and choose **2 · Recover Owner password** in the hosting window. The menu lists Owner accounts, asks for confirmation and shows a one-time password. **3 · Open management terminal** opens a command prompt in the correct installation folder.
+If no Owner can sign in on Windows, open the **DST Docker** desktop icon and choose **2 · Create Owner account / recover password** in the hosting window. If no Owner exists yet, this option displays the current Owner-creation link, so the original installer window is not needed. Otherwise, the menu lists Owner accounts, asks for confirmation and shows a one-time password. **3 · Open management terminal** opens a command prompt in the correct installation folder.
 
 On native Linux, open a terminal and run:
 

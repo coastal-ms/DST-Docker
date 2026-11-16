@@ -1,5 +1,14 @@
 # DST Docker changelog
 
+## [1.0.15]
+
+- Notify portal users when a DST Docker update is available, with a direct link to update settings.
+- Detect the private host address during browser setup without requiring the desktop launcher.
+- Add a direct Funcom account link to the service-token step.
+- Show clearly labelled setup links without listing Docker bridge addresses.
+- Provide the current Owner-creation link from the hosting window when no Owner account exists.
+- Keep failed server preparation from being reported as successful when containers were only partly prepared.
+
 ## [1.0.14]
 
 - Reuse the existing portal installation when the installer is run under a different Linux user, keeping desktop hosting and browser updates connected.

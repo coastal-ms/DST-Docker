@@ -197,8 +197,19 @@ Register-DuneRoute -Method GET -Path '/api/docker/network' -Handler {
         $publicIp=[string]$req.QueryString['publicIp']
         if($publicIp -and -not (Test-DunePublicIPv4 -Ip $publicIp).ok){Write-DuneError -Response $res -Status 400 -Message 'Choose a public IPv4 address for loopback status.';return}
         $reply=Invoke-DuneDockerManager -HostSession -Request @{action='network.get';publicIp=$publicIp}
-        if(-not $reply.ok){Write-DuneError -Response $res -Status 503 -Message 'Open DST Docker using its desktop icon to detect the Docker host address.';return}
-        $addresses=$reply.data
+        if($reply.ok){$addresses=$reply.data}
+        else {
+            # Browser setup is available before the desktop hosting session.
+            # Host networking already exposes the current WSL route address;
+            # don't substitute an old cached address or a public/loopback IP.
+            $addresses=Get-DuneDockerNetworkAddresses -LocalOnly
+            $private=$false
+            if(Test-DuneIPv4Literal -Ip ([string]$addresses.dockerIp)){
+                $bytes=([Net.IPAddress]::Parse([string]$addresses.dockerIp)).GetAddressBytes()
+                $private=$bytes[0] -eq 10 -or ($bytes[0] -eq 172 -and $bytes[1] -ge 16 -and $bytes[1] -le 31) -or ($bytes[0] -eq 192 -and $bytes[1] -eq 168)
+            }
+            if($publicIp -or -not $private){Write-DuneError -Response $res -Status 503 -Message 'Open DST Docker using its desktop icon to detect the Docker host address.';return}
+        }
     }
     Write-DuneJson -Response $res -Body $addresses
 }
