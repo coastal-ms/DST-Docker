@@ -266,3 +266,14 @@ function Invoke-DuneDockerServiceLifecycle {
     }
     return @{ok=$false;error='Docker lifecycle operation is still pending. Check the server before retrying.'}
 }
+
+function Get-DuneDockerWindowsMirrorPath {
+    param([string]$Folder,[string]$MarkerPath='/host-control/platform.json')
+    if ([string]::IsNullOrEmpty($Folder) -or -not $Folder.StartsWith('/') -or $Folder.StartsWith('//') -or $Folder -match '[<>:"\\|?*\x00-\x1f]' -or @($Folder.Split('/') | Where-Object { $_ -in @('.','..') }).Count) { return '' }
+    try {
+        $hostInfo=Get-Content -LiteralPath $MarkerPath -Raw -ErrorAction Stop | ConvertFrom-Json -AsHashtable
+        $distro=[string]$hostInfo.distribution
+        if ($hostInfo.platform -cne 'wsl' -or $distro -notmatch '^[A-Za-z0-9_.-]{1,64}$') { return '' }
+        return '\\wsl.localhost\'+$distro+$Folder.Replace('/','\')
+    } catch { return '' }
+}

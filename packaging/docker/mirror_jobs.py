@@ -1,6 +1,7 @@
 """Narrow backup mirror job: owned backup volume to the configured host folder."""
 import json,os,re
 from pathlib import PurePosixPath
+from urllib.parse import quote
 from engine import EngineError
 
 def destination(engine):
@@ -44,8 +45,16 @@ def create(engine,project,request):
         return found['Id']
     found=existing()
     if found:return found
+    # A running manager can outlive an image-cache cleanup. Resolve an existing
+    # immutable image before creating the helper; only the packaged v1 mirror
+    # protocol is accepted as a fallback, never an arbitrary image from a client.
+    image=engine.request('GET','/images/'+quote(target['image'],safe='')+'/json',expected=(200,404))
+    if not image:
+        image=engine.request('GET','/images/dst-docker-manager%3Alocal/json',expected=(200,404))
+        if not image or (image.get('Config',{}).get('Labels') or {}).get('io.dst.backup-mirror-helper')!='1':
+            raise ValueError('The mirror helper image is unavailable. Rerun the DST Docker installer in the same folder to rebuild it, then retry this batch.')
     try:return engine.request('POST','/containers/create?name='+name,{
-        'Image':target['image'],'User':'0:0','Entrypoint':['python3'],'Cmd':['-B','/opt/dst-manager/backup_mirror.py'],
+        'Image':image['Id'],'User':'0:0','Entrypoint':['python3'],'Cmd':['-B','/opt/dst-manager/backup_mirror.py'],
         'Env':['DST_BACKUP_MIRROR='+payload],
         'Labels':{'io.dst.managed':'true','io.dst.project':project,'io.dst.component':'db-mirror'},
         'HostConfig':{'NetworkMode':'none','CapDrop':['ALL'],'CapAdd':['CHOWN','DAC_OVERRIDE'],'SecurityOpt':['no-new-privileges:true'],

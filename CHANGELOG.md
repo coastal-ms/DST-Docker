@@ -1,5 +1,10 @@
 # DST Docker changelog
 
+## [1.0.19]
+
+- Copy Windows Explorer paths for WSL backup folders while retaining Linux paths for other devices.
+- Keep backup mirroring working when an older manager image is no longer available.
+
 ## [1.0.18]
 
 - Set up browser HTTPS from Settings, download the public certificate and follow device trust instructions before switching connections.
@@ -82,7 +87,7 @@
 ## [1.0.5]
 
 - Configure private or public player access, detect the public IP, and show the Docker address to use for router forwarding.
-- Use TCP 31982 and UDP 7777â€“7810 for player connections and propagate address changes across the game services.
+- Use TCP 31982 and UDP 7777Ã¢â‚¬â€œ7810 for player connections and propagate address changes across the game services.
 - Confirm before applying player-access changes that restart the server.
 - Configure the WSL LAN address and explicitly choose the same-PC public-IP loopback target from Settings.
 - Keep loopback controls visible during refreshes and reopen the console through a reachable local address.

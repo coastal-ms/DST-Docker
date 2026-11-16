@@ -3,8 +3,9 @@ import { useCallback, useEffect, useState } from 'react'
 import { api } from '../../api/client'
 import { CollapsibleCard } from '../../components/CollapsibleCard'
 import { Icon } from '../../components/Icon'
+import { isWindowsViewer } from '../../util/viewer'
 
-type Mirror = { available: boolean; enabled: boolean; folder: string; phase: string; error?: string; lastCopiedAt?: number; protectedBackups: number }
+type Mirror = { available: boolean; enabled: boolean; folder: string; windowsFolder?: string; phase: string; error?: string; lastCopiedAt?: number; protectedBackups: number }
 type Reply = { ok: boolean; error?: string; data?: { backupMirror?: Mirror } }
 export function DockerBackupMirror() {
   const [mirror, setMirror] = useState<Mirror | null>(null)
@@ -33,14 +34,18 @@ export function DockerBackupMirror() {
     } catch (e) { setError(e instanceof Error ? e.message : String(e)) }
     finally { setPosting(false) }
   }
+  const folder = isWindowsViewer() && mirror?.windowsFolder ? mirror.windowsFolder : mirror?.folder ?? ''
+  const windowsPath = folder !== mirror?.folder
   const copying = mirror?.phase === 'preparing' || mirror?.phase === 'running'
   return <CollapsibleCard id="database.backupMirror" icon="FolderSync" title="Local backup mirror">
     <p className="text-sm text-text-muted mb-3">Keep additional copies in a folder on the Docker host. DST never deletes these copies when the main backup files are pruned or deleted. Copying continues independently of this browser.</p>
     {!mirror ? <p role="status" className="text-sm text-text-muted mb-3">Loading backup mirror…</p> : !mirror.available ? <p className="text-sm text-text-muted mb-3">Reopen DST Docker using its normal host launcher to prepare the backup folder, then refresh here. Copying stays off until you enable it.</p> : <div className="mb-3">
-      <span className="text-xs text-text-muted">Folder on the Docker host</span>
-      <div className="flex items-center gap-2"><code className="text-xs break-all flex-1">{mirror.folder}</code><button className="btn-secondary" type="button" onClick={() => {
-        void (navigator.clipboard ? navigator.clipboard.writeText(mirror.folder) : Promise.reject(new Error('Clipboard unavailable'))).then(() => setMessage('Folder path copied.')).catch(() => setMessage('Select and copy the folder path above.'))
+      <span className="text-xs text-text-muted">{windowsPath ? 'Folder in Windows Explorer on the Docker host PC' : 'Folder on the Linux Docker host'}</span>
+      <div className="flex items-center gap-2"><code className="text-xs break-all flex-1">{folder}</code><button className="btn-secondary" type="button" onClick={() => {
+        void (navigator.clipboard ? navigator.clipboard.writeText(folder) : Promise.reject(new Error('Clipboard unavailable'))).then(() => setMessage('Folder path copied.')).catch(() => setMessage('Select and copy the folder path above.'))
       }}><Icon name="Copy" size={13} />Copy folder path</button></div>
+      {windowsPath && <p className="text-xs text-text-muted mt-2">Linux host path: <code>{mirror.folder}</code>. The Windows path opens on the PC running this WSL distribution.</p>}
+      {!mirror.lastCopiedAt && <p className="text-xs text-text-muted mt-2">This world’s folder is created when its first mirror copy starts.</p>}
     </div>}
     <label className="flex items-start gap-2 text-sm mb-3"><input type="checkbox" checked={mirror?.enabled ?? false} disabled={posting || (!mirror?.available && !mirror?.enabled)} onChange={e => void perform('backups.mirror.set', e.target.checked)} /><span>Mirror backups to this folder</span></label>
     <div className="flex flex-wrap gap-2 mb-3">

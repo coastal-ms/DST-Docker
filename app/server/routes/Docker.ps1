@@ -227,6 +227,9 @@ Register-DuneRoute -Method GET -Path '/api/docker/setup' -Handler {
     param($req, $res, $routeParams, $body)
     if ($env:DST_HOSTING_BACKEND -ne 'docker') { Write-DuneError -Response $res -Status 404 -Message 'Docker hosting is not enabled.'; return }
     $result = Invoke-DuneDockerManager -Request @{action='status'}
+    if ($result.ok -and $result.data.backupMirror.folder) {
+        $result.data.backupMirror.windowsFolder=Get-DuneDockerWindowsMirrorPath -Folder ([string]$result.data.backupMirror.folder)
+    }
     Write-DuneJson -Response $res -Body $result
 }
 
