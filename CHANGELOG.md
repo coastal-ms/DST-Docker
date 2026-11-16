@@ -1,5 +1,9 @@
 # DST Docker changelog
 
+## [1.0.16]
+
+- Clear the completed-update message and Reload portal button once the updated portal is loaded.
+
 ## [1.0.15]
 
 - Notify portal users when a DST Docker update is available, with a direct link to update settings.

@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { api } from '../src/api/client'
 import { confirmAction } from '../src/util/actionConfirmation'
 import { DockerProductUpdateCard } from '../src/pages/docker/DockerProductUpdateCard'
+import { version as portalVersion } from '../package.json'
 vi.mock('../src/api/client', () => ({ api: vi.fn() }))
 vi.mock('../src/util/actionConfirmation', () => ({ confirmAction: vi.fn(() => true) }))
 const latest = { supported: true, currentVersion: '1.0.12', latestVersion: '1.0.13', available: true, tag: 'v1.0.13', commit: 'a'.repeat(40) }
@@ -55,5 +56,14 @@ describe('DST Docker product updater', () => {
     await screen.findByText('DST Docker 1.0.13 is installed. Reload the portal to use the updated interface.')
     expect(screen.getByRole('button',{name:'Reload portal'})).toBeInTheDocument()
     expect(screen.getByRole('button',{name:'Update DST Docker'})).toBeDisabled()
+  })
+  it('clears the completed update prompt when the loaded portal already matches the installed version', async () => {
+    vi.mocked(api).mockResolvedValue({ ...latest, currentVersion:portalVersion, latestVersion:portalVersion, available:false,
+      operation:{phase:'completed',toVersion:portalVersion,id:'job',message:'Finished'} })
+    render(<DockerProductUpdateCard />)
+    await screen.findByText('You have this or a newer version.')
+    expect(screen.queryByRole('button',{name:'Reload portal'})).toBeNull()
+    expect(screen.queryByText(/Reload the portal to use/)).toBeNull()
+    expect(screen.queryByRole('status')).toBeNull()
   })
 })
