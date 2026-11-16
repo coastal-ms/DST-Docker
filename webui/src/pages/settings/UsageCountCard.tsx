@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { api } from '../../api/client'
 
 export function UsageCountCard() {
+  const endpoint = import.meta.env.VITE_DST_EDITION === 'docker' ? '/api/docker/usage-count' : '/api/config'
   const [enabled, setEnabled] = useState(true)
   const [loading, setLoading] = useState(true)
   const [loaded, setLoaded] = useState(false)
@@ -9,7 +10,7 @@ export function UsageCountCard() {
   const [error, setError] = useState<string | null>(null)
   useEffect(() => {
     let active = true
-    api<{ values: Record<string, string> }>('/api/config').then(result => {
+    api<{ values: Record<string, string> }>(endpoint).then(result => {
       if (active) {
         const value = (result.values.AnonymousUsageEnabled ?? '').trim()
         setEnabled(!value || /^(true|1|yes|on)$/i.test(value))
@@ -18,11 +19,11 @@ export function UsageCountCard() {
     }).catch(() => { if (active) setError('Could not load the anonymous count setting.') })
       .finally(() => { if (active) setLoading(false) })
     return () => { active = false }
-  }, [])
+  }, [endpoint])
   async function change(next: boolean) {
     setSaving(true); setError(null)
     try {
-      await api('/api/config', { method: 'PUT', body: JSON.stringify({ values: { AnonymousUsageEnabled: String(next) } }) })
+      await api(endpoint, { method: 'PUT', body: JSON.stringify({ values: { AnonymousUsageEnabled: String(next) } }) })
       setEnabled(next)
     } catch { setError('Could not save the anonymous count setting.') }
     finally { setSaving(false) }

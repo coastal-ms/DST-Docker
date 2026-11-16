@@ -1,5 +1,13 @@
 # DST Docker changelog
 
+## [1.0.12]
+
+- Compare installed and latest DST Docker versions in Settings and update the portal from the browser after stopping the battlegroup.
+- Show update progress, reconnect after the portal restarts, and confirm the installed version while retaining saved server data and accounts.
+- Load and save the Docker anonymous usage preference from Settings.
+- Report successful server-settings saves without a missing-backup-path error.
+- Match map settings to the Windows layout with Map and Settings file selectors and full-width vertical setting rows.
+
 ## [1.0.11]
 
 - Keep setup pages scrollable so Back and Next stay reachable in short browser windows.
@@ -35,7 +43,7 @@
 ## [1.0.5]
 
 - Configure private or public player access, detect the public IP, and show the Docker address to use for router forwarding.
-- Use TCP 31982 and UDP 7777–7810 for player connections and propagate address changes across the game services.
+- Use TCP 31982 and UDP 7777â€“7810 for player connections and propagate address changes across the game services.
 - Confirm before applying player-access changes that restart the server.
 - Configure the WSL LAN address and explicitly choose the same-PC public-IP loopback target from Settings.
 - Keep loopback controls visible during refreshes and reopen the console through a reachable local address.

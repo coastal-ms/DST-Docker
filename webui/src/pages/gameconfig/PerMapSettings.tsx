@@ -8,7 +8,7 @@ type File = 'server' | 'game' | 'engine'
 type Field = { id: string; key: string; label: string; group: string; type: string; value: string; editable: boolean; inverted?: boolean; default?: string; help?: string; min?: number; max?: number; clientApply?: boolean; options?: (string | { value: string; label: string })[] }
 type Target = { id: string; map: string; label: string }
 type Snapshot = { targets: Target[]; target: string; file: File; revision: string; raw: string; overridden: boolean; pendingRestart: boolean; adapterReady: boolean; running?: boolean; fields: Field[] }
-const fileNames: Record<File, string> = { server: 'Custom Settings', game: 'Game', engine: 'Engine' }
+const fileNames: Record<File, string> = { server: 'Custom Server Settings', game: 'Game.ini', engine: 'Engine.ini' }
 const globalTarget: Target = { id: 'global', map: 'global', label: 'Global' }
 const draftKey = (target: string, file: File) => `dst.docker.map-draft.${target}.${file}`
 function savedChoice(key: string) {
@@ -42,7 +42,6 @@ export function PerMapSettings({ onDirtyChange, onTargetChange, initialTarget = 
   const [values, setValues] = useState<Record<string, string>>({})
   const [category, setCategory] = useState('')
   const [query, setQuery] = useState(() => savedChoice('query'))
-  const [view, setView] = useState<'grid' | 'list'>(() => savedChoice('view') === 'list' ? 'list' : 'grid')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [message, setMessage] = useState('')
@@ -61,8 +60,8 @@ export function PerMapSettings({ onDirtyChange, onTargetChange, initialTarget = 
   editorState.current = { dirty, pending: !!snapshot?.pendingRestart }
   const label = targets.find(item => item.id === target)?.label ?? 'selected map'
   useEffect(() => {
-    try { for (const [key, value] of Object.entries({ target, file, query, view })) sessionStorage.setItem(`dst.docker.map-settings.${key}`, value) } catch { /* Storage may be disabled. */ }
-  }, [target, file, query, view])
+    try { for (const [key, value] of Object.entries({ target, file, query })) sessionStorage.setItem(`dst.docker.map-settings.${key}`, value) } catch { /* Storage may be disabled. */ }
+  }, [target, file, query])
 
   useEffect(() => { onDirtyChange?.(dirty); return () => onDirtyChange?.(false) }, [dirty, onDirtyChange])
 
@@ -166,12 +165,13 @@ export function PerMapSettings({ onDirtyChange, onTargetChange, initialTarget = 
   const visible = fields.filter(field => (!category || field.group === category) && `${field.label} ${field.key} ${field.help ?? ''}`.toLowerCase().includes(query.toLowerCase()))
   return <section className="card space-y-4 p-4 sm:p-5" aria-label="Per-map settings">
     <div className="flex flex-wrap items-start justify-between gap-2"><div><h2 className="text-lg font-semibold">Map settings</h2><p className="mt-1 text-sm text-text-muted">{label} · {fileNames[file]}</p></div><span className="rounded border border-border px-3 py-1 text-sm">{dirty ? 'Unsaved changes' : snapshot?.pendingRestart ? snapshot.running === false ? 'Saved · next start' : 'Saved · pending restart' : global ? 'Global defaults' : 'Saved settings'}</span></div>
-    {global && <div className="flex flex-wrap gap-2" aria-label="Map settings files">{(Object.keys(fileNames) as File[]).map(kind => <button key={kind} type="button" disabled={busy} aria-pressed={kind === file} className={kind === file ? 'btn-primary' : 'btn-secondary'} onClick={() => select(target, kind)}>{fileNames[kind]}</button>)}</div>}
-    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-[2fr_1fr_2fr_auto]">
-      <label className="space-y-1 text-sm">Settings scope<select className="map-management-input w-full" value={target} disabled={busy || scopeLocked} onChange={event => select(event.target.value, file)}>{!targets.length && <option value="">Select a map</option>}{targets.map(item => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
-      <label className="space-y-1 text-sm">Setting category<select className="map-management-input w-full" value={category} onChange={event => setCategory(event.target.value)}><option value="">All ({fields.length})</option>{categories.map(group => <option key={group}>{group}</option>)}</select></label>
+    <div className="grid gap-4 lg:grid-cols-[2fr_1fr]">
+      <label className="space-y-1 text-sm">Map<select aria-label="Map" className="map-management-input w-full" value={target} disabled={busy || scopeLocked} onChange={event => select(event.target.value, file)}>{!targets.length && <option value="">Select a map</option>}{targets.map(item => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
+      <label className="space-y-1 text-sm">Settings file<select aria-label="Settings file" className="map-management-input w-full" value={file} disabled={busy || !global} onChange={event => select(target, event.target.value as File)}>{(global ? Object.keys(fileNames) as File[] : ['server'] as File[]).map(kind => <option key={kind} value={kind}>{fileNames[kind]}</option>)}</select></label>
+    </div>
+    <div className="grid gap-3 sm:grid-cols-2">
+      <label className="space-y-1 text-sm">Setting category<select aria-label="Setting category" className="map-management-input w-full" value={category} onChange={event => setCategory(event.target.value)}><option value="">All ({fields.length})</option>{categories.map(group => <option key={group}>{group}</option>)}</select></label>
       <label className="space-y-1 text-sm">Find a setting<input className="map-management-input w-full" type="search" value={query} onChange={event => setQuery(event.target.value)} placeholder="Name, key or description" /></label>
-      <div className="flex items-end gap-1" aria-label="Settings view">{(['grid', 'list'] as const).map(mode => <button type="button" key={mode} aria-pressed={view === mode} className={view === mode ? 'btn-primary' : 'btn-secondary'} onClick={() => setView(mode)}>{mode === 'grid' ? 'Grid' : 'List'}</button>)}</div>
     </div>
     {busy && !snapshotMatches && <p role="status">Loading map settings…</p>}
     {!snapshotMatches && error && <p role="alert" className="text-danger">{error}</p>}
@@ -185,20 +185,24 @@ export function PerMapSettings({ onDirtyChange, onTargetChange, initialTarget = 
       {!global && snapshot.pendingRestart && <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-warning/40 p-3"><p><strong>{snapshot.running === false ? 'Saved for next start' : 'Pending restart'}</strong> · {snapshot.running === false ? `${label} is stopped. Its saved settings will load when it next starts.` : `Saved settings for ${label} have not been loaded by a new map process.`}</p>{snapshot.running !== false && <button type="button" className="btn-secondary" disabled={busy || dirty || restartInFlight} onClick={() => void restart()}>{restartInFlight ? 'Restart in progress…' : 'Restart this map'}</button>}<button type="button" className="btn-secondary" disabled={busy || dirty} onClick={() => void load(target, file)}>Check applied status</button></div>}
       {file === 'server' && <p className="text-sm text-text-muted">Custom Settings and UserGame PvP controls can overlap. Review both files when changing PvP.</p>}
       {file !== 'server' && <p className="text-sm text-text-muted">Structured settings are shown here. Complex arrays and startup console variables remain in the specialized global controls. Settings marked “Player files too” also require matching client configuration.</p>}
-      <div className={view === 'grid' ? 'grid gap-3 md:grid-cols-2 xl:grid-cols-3' : 'space-y-3'}>{visible.map(field => {
+      <div aria-label="Map settings rows">{visible.map((field, index) => {
         const guidance = file === 'server' ? RETAIL_SETTING_GUIDANCE[field.key] : undefined
         const defaultValue = field.default ?? guidance?.defaultValue
         const value = values[field.id] ?? ''
         const problem = validation(field, value)
         const options = field.type === 'bool' ? [{ value: 'True', label: field.inverted ? 'Disabled' : 'Enabled' }, { value: 'False', label: field.inverted ? 'Enabled' : 'Disabled' }] : field.options ?? []
-        return <div key={field.id} className="min-w-0 space-y-2 rounded-lg border border-border bg-surface p-4">
+        return <div key={field.id} className="grid min-w-0 gap-3 border-b border-border/70 py-4 last:border-b-0 lg:grid-cols-[minmax(0,1fr)_minmax(16rem,24rem)] lg:items-center">
+          {(index === 0 || visible[index - 1].group !== field.group) && <h3 className="text-sm font-semibold uppercase text-text-muted lg:col-span-2">{field.group}</h3>}
+          <div className="min-w-0 space-y-2">
           <label htmlFor={`map-setting-${field.id}`} className="block font-semibold">{field.label}</label><p className="break-all font-mono text-xs text-text-muted">{field.key}</p>
           {(field.help || guidance?.effect) && <p className="text-sm text-text-muted">{field.help ?? guidance?.effect}</p>}
+          </div><div className="min-w-0 space-y-2">
           <div>{options.length ? <select id={`map-setting-${field.id}`} className="map-management-input w-full" disabled={busy || !field.editable} value={value} onChange={event => setValues(previous => ({ ...previous, [field.id]: event.target.value }))}><option value="">Game default (unset)</option>{options.map(option => { const item = typeof option === 'string' ? { value: option, label: option } : option; return <option key={item.value} value={item.value}>{item.label}</option> })}</select> : ['int', 'float'].includes(field.type) && file === 'server' ? <NumericSettingControl inputId={`map-setting-${field.id}`} setting={{ key: field.key, label: field.label, type: field.type as 'int' | 'float', value: field.value || defaultValue || '0', valid: true, min: field.min, max: field.max }} disabled={busy || !field.editable} value={value} wheelOnHover showUnsetSlider onChange={next => setValues(previous => ({ ...previous, [field.id]: next }))} onCommit={() => {}} /> : <input id={`map-setting-${field.id}`} className="map-management-input w-full" disabled={busy || !field.editable} value={value} placeholder={defaultValue ? `Game default: ${defaultValue}` : 'Not configured'} onChange={event => setValues(previous => ({ ...previous, [field.id]: event.target.value }))} />}</div>
           {(field.min !== undefined || field.max !== undefined) && <p className="text-xs text-text-muted">Allowed: {field.min ?? 'no minimum'}–{field.max ?? 'no maximum'}</p>}
           {field.clientApply && <p className="text-xs text-warning">Player files too</p>}
           {problem && <p role="alert" className="text-sm text-danger">{problem}</p>}
           {defaultValue !== undefined && field.editable && <button type="button" className="text-xs text-accent" disabled={busy} onClick={() => setValues(previous => ({ ...previous, [field.id]: defaultValue }))}>Use default ({defaultValue})</button>}
+          </div>
         </div>
       })}</div>
       {!visible.length && <p>No settings match this filter.</p>}

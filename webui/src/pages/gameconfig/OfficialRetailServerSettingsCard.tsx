@@ -360,7 +360,9 @@ export function OfficialRetailServerSettingsCard({
       setValues(Object.fromEntries(
         nextSettings.map(setting => [setting.key, normalizeSettingValue(setting, setting.value)]),
       ))
-      setMessage(`${result.applied} setting${result.applied === 1 ? '' : 's'} saved with backup ${result.backup.path}. Start the battlegroup to apply them.`)
+      setMessage(result.backup?.path
+        ? `${result.applied} setting${result.applied === 1 ? '' : 's'} saved with backup ${result.backup.path}. ${import.meta.env.VITE_DST_EDITION === 'docker' ? 'Changes load at the next map start.' : 'Start the battlegroup to apply them.'}`
+        : result.message || `${result.applied} setting${result.applied === 1 ? '' : 's'} saved. Changes load at the next map start.`)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
       if (fromReview) throw e

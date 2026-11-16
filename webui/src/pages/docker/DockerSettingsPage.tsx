@@ -9,12 +9,14 @@ import { usePortalAccess } from '../../auth/portalAccess'
 import { DockerTailscaleAccess } from './DockerTailscaleAccess'
 import { WslMemoryCard } from './WslMemoryCard'
 import DockerNetworkCard from './DockerNetworkCard'
+import { DockerProductUpdateCard } from './DockerProductUpdateCard'
 
 export default function DockerSettingsPage() {
   const { canAccessOwnerSurfaces } = usePortalAccess()
   return <>
     <PageHeader title="Settings" icon="Settings" description="Manage your Docker host resources and DST preferences." />
     <div className="space-y-5">
+      {canAccessOwnerSurfaces && <DockerProductUpdateCard />}
       {canAccessOwnerSurfaces && <DockerNetworkCard />}
       <DockerResourcesCard />
       {canAccessOwnerSurfaces && <WslMemoryCard />}

@@ -41,6 +41,8 @@ function Test-DuneDockerLandsraadRoute {
 
 function Test-DuneDockerRouteQualified {
     param([string]$Method,[string]$Path)
+    if($Path -ceq '/api/docker/product-update' -and $Method -cin @('GET','POST')){return $true}
+    if($Path -ceq '/api/docker/usage-count' -and $Method -cin @('GET','PUT')){return $true}
     if($Path -ceq '/api/docker/tailscale' -and $Method -cin @('GET','PUT')){return $true}
     if($Path -ceq '/api/map/remote-link' -and $Method -ceq 'GET'){return $true}
     if($Path -ceq '/api/docker/update-progress' -and $Method -ceq 'GET'){return $true}

@@ -19,6 +19,23 @@ class FakeEngine:
 
 
 class ManagerTests(unittest.TestCase):
+    def test_portal_update_reservation_blocks_world_changes_until_matching_release(self):
+        state={'id':'a'*32,'desiredState':'stopped'}
+        with patch.object(manager,'project_state',return_value=state),patch.object(manager,'save'),patch.object(manager,'public_state',return_value={'services':[],'backups':[]}):
+            self.assertTrue(manager.dispatch({'action':'portal-update.reserve','id':'b'*32},FakeEngine())['reserved'])
+            with self.assertRaises(manager.OperationBusyError):manager.dispatch({'action':'services.start'},FakeEngine())
+            self.assertFalse(manager.dispatch({'action':'portal-update.release','id':'c'*32},FakeEngine())['released'])
+            self.assertTrue(manager.dispatch({'action':'portal-update.release','id':'b'*32},FakeEngine())['released'])
+            self.assertNotIn('portalUpdate',state)
+
+    def test_portal_update_refuses_running_maps_backups_and_server_operations(self):
+        states=[{'desiredState':'running'},{'operation':{'phase':'running'}},{},{}]
+        metadata=[{}, {}, {'services':[{'component':'game-1','state':'running'}]}, {'backups':[{'phase':'running'}]}]
+        for state,observed in zip(states,metadata):
+            with patch.object(manager,'project_state',return_value=state),patch.object(manager,'save') as save,patch.object(manager,'public_state',return_value=observed):
+                with self.assertRaises(manager.OperationBusyError):manager.dispatch({'action':'portal-update.reserve','id':'b'*32},FakeEngine())
+                save.assert_not_called()
+
     def test_boot_recovery_uses_guarded_start_only_for_saved_running_world(self):
         state={'id':'a'*32,'desiredState':'running','worldPlan':{'maps':[{'partitions':[1,2],'initialReplicas':1}]},
                'services':{'director':{'id':'director'},'game-1':{'id':'one'},'game-2':{'id':'two'}},

@@ -1,0 +1,77 @@
+import { useCallback, useEffect, useState } from 'react'
+import { api } from '../../api/client'
+import { confirmAction } from '../../util/actionConfirmation'
+
+export interface DockerProductUpdate {
+  supported: boolean
+  currentVersion?: string
+  latestVersion?: string
+  available: boolean
+  tag?: string
+  commit?: string
+  error?: string
+  operation?: { id: string; phase: 'running' | 'completed' | 'failed'; message: string; toVersion?: string }
+}
+
+export function DockerProductUpdateCard() {
+  const [status, setStatus] = useState<DockerProductUpdate | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const [reconnecting, setReconnecting] = useState(false)
+  const running = status?.operation?.phase === 'running'
+  const waiting = status?.operation?.phase === 'completed' && status.currentVersion !== status.operation.toVersion
+  const load = useCallback(async (force = false) => {
+    try {
+      const result = await api<DockerProductUpdate>(`/api/docker/product-update${force ? '?force=1' : ''}`)
+      setStatus(result); setError(''); setReconnecting(false)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+      setReconnecting(true)
+    }
+  }, [])
+  useEffect(() => { void load() }, [load])
+  useEffect(() => {
+    const timer = window.setInterval(() => { void load() }, running || waiting || reconnecting ? 3000 : 6 * 60 * 60 * 1000)
+    return () => window.clearInterval(timer)
+  }, [load, running, waiting, reconnecting])
+  async function check() {
+    setBusy(true)
+    try { await load(true) } finally { setBusy(false) }
+  }
+  async function install() {
+    if (!status?.tag || !status.commit || !confirmAction(`Update DST Docker from ${status.currentVersion} to ${status.latestVersion}? Stop the battlegroup first. The portal will restart; keep this tab open. Your saved server data and accounts are retained.`)) return
+    setBusy(true); setError('')
+    try {
+      const result = await api<DockerProductUpdate>('/api/docker/product-update', {
+        method: 'POST', body: JSON.stringify({ tag: status.tag, commit: status.commit, confirmation: 'UPDATE DST DOCKER' }),
+      })
+      setStatus({ ...status, operation: result.operation })
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+      if (!(e instanceof Error) || !('status' in e)) setReconnecting(true)
+    }
+    finally { setBusy(false) }
+  }
+  const completed = status?.operation?.phase === 'completed' && status.currentVersion === status.operation.toVersion
+  return <section className="card p-5 space-y-4" data-section-nav-id="settings.docker-updates" data-section-nav-label="DST Docker updates">
+    <h2 className="text-lg font-semibold">DST Docker updates</h2>
+    <p className="text-sm text-text-muted">Update the DST management portal and Docker services. Official game-server updates are managed separately in Server updates.</p>
+    <dl className="flex flex-wrap gap-x-10 gap-y-3 text-sm">
+      <div><dt className="text-text-muted">Installed version</dt><dd>{status?.currentVersion ?? 'Checking…'}</dd></div>
+      <div><dt className="text-text-muted">Latest version</dt><dd>{status?.latestVersion ?? 'Not checked'}</dd></div>
+    </dl>
+    {!status?.available && status?.latestVersion && !status.error && <p className="text-success">You have this or a newer version.</p>}
+    {status?.available && <p>Version {status.latestVersion} is available.</p>}
+    <p className="text-sm text-text-muted">Stop the battlegroup in Commands before updating. Keep this tab open; the portal reconnects after its restart. Accounts, server data and the selected console port are kept.</p>
+    {(error || status?.error) && <p role="alert" className="text-danger">{running && reconnecting ? 'The portal is reconnecting. Update completion has not been confirmed yet.' : error || status?.error}</p>}
+    {status?.operation && <p role="status" className={status.operation.phase === 'failed' ? 'text-danger' : completed ? 'text-success' : 'text-text-muted'}>
+      {completed ? `DST Docker ${status.currentVersion} is installed. Reload the portal to use the updated interface.` : status.operation.phase === 'completed' ? 'Waiting for the updated portal to respond…' : status.operation.message}
+    </p>}
+    {status?.operation?.phase === 'failed' && <p className="text-sm text-text-muted">The update log is in portal-update/update.log under your installation folder. You can retry after correcting the reported problem.</p>}
+    <div className="flex flex-wrap gap-3">
+      <button type="button" className="btn-secondary" disabled={busy || running} onClick={() => void check()}>{busy ? 'Working…' : 'Check now'}</button>
+      <button type="button" className="btn-primary" disabled={busy || running || !status?.supported || !status.available || !!status.error || !status.tag || !status.commit} onClick={() => void install()}>{running ? 'Updating DST Docker…' : 'Update DST Docker'}</button>
+      {completed && <button type="button" className="btn-secondary" onClick={() => window.location.reload()}>Reload portal</button>}
+    </div>
+  </section>
+}
