@@ -5,6 +5,24 @@ BeforeAll {
     function global:Get-DunePortStatus {param($Force,$BattlegroupState,$RequiredPorts,$PublicIp)}
 }
 Describe 'Docker network settings status propagation' {
+    It 'recognizes WSL from its kernel when a first-start portal has no host bind' {
+        $original=$env:DST_HOST_PLATFORM
+        try {
+            $env:DST_HOST_PLATFORM=$null
+            Mock Test-Path {$false} -ParameterFilter {$LiteralPath -eq '/host-control/network-info.json'}
+            Mock Get-Content {'6.6.87.2-microsoft-standard-WSL2'} -ParameterFilter {$LiteralPath -eq '/proc/sys/kernel/osrelease'}
+            Test-DuneDockerWslHost | Should -BeTrue
+        } finally {$env:DST_HOST_PLATFORM=$original}
+    }
+    It 'does not expose WSL controls for a native Linux kernel' {
+        $original=$env:DST_HOST_PLATFORM
+        try {
+            $env:DST_HOST_PLATFORM=$null
+            Mock Test-Path {$false} -ParameterFilter {$LiteralPath -eq '/host-control/network-info.json'}
+            Mock Get-Content {'6.8.0-generic'} -ParameterFilter {$LiteralPath -eq '/proc/sys/kernel/osrelease'}
+            Test-DuneDockerWslHost | Should -BeFalse
+        } finally {$env:DST_HOST_PLATFORM=$original}
+    }
     It 'recognizes an existing WSL installation without the newer platform environment variable' {
         $original=$env:DST_HOST_PLATFORM
         try {

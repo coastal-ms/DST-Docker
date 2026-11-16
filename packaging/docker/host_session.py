@@ -569,20 +569,25 @@ Write-Output $path
                             # process that keeps the WSL server alive.
                             pass
 
-def prepare(root,source,project,files):
+def prepare_binding(root):
     if not os.environ.get('WSL_DISTRO_NAME') or not Path(WSL).exists():raise ValueError('Desktop hosting is available in Windows WSL.')
     root=Path(root).resolve();directory=root/'host-session';directory.mkdir(parents=True,exist_ok=True);directory.chmod(0o755)
     override=root/'host.compose.json'
     # The parent install directory is private. Only this socket directory is exposed.
     value={'services':{'dst':{'environment':{'DST_HOST_PLATFORM':'wsl'},'volumes':[{'type':'bind','source':str(directory),'target':'/host-control','read_only':True}]}}}
     write_json(override,value)
+    return root,directory,override
+
+def prepare(root,source,project,files):
+    root,directory,override=prepare_binding(root)
     config={'distribution':os.environ['WSL_DISTRO_NAME'],'source':str(Path(source).resolve()),'project':project,'composeFiles':list(dict.fromkeys([*files,str(override)]))}
     write_json(directory/'config.json',config)
     return HostSession(root)
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('action',choices=['prepare','desktop','shortcut']);parser.add_argument('--root',required=True);parser.add_argument('--source');parser.add_argument('--project');parser.add_argument('--compose-file',action='append',default=[]);parser.add_argument('--no-browser',action='store_true');args=parser.parse_args()
+    parser=argparse.ArgumentParser();parser.add_argument('action',choices=['bind','prepare','desktop','shortcut']);parser.add_argument('--root',required=True);parser.add_argument('--source');parser.add_argument('--project');parser.add_argument('--compose-file',action='append',default=[]);parser.add_argument('--no-browser',action='store_true');args=parser.parse_args()
     try:
+        if args.action=='bind':prepare_binding(args.root);return
         host=prepare(args.root,args.source,args.project,args.compose_file) if args.action=='prepare' else HostSession(args.root)
         if args.action in {'prepare','shortcut'}:print(host.shortcut())
         else:host.start(open_browser=not args.no_browser)

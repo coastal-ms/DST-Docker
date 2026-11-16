@@ -490,6 +490,11 @@ temporary=root/('.installation-'+uuid.uuid4().hex+'.tmp');temporary.write_text(j
 PY
 task_release="$task_root/releases/$task_package_sha"
 if ((task_prepare_only)); then printf 'DST source prepared at %s\nNo containers were started.\n' "$task_release"; return 0; fi
+if [[ -n "${WSL_DISTRO_NAME:-}" ]]; then
+  # Bind the host socket and platform marker on the first portal container.
+  # Desktop shortcut/config activation still happens only after startup succeeds.
+  python3 "$task_release/packaging/docker/host_session.py" bind --root "$task_root"
+fi
 if [[ -f "$task_release/packaging/docker/portal_update.py" ]]; then
   python3 "$task_release/packaging/docker/portal_update.py" prepare --root "$task_root"
 fi

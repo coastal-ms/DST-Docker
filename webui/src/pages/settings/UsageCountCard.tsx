@@ -16,7 +16,7 @@ export function UsageCountCard() {
         setEnabled(!value || /^(true|1|yes|on)$/i.test(value))
         setLoaded(true)
       }
-    }).catch(() => { if (active) setError('Could not load the anonymous count setting.') })
+    }).catch(() => { if (active) setError('Could not load the installation count setting.') })
       .finally(() => { if (active) setLoading(false) })
     return () => { active = false }
   }, [endpoint])
@@ -25,18 +25,19 @@ export function UsageCountCard() {
     try {
       await api(endpoint, { method: 'PUT', body: JSON.stringify({ values: { AnonymousUsageEnabled: String(next) } }) })
       setEnabled(next)
-    } catch { setError('Could not save the anonymous count setting.') }
+    } catch { setError('Could not save the installation count setting.') }
     finally { setSaving(false) }
   }
-  return <section className="card p-5 space-y-3" aria-label="Anonymous usage count">
-    <h2 className="text-lg font-semibold">Anonymous usage count</h2>
-    <p className="text-sm text-muted">Help show how many DST installations are in use. While DST is open, it reports a random installation ID, the Docker or Windows edition, and the app version every six hours. Server names, addresses, players, accounts, settings, and logs are not included.</p>
+  return <section className="card p-5 space-y-3" aria-label="Installation count sharing">
+    <h2 className="text-lg font-semibold">Installation count sharing</h2>
+    <p className="text-sm text-muted">Help show how many DST installations are in use. Every six hours, DST shares only a random installation ID, its edition, and app version. Your server details, players, accounts, settings, and logs are not shared.</p>
     <label className="flex items-center gap-3">
       <input type="checkbox" checked={loaded && enabled} disabled={!loaded || saving}
         onChange={event => void change(event.target.checked)} />
-      Share anonymous usage count{loading ? ' — loading…' : !loaded ? ' — unavailable' : saving ? ' — saving…' : enabled ? ' — enabled' : ' — disabled'}
+      Share installation count{loading ? ' — loading…' : !loaded ? ' — unavailable' : saving ? ' — saving…' : enabled ? ' — enabled' : ' — disabled'}
     </label>
-    <p className="text-xs text-muted">Enabled by default. You can turn it off at any time. Turning it off requests removal of this installation’s count; old reports expire after 24 hours. The receiving website can see the connection’s IP address.</p>
+    <p className="text-sm text-muted">The count database does not store your IP address, and count requests are configured to stay out of website access logs.</p>
+    <p className="text-xs text-muted">Sharing is optional and enabled by default. Turn it off at any time to stop reporting and request removal of this installation’s count.</p>
     {error && <p role="alert" className="text-sm text-red-400">{error}</p>}
   </section>
 }

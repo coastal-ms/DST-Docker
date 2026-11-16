@@ -1,5 +1,11 @@
 # DST Docker changelog
 
+## [1.0.13]
+
+- Keep Shut down host and Create desktop shortcut available on supported WSL hosts after installation.
+- Prepare the host connection before the management portal first starts.
+- Clarify optional installation count sharing, what is shared, and how connection IP addresses are handled.
+
 ## [1.0.12]
 
 - Compare installed and latest DST Docker versions in Settings and update the portal from the browser after stopping the battlegroup.
