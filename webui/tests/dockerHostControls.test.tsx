@@ -7,6 +7,13 @@ vi.mock('../src/api/client', () => ({ api: vi.fn() }))
 vi.mock('../src/auth/PortalAuthGate', () => ({ usePortalAuth: () => ({ status: { account: { role: state.role } } }) }))
 afterEach(() => { cleanup(); vi.clearAllMocks(); state.role = 'owner' })
 describe('WSL host controls', () => {
+  it('keeps shutdown and shortcut controls visible when the WSL host session is disconnected', async () => {
+    vi.mocked(api).mockResolvedValue({ available: false, platform: 'wsl', message: 'Start DST using its desktop icon to enable WSL host controls.' } as never)
+    render(<DockerHostControls />)
+    expect(await screen.findByText('Start DST using its desktop icon to enable WSL host controls.')).toBeInTheDocument()
+    expect(screen.getByRole('button',{name:'Shut down host'})).toBeDisabled()
+    expect(screen.getByRole('button',{name:'Create desktop shortcut'})).toBeDisabled()
+  })
   it('omits WSL controls on a native Linux host', async () => {
     vi.mocked(api).mockResolvedValue({ available: false, platform: 'linux', message: '' } as never)
     render(<DockerHostControls />)

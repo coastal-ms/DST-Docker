@@ -95,6 +95,7 @@ esac
         result=self.run_installer('--prefix',str(self.root/'installed'))
         self.assertEqual(result.returncode,0,result.stderr)
         self.assertIn('shortcut fixture prepared prepare',result.stdout)
+        self.assertLess(result.stdout.index('shortcut fixture prepared bind'),result.stdout.index('portal fixture started'))
         self.assertIn('--project fixture',result.stdout)
         self.assertIn('desktop icon',result.stdout)
         self.assertNotIn('You can close this terminal',result.stdout)

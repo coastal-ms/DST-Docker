@@ -146,7 +146,11 @@ function Get-DuneDockerContainers {
 }
 
 function Test-DuneDockerWslHost {
-    return $env:DST_HOST_PLATFORM -ceq 'wsl' -or (Test-Path -LiteralPath '/host-control/network-info.json')
+    if($env:DST_HOST_PLATFORM -ceq 'wsl' -or (Test-Path -LiteralPath '/host-control/network-info.json')){return $true}
+    # Older installs may start the portal before its host-control bind exists.
+    # Containers share the WSL kernel even when the installer marker is absent.
+    try {return [bool]((Get-Content -LiteralPath '/proc/sys/kernel/osrelease' -Raw -ErrorAction Stop) -match '(?i:microsoft|wsl)')}
+    catch {return $false}
 }
 
 function Get-DuneDockerNetworkAddresses {
