@@ -600,6 +600,10 @@ def prepare_binding(root):
     # The parent install directory is private. Only this socket directory is exposed.
     value={'services':{'dst':{'environment':{'DST_HOST_PLATFORM':'wsl'},'volumes':[{'type':'bind','source':str(directory),'target':'/host-control','read_only':True}]}}}
     write_json(override,value)
+    # Public platform metadata only; no launcher paths, tokens or account data.
+    marker=directory/'platform.json'
+    write_json(marker,{'platform':'wsl','distribution':os.environ['WSL_DISTRO_NAME']})
+    marker.chmod(0o644)
     return root,directory,override
 
 def prepare(root,source,project,files):
