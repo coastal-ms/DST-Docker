@@ -490,6 +490,9 @@ temporary=root/('.installation-'+uuid.uuid4().hex+'.tmp');temporary.write_text(j
 PY
 task_release="$task_root/releases/$task_package_sha"
 if ((task_prepare_only)); then printf 'DST source prepared at %s\nNo containers were started.\n' "$task_release"; return 0; fi
+if [[ -f "$task_release/packaging/docker/portal_update.py" ]]; then
+  python3 "$task_release/packaging/docker/portal_update.py" prepare --root "$task_root"
+fi
 printf '[4/5] Building and starting the Web UI\n'
 printf 'The first build can take several minutes. Progress will appear below.\n'
 task_stage='building and starting the portal'
@@ -519,6 +522,11 @@ if [[ -n "${WSL_DISTRO_NAME:-}" ]]; then
     :
   else
     printf 'DST is installed. Desktop shortcut creation did not complete; use the Ubuntu terminal and retry: bash %q/bin/dst-docker shortcut\n' "$task_root/current" >&2
+  fi
+fi
+if [[ "${DST_SELF_UPDATE:-}" != 1 && -f "$task_release/packaging/docker/portal_update.py" && "$(ps -p 1 -o comm= | tr -d ' ')" == systemd ]]; then
+  if ! "${task_sudo[@]}" env "WSL_DISTRO_NAME=${WSL_DISTRO_NAME:-}" python3 "$task_release/packaging/docker/portal_update.py" register --root "$task_root"; then
+    printf 'Browser updates could not be enabled. Rerun this installer with the same path to retry.\n' >&2
   fi
 fi
 printf '[5/5] DST setup is ready\nOpen the complete browser link printed above to create your Owner account and finish server setup.\n'

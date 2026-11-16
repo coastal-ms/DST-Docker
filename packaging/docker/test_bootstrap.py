@@ -25,6 +25,12 @@ def archive(name='repo-sha/bin/dst-install', kind=None):
     return data.getvalue()
 
 class BootstrapTests(unittest.TestCase):
+    def test_browser_update_does_not_install_a_changed_release(self):
+        responses=[json.dumps({'tag_name':'v1.0.13'}).encode(),json.dumps({'object':{'type':'commit','sha':'b'*40}}).encode()]
+        with patch.dict('os.environ',{'DST_EXPECTED_RELEASE_TAG':'v1.0.13','DST_EXPECTED_RELEASE_COMMIT':'a'*40}),patch.dict(module,download=lambda *args:responses.pop(0),token=lambda:''),patch('subprocess.call') as call:
+            with self.assertRaisesRegex(ValueError,'release changed'):module['main']([])
+            call.assert_not_called()
+
     def test_github_source_archive_becomes_installer_archive(self):
         with tempfile.TemporaryDirectory() as folder:
             dest = Path(folder) / 'source.tar.gz'

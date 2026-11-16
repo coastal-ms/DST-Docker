@@ -42,6 +42,7 @@ COPY packaging/docker/set-console-port.ps1 /opt/dst/packaging/docker/set-console
 COPY packaging/docker/database.py /opt/dst/packaging/docker/database.py
 COPY packaging/docker/manager-client.py /opt/dst/packaging/docker/manager-client.py
 COPY packaging/docker/host-client.py /opt/dst/packaging/docker/host-client.py
+COPY packaging/docker/update-client.py /opt/dst/packaging/docker/update-client.py
 COPY packaging/docker/settings_client.py /opt/dst/packaging/docker/settings_client.py
 COPY packaging/docker/atlas-service.py /opt/dst/packaging/docker/atlas-service.py
 COPY packaging/docker/map-observer-client.py /opt/dst/packaging/docker/map-observer-client.py

@@ -55,6 +55,8 @@ class HostSession:
     def compose(self,*args):
         command=['compose','-p',self.config['project']]
         for path in self.config['composeFiles']:command+=['-f',path]
+        update=self.root/'update.compose.json'
+        if update.exists() and str(update) not in self.config['composeFiles']:command+=['-f',str(update)]
         return self.docker(*command,*args,timeout=300)
     def app_id(self):return self.compose('ps','-q','dst')
     def manager(self,action,**values):

@@ -4,7 +4,7 @@ Run Dune Server Tool from a browser, with the server and management services ins
 
 DST Docker is a standalone browser application for hosting and managing Dune Awakening servers on Linux and Windows WSL. It has its own releases and installer, separate from the Windows Dune Server Tool application.
 
-## Install DST Docker 1.0.11
+## Install DST Docker 1.0.12
 
 Windows users prepare Ubuntu below, then run the Linux installation command. Native Linux users can go directly to **Linux or WSL: install**.
 
@@ -169,7 +169,11 @@ See [Hosting and maintenance](packaging/docker/README.md) for storage, updates, 
 
 ## Upgrade
 
-Run the installation command again to upgrade. Keep the same installation path; accounts, server data, console port, resource settings and optional HTTPS certificates are retained. Use `--prefix` again if you originally chose a custom path.
+Open **Settings → DST Docker updates** to compare your installed version with the latest stable Docker release. Select **Check now** to force a fresh check. Stop the battlegroup in **Commands**, then select **Update DST Docker**. Keep the browser tab open while DST downloads and builds the release; it reconnects after the portal restarts and confirms the installed version. Select **Reload portal** to load the updated interface. Game-server updates remain separate under **Server updates**.
+
+For an installation made before browser updates were added, run the installation command again once with the same installation path. This enables the registered `dst-docker-update-<installation-id>.service` on systemd hosts, including WSL prepared by the installer. Private releases use the installing Linux account’s existing GitHub CLI sign-in. Checks are cached for six hours; **Check now** bypasses that cache. If an update fails, the card reports failure; inspect `portal-update/update.log` under the installation path and retry. An interrupted update retains the maintenance lock until the update service restarts and releases it.
+
+You can also run the installation command again to upgrade. Keep the same installation path; accounts, server data, console port, resource settings and optional HTTPS certificates are retained. Use `--prefix` again if you originally chose a custom path. Hosts without systemd use this terminal method.
 
 [Release notes](CHANGELOG.md) · [Downloads](https://github.com/coastal-ms/DST-Docker/releases)
 

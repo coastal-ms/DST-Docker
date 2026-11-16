@@ -26,10 +26,10 @@ def token():
         return subprocess.check_output(['gh', 'auth', 'token', '--hostname', 'github.com'], stderr=subprocess.DEVNULL, text=True).strip()
     except (OSError, subprocess.CalledProcessError): return ''
 
-def download(opener, path, auth, limit):
+def download(opener, path, auth, limit, timeout=120):
     headers = {'User-Agent': 'DST-Docker-bootstrap', 'Accept': 'application/vnd.github+json'}
     if auth: headers['Authorization'] = 'Bearer ' + auth
-    with opener.open(urllib.request.Request(API + path, headers=headers), timeout=120) as response:
+    with opener.open(urllib.request.Request(API + path, headers=headers), timeout=timeout) as response:
         data = response.read(limit + 1)
     if len(data) > limit: raise ValueError('Source download exceeds the supported size.')
     return data
@@ -72,6 +72,8 @@ def main(args):
     if ref.get('type') != 'commit': raise ValueError('Release tag must resolve to a commit.')
     commit = ref['sha']
     if not re.fullmatch(r'[0-9a-f]{40}', commit): raise ValueError('Invalid release commit.')
+    if os.environ.get('DST_EXPECTED_RELEASE_TAG') and (tag != os.environ['DST_EXPECTED_RELEASE_TAG'] or commit != os.environ.get('DST_EXPECTED_RELEASE_COMMIT')):
+        raise ValueError('The release changed. Check for updates again before installing.')
     print('Installing DST Docker ' + tag + ' from its source release.', flush=True)
     data = download(opener, '/tarball/' + commit, auth, 128 * 1024**2)
     with tempfile.TemporaryDirectory(prefix='dst-bootstrap-') as folder:

@@ -1,8 +1,8 @@
 {
   "name": "DST Docker",
-  "version": "1.0.11",
+  "version": "1.0.12",
   "repository": "coastal-ms/DST-Docker",
-  "tag": "v1.0.11",
+  "tag": "v1.0.12",
   "distribution": "source",
   "bootstrap": "bootstrap.sh"
 }

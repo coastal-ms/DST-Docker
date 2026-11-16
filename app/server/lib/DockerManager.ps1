@@ -58,10 +58,10 @@ function Sync-DuneFuncomInstalledBuild {
 
 
 function Invoke-DuneDockerManager {
-    param([Parameter(Mandatory)][hashtable]$Request,[switch]$HostSession)
+    param([Parameter(Mandatory)][hashtable]$Request,[switch]$HostSession,[switch]$ProductUpdater)
     $start = [Diagnostics.ProcessStartInfo]::new()
     $start.FileName = 'python3'
-    $client=if($HostSession){'host-client.py'}else{'manager-client.py'}
+    $client=if($ProductUpdater){'update-client.py'}elseif($HostSession){'host-client.py'}else{'manager-client.py'}
     [void]$start.ArgumentList.Add("/opt/dst/packaging/docker/$client")
     $start.UseShellExecute = $false
     $start.RedirectStandardInput = $true

@@ -10,7 +10,9 @@ if [ -f "$task_root/../../installation.json" ]; then task_https_state=$(CDPATH= 
 task_https_override=${DST_HTTPS_OVERRIDE:-$task_https_state/https.compose.json}
 task_mirror_override=${DST_MIRROR_OVERRIDE:-$task_https_state/mirror.compose.json}
 task_host_override=$task_https_state/host.compose.json
+task_update_override=$task_https_state/update.compose.json
 compose() {
+  if [ -f "$task_update_override" ]; then set -- -f "$task_update_override" "$@"; fi
   if [ -f "$task_host_override" ]; then set -- -f "$task_host_override" "$@"; fi
   if [ -f "$task_mirror_override" ]; then set -- -f "$task_mirror_override" "$@"; fi
   if [ -f "$task_https_override" ]; then set -- -f "$task_https_override" "$@"; fi

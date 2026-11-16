@@ -76,6 +76,12 @@ Describe 'Existing settings workflows use the native file transport' {
         {Set-DuneRetailServerSettings -Ip docker -ExpectedRevision ('a'*64) -Updates @{GatheringAmount='2'}}|Should -Not -Throw
         Should -Invoke Invoke-DuneDockerManager -Times 0 -ParameterFilter {$Request.action -in @('services.stop','services.restart')}
     }
+    It 'returns the actual Docker before-image backup for the settings success message' {
+        Mock Write-DuneDockerSettingsFile {@{revision=('b'*64);backup='UserServerCustomSettings.ini-20261115T120000Z-abcdef123456.bak'}}
+        $result=Set-DuneRetailServerSettings -Ip docker -ExpectedRevision ('a'*64) -Updates @{GatheringAmount='2'}
+        $result.backup.path|Should -Be '/srv/UserSettings/.dst-backups/UserServerCustomSettings.ini-20261115T120000Z-abcdef123456.bak'
+        $result.backup.sha256|Should -Be ('a'*64)
+    }
 
     It 'returns the selected image defaults without VM image discovery' {
         Mock Invoke-DuneDockerManager {@{ok=$true;data=@{game='stock game';engine='stock engine';source=@{pod='installed Docker image'}}}}

@@ -848,6 +848,7 @@ function Set-DuneRetailServerSettings {
         if($SynchronizeOnly){return @{ok=$true;skipped=$true}}
         $saved=Write-DuneDockerSettingsFile -File server -Raw $updated -Revision $current.revision -ExpectedExists $current.fileExists
         return @{ok=$true;applied=$Updates.Count;revision=$saved.revision;
+            backup=$(if($saved.backup){@{path='/srv/UserSettings/.dst-backups/'+$saved.backup;sha256=$current.revision;timestamp=''}}else{$null});
             settings=@((ConvertFrom-DuneRetailServerSettingsRaw -Raw $updated).settings);
             target=(Get-DuneRetailServerSettingsPublicTarget -Target $target);restartRequired=$true;
             message='Settings saved. They apply at the next map start.'}

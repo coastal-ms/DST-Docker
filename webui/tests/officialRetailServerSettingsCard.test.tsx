@@ -15,9 +15,25 @@ afterEach(() => {
   cleanup()
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
+  vi.unstubAllEnvs()
 })
 
 describe('Official Retail Server Settings card', () => {
+  it.each([undefined, null])('accepts a successful Docker save without an existing-file backup (%s)', async backup => {
+    vi.stubEnv('VITE_DST_EDITION', 'docker')
+    const setting = { key: 'GatheringAmount', present: true, label: 'Gathering amount', value: '1', displayValue: '1', group: 'Resources', type: 'float', editable: true, supported: true, valid: true, options: [] }
+    vi.stubGlobal('fetch', vi.fn(async (_url, init) => new Response(JSON.stringify(init?.method === 'PUT'
+      ? { ok: true, applied: 1, revision: 'saved', backup, message: 'Settings saved. They apply at the next map start.', settings: [{ ...setting, value: '2' }] }
+      : { available: true, revision: 'original', target: { stopped: false, serverPodCount: 2 }, malformedLines: [], settings: [setting] }))))
+    const drafts = new Map<string, SettingsDraft>()
+    const controller = { register: (id: string, draft: SettingsDraft | null) => { if (draft) drafts.set(id, draft) }, review: vi.fn(), locked: false }
+    render(<SettingsApplyContext.Provider value={controller}><OfficialRetailServerSettingsCard vmRunning /></SettingsApplyContext.Provider>)
+    fireEvent.change(await screen.findByRole('spinbutton', { name: 'Gathering amount exact value' }), { target: { value: '2' } })
+    await expect(drafts.get('official')!.apply()).resolves.toBeUndefined()
+    expect(await screen.findByText('Settings saved. They apply at the next map start.')).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(screen.getByRole('spinbutton', { name: 'Gathering amount exact value' })).toHaveValue(2)
+  })
   it('accepts a cleared number as server-file removal and sends only that key', async () => {
     const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({
       applied: 1, backup: { path: '/fixture/settings.backup' },

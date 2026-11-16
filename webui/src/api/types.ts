@@ -281,7 +281,7 @@ export type RetailServerSettingsSaveResponse = {
   ok: boolean
   applied: number
   revision: string
-  backup: { path: string; sha256: string; timestamp: string }
+  backup?: { path: string; sha256: string; timestamp: string } | null
   restartRequired: true
   message: string
   settings: RetailServerSetting[]

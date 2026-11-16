@@ -3,8 +3,18 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { UsageCountCard } from '../src/pages/settings/UsageCountCard'
 import { api } from '../src/api/client'
 vi.mock('../src/api/client', () => ({ api: vi.fn() }))
-afterEach(() => { cleanup(); vi.resetAllMocks() })
+afterEach(() => { cleanup(); vi.resetAllMocks(); vi.unstubAllEnvs() })
 describe('Anonymous usage setting', () => {
+  it('loads and persists the Docker preference through its qualified endpoint', async () => {
+    vi.stubEnv('VITE_DST_EDITION', 'docker')
+    vi.mocked(api).mockResolvedValueOnce({ values: { AnonymousUsageEnabled: 'false' } }).mockResolvedValueOnce({ ok: true })
+    render(<UsageCountCard />)
+    await waitFor(() => expect(screen.getByRole('checkbox')).toBeEnabled())
+    expect(api).toHaveBeenCalledWith('/api/docker/usage-count')
+    fireEvent.click(screen.getByRole('checkbox'))
+    await waitFor(() => expect(screen.getByRole('checkbox')).toBeChecked())
+    expect(api).toHaveBeenLastCalledWith('/api/docker/usage-count', { method: 'PUT', body: JSON.stringify({ values: { AnonymousUsageEnabled: 'true' } }) })
+  })
   it('shows the enabled default and saves an explicit opt-out immediately', async () => {
     vi.mocked(api).mockResolvedValueOnce({ values: {} }).mockResolvedValueOnce({ ok: true })
     render(<UsageCountCard />)

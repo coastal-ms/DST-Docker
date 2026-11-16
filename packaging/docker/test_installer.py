@@ -11,10 +11,11 @@ TEMPLATE=Path(__file__).parent.parent.parent/'bin/dst-install'
 # In the Docker test mount only this directory is provided separately.
 if not TEMPLATE.exists():TEMPLATE=Path('/installer-template')
 
-def archive(extra=None,launcher=None):
+def archive(extra=None,launcher=None,updater=None):
     output=io.BytesIO()
     files={'bin/dst-docker':b'#!/bin/sh\nprintf "portal fixture started %s\\n" "$*"\n','compose.yaml':b'name: fixture\nservices: {}\n','packaging/docker/host_session.py':b'import sys;print("shortcut fixture prepared "+" ".join(sys.argv[1:]))\n','packaging/docker/Dockerfile':b'FROM scratch\n'}
     if launcher is not None:files['bin/dst-docker']=launcher
+    if updater is not None:files['packaging/docker/portal_update.py']=updater
     with tarfile.open(fileobj=output,mode='w:gz') as target:
         for name,data in files.items():
             entry=tarfile.TarInfo(name);entry.size=len(data);entry.mode=0o755 if name.startswith('bin/') else 0o644;target.addfile(entry,io.BytesIO(data))
@@ -22,6 +23,22 @@ def archive(extra=None,launcher=None):
     return output.getvalue()
 
 class InstallerTests(unittest.TestCase):
+    def test_update_service_prepared_before_portal_and_registered_after_activation(self):
+        sudo=self.fake/'sudo';sudo.write_text('#!/bin/sh\nexec "$@"\n');sudo.chmod(0o755)
+        helper=b'import sys;from pathlib import Path;root=Path(sys.argv[-1]);print("updater "+sys.argv[1]);assert (root/"current").is_symlink() if sys.argv[1]=="register" else not (root/"current").exists()\n'
+        self.bundle(archive(updater=helper))
+        ps=self.fake/'ps';ps.write_text('#!/bin/sh\necho systemd\n');ps.chmod(0o755)
+        prefix=self.root/'installed'
+        result=self.run_installer('--prefix',str(prefix))
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertLess(result.stdout.index('updater prepare'),result.stdout.index('portal fixture started'))
+        self.assertGreater(result.stdout.index('updater register'),result.stdout.index('portal fixture started'))
+        self.environment['DST_SELF_UPDATE']='1'
+        result=self.run_installer('--prefix',str(self.root/'self-update'))
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertIn('updater prepare',result.stdout)
+        self.assertNotIn('updater register',result.stdout)
+
     def setUp(self):
         self.temporary=tempfile.TemporaryDirectory();self.root=Path(self.temporary.name);self.fake=self.root/'commands';self.fake.mkdir()
         self.log=self.root/'docker-calls';self.environment={**os.environ,'PATH':str(self.fake)+':'+os.environ['PATH'],'DST_FIXTURE_DOCKER_LOG':str(self.log)}
