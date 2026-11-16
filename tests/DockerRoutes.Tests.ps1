@@ -3,6 +3,15 @@ BeforeAll {
     Import-DstLib 'DockerRoutes.ps1'
 }
 Describe 'Docker adapter routing boundary' {
+    It 'allows only the supported SQL POST through the Docker Owner host exception' {
+        Test-DuneDockerRouteQualified -Method POST -Path '/api/db/query' | Should -BeTrue
+        Test-DuneDockerOwnerHostRoute -Method POST -Path '/api/db/query' | Should -BeTrue
+        foreach($method in @('GET','PUT','DELETE')) {
+            Test-DuneDockerOwnerHostRoute -Method $method -Path '/api/db/query' | Should -BeFalse
+        }
+        Test-DuneDockerOwnerHostRoute -Method POST -Path '/api/db/query/other' | Should -BeFalse
+    }
+
     It 'exposes only read-only public IP discovery at the exact network route' {
         Test-DuneDockerRouteQualified -Method GET -Path '/api/docker/network/public-ip' | Should -BeTrue
         Test-DuneDockerRouteQualified -Method POST -Path '/api/docker/network/public-ip' | Should -BeFalse
@@ -148,7 +157,7 @@ Describe 'Docker adapter routing boundary' {
         }
         Test-DuneDockerRouteQualified -Method GET -Path '/api/gameplay/vehicles/deletions'|Should -BeTrue
         Test-DuneDockerRouteQualified -Method DELETE -Path ('/api/gameplay/vehicles/deletions/'+('a'*32))|Should -BeTrue
-        foreach($path in @('/api/gameplay/vehicles/delete/all','/api/gameplay/vehicles/deletions/process/extra','/api/gameplay/vehicles/deletions/../process','/api/console','/api/db/query')){
+        foreach($path in @('/api/gameplay/vehicles/delete/all','/api/gameplay/vehicles/deletions/process/extra','/api/gameplay/vehicles/deletions/../process','/api/console','/api/db/query/other')){
             Test-DuneDockerOwnerHostRoute -Method POST -Path $path|Should -BeFalse
         }
         foreach($method in @('GET','PUT','DELETE')){Test-DuneDockerRouteQualified -Method $method -Path '/api/gameplay/vehicles/delete'|Should -BeFalse}

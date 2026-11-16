@@ -196,18 +196,40 @@ def update(args):
                       'authorityPreserved': True, 'servicesStarted': False, 'clientTrustInstalled': False}))
 
 
+def initialize_root(project):
+    """Provision only the retained local CA, without a listener or client trust."""
+    validate(project, '127.0.0.1', 8443, 8088)
+    labels=json.loads(docker('volume','inspect','--format','{{json .Labels}}',project+'-dst-https-data')) or {}
+    if labels.get('com.dst.https.project')!=project:raise ValueError('The HTTPS authority volume does not belong to this setup.')
+    config='{\n admin off\n skip_install_trust\n }\nhttps://localhost:8443 {\n tls internal\n respond "DST certificate preparation"\n}\n'
+    docker('run','--rm','-i','--network','none','--read-only','--user','10001:10001',
+           '--cap-drop','ALL','--security-opt','no-new-privileges:true',
+           '--tmpfs','/tmp:rw,noexec,nosuid,size=32m,uid=10001,gid=10001',
+           '-e','XDG_DATA_HOME=/data','-e','XDG_CONFIG_HOME=/tmp/config',
+           '-v',project+'-dst-https-data:/data','--entrypoint','caddy',CADDY,
+           'validate','--config','-','--adapter','caddyfile',input=config)
+
+
+def public_root(project):
+    validate(project, '127.0.0.1', 8443, 8088)
+    labels=json.loads(docker('volume','inspect','--format','{{json .Labels}}',project+'-dst-https-data')) or {}
+    if labels.get('com.dst.https.project')!=project:raise ValueError('The HTTPS authority volume does not belong to this setup.')
+    pem=docker('run','--rm','--network','none','--read-only','--user','10001:10001',
+               '--cap-drop','ALL','--security-opt','no-new-privileges:true',
+               '-v',project+'-dst-https-data:/data:ro','--entrypoint','cat',CADDY,
+               '/data/caddy/pki/authorities/local/root.crt')
+    if len(pem)>16384 or pem.count('-----BEGIN CERTIFICATE-----')!=1 or 'PRIVATE KEY' in pem:
+        raise ValueError('The public HTTPS certificate could not be read.')
+    ssl.PEM_cert_to_DER_cert(pem)
+    return pem
+
+
 def export(args):
     validate(args.project, '127.0.0.1', 8443, 8088)
     output = Path(args.output).resolve()
     if output.exists():
         raise ValueError('Choose a new public certificate output path; the existing file is preserved.')
-    labels=json.loads(docker('volume','inspect','--format','{{json .Labels}}',args.project+'-dst-https-data')) or {}
-    if labels.get('com.dst.https.project')!=args.project:
-        raise ValueError('The HTTPS authority volume does not belong to this setup.')
-    pem = docker('run', '--rm', '--network', 'none', '--read-only', '--user', '10001:10001',
-                 '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true',
-                 '-v', args.project + '-dst-https-data:/data:ro', '--entrypoint', 'cat', CADDY,
-                 '/data/caddy/pki/authorities/local/root.crt')
+    pem = public_root(args.project)
     der = ssl.PEM_cert_to_DER_cert(pem)
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open('x', encoding='ascii') as f:

@@ -124,7 +124,8 @@ class ProductUpdateTests(unittest.TestCase):
         unit=write.call_args.args[0]
         self.assertIn('User=fixture',unit);self.assertIn('SupplementaryGroups=docker',unit)
         self.assertIn('current/packaging/docker/portal_update.py',unit.replace('\\','/').replace('//','/'))
-        self.assertEqual(run.call_args.args[0][:3],['systemctl','enable','--now'])
+        self.assertEqual(run.call_args_list[-2].args[0][:3],['systemctl','enable','--now'])
+        self.assertEqual(run.call_args.args[0][:2],['systemctl','restart'])
 
 
 if __name__ == '__main__': unittest.main()

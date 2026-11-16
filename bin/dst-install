@@ -360,7 +360,7 @@ if ((task_need_apt)); then
   if ((${#task_sudo[@]})); then sudo -v; fi
   task_stage='installing prerequisites'
   "${task_sudo[@]}" apt-get update
-  task_packages=(ca-certificates curl python3 util-linux procps)
+  task_packages=(ca-certificates curl python3 util-linux procps iproute2)
   if [[ -n "$task_source" ]]; then task_packages+=(git); fi
   "${task_sudo[@]}" apt-get install -y "${task_packages[@]}"
   if ((!task_has_cli)); then

@@ -8,6 +8,7 @@ import { VmInfoCard } from './database/VmInfoCard'
 import { api } from '../api/client'
 import { showRoutineSuccess } from '../hooks/useReducedRoutineUi'
 import { isLocalViewer } from '../util/viewer'
+import { usePortalAccess } from '../auth/portalAccess'
 import { createDockerBackup, importDockerBackup, verifyDockerBackup, recoverDockerBackupCleanup, prepareDockerBackupDownload, recoverDockerScheduledBackup } from '../api/docker'
 import DockerRestoreDialog from './docker/DockerRestoreDialog'
 import { DockerDatabaseControl } from './docker/DockerDatabaseControl'
@@ -119,6 +120,8 @@ export function Database() {
   const docker = import.meta.env.VITE_DST_EDITION === 'docker'
   const bgState = status?.bg?.state ?? 'unknown'
   const localViewer = isLocalViewer()
+  const { canAccessOwnerSurfaces } = usePortalAccess()
+  const sqlEditorViewer = docker ? canAccessOwnerSurfaces : localViewer
   const worldRestartViewer = docker || localViewer
   const [dockerDatabaseReady, setDockerDatabaseReady] = useState(false)
 
@@ -844,7 +847,7 @@ export function Database() {
         )}
       </CollapsibleCard>
 
-      {localViewer && (
+      {sqlEditorViewer && (
       <>
         {/* SQL editor card */}
         <div className="card overflow-hidden mb-4">

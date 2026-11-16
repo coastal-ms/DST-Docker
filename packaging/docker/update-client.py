@@ -7,7 +7,7 @@ try:
     raw = sys.stdin.buffer.read(4097)
     if len(raw) > 4096: raise ValueError()
     request = json.loads(raw)
-    if request.get('action') not in {'status', 'install'}: raise ValueError()
+    if request.get('action') not in {'status', 'install', 'https.status', 'https.prepare', 'https.enable', 'https.disable', 'https.certificate'}: raise ValueError()
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
         connection.settimeout(40); connection.connect('/update-control/update.sock')
         connection.sendall(raw + b'\n')

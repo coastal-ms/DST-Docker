@@ -4,7 +4,7 @@ Run Dune Server Tool from a browser, with the server and management services ins
 
 DST Docker is a standalone browser application for hosting and managing Dune Awakening servers on Linux and Windows WSL. It has its own releases and installer, separate from the Windows Dune Server Tool application.
 
-## Install DST Docker 1.0.17
+## Install DST Docker 1.0.18
 
 Windows users prepare Ubuntu below, then run the Linux installation command. Native Linux users can go directly to **Linux or WSL: install**.
 
@@ -70,9 +70,11 @@ sh bin/dst-docker url
 
 For remote browser access without forwarding a router port, open **Settings > Remote access with Tailscale**. Choose **Private** for devices on your Tailscale network or **Public HTTPS** for Tailscale Funnel, then select **Connect** and follow the Tailscale sign-in link. If Tailscale asks you to enable HTTPS or Funnel, complete that setup and select Connect again. DST shows the resulting address and QR code; users sign in with their DST portal accounts. The Live Map QR uses this address too. Tailscale runs in a separate userspace container, retains its identity across restarts, and can be turned off without restarting game maps. Private access requires Tailscale on the connecting device; public Funnel access does not.
 
-The console uses **HTTP by default**; HTTPS is optional. To enable HTTPS for your host address, run `sh bin/dst-docker https HOST_IPV4 [PORT]` and follow the printed certificate instructions. To return to HTTP, run `sh bin/dst-docker http [PORT]`. Omitting the port preserves your current console port. Switching transport restarts only the console and its optional proxy; saved accounts, world data and map processes are preserved. The HTTPS certificate data is retained so you can enable it again later.
+The console uses **HTTP by default**; HTTPS is optional. Open **Settings > Browser HTTPS** to prepare HTTPS while keeping HTTP available, download this installation’s public certificate, and follow the device trust instructions before selecting **Enable HTTPS**. Then use **Open HTTPS portal**. Only Owners can change this setup or download its public certificate. The certificate’s private key stays on the host. **Return to HTTP** preserves certificate data for later reuse. Installing Linux `ca-certificates` enables trusted downloads; it does not enable portal HTTPS or install trust on browser devices.
 
-Owners can manage browser accounts in **Settings → Browser Portal accounts**. Current Docker server roles are Owner and Admin. New accounts must replace their initial password at first sign-in. Owners can reset passwords, revoke sessions, change roles, disable accounts and delete accounts. The last enabled Owner is protected, and account sign-in stays enabled.
+For command-line setup, enable HTTPS for your host address, run `sh bin/dst-docker https HOST_IPV4 [PORT]` and follow the printed certificate instructions. To return to HTTP, run `sh bin/dst-docker http [PORT]`. Omitting the port preserves your current console port. Switching transport restarts only the console and its optional proxy; saved accounts, world data and map processes are preserved. The HTTPS certificate data is retained so you can enable it again later.
+
+Owners can manage browser accounts in **Settings → Browser Portal accounts**. Docker account roles are Owner, Admin and character-linked Player. New accounts must replace their initial password at first sign-in. Owners can reset passwords, revoke sessions, change roles, disable accounts and delete accounts. The last enabled Owner is protected, and account sign-in stays enabled.
 
 If no Owner can sign in on Windows, open the **DST Docker** desktop icon and choose **2 · Create Owner account / recover password** in the hosting window. If no Owner exists yet, this option displays the current Owner-creation link, so the original installer window is not needed. Otherwise, the menu lists Owner accounts, asks for confirmation and shows a one-time password. **3 · Open management terminal** opens a command prompt in the correct installation folder.
 

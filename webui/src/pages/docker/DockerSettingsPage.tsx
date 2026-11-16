@@ -7,6 +7,7 @@ import DockerResourcesCard from './DockerResourcesCard'
 import { PortalAccountsManager } from '../settings/PortalAccountsManager'
 import { usePortalAccess } from '../../auth/portalAccess'
 import { DockerTailscaleAccess } from './DockerTailscaleAccess'
+import { DockerHttpsCard } from './DockerHttpsCard'
 import { WslMemoryCard } from './WslMemoryCard'
 import DockerNetworkCard from './DockerNetworkCard'
 import { DockerProductUpdateCard } from './DockerProductUpdateCard'
@@ -21,6 +22,7 @@ export default function DockerSettingsPage() {
       <DockerResourcesCard />
       {canAccessOwnerSurfaces && <WslMemoryCard />}
       <MemoryBalancingControl />
+      {canAccessOwnerSurfaces && <DockerHttpsCard />}
       {canAccessOwnerSurfaces && <DockerTailscaleAccess />}
       {canAccessOwnerSurfaces && <UsageCountCard />}
       <AppearanceCard />
