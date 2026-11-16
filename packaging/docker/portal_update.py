@@ -42,6 +42,7 @@ class Updater:
         self.lock = threading.Lock()
         self.check_lock = threading.Lock()
         self.cached = None
+        self.https = None
         path = self.directory / 'operation.json'
         self.operation = json.loads(path.read_text()) if path.exists() else None
 
@@ -107,6 +108,7 @@ class Updater:
         identifier = None
         try:
             if self.operation and self.operation['phase'] == 'running': raise ValueError('An update is already running.')
+            if self.https and self.https.operation and self.https.operation.get('phase')=='running': raise ValueError('Wait for HTTPS setup to finish.')
             selected = self.check(force=True)
             if not selected['available']: raise ValueError('DST Docker is already on this or a newer version.')
             if (request['tag'], request['commit']) != (selected['tag'], selected['commit']):
@@ -151,6 +153,18 @@ class Updater:
 
     def request(self, request):
         action = request.get('action')
+        if isinstance(action,str) and action.startswith('https.'):
+            with self.lock:
+                from https_control import HttpsControl
+                if self.https is None:self.https=HttpsControl(self.root,self.source,self.compose)
+                port=request.get('port')
+                if type(port) is not int or not 1024<=port<=65535:raise ValueError('Invalid console port.')
+                if action in ('https.status','https.certificate'):
+                    if set(request)!={'action','port'}:raise ValueError('Choose a supported HTTPS action.')
+                    return self.https.status(port) if action=='https.status' else self.https.certificate()
+                if self.operation and self.operation.get('phase')=='running':raise ValueError('Wait for the Docker update to finish.')
+                if self.https.operation and self.https.operation.get('phase')=='running':raise ValueError('HTTPS setup is already running.')
+                return self.https.start(request)
         if action == 'install': return self.install(request)
         if action != 'status' or set(request) - {'action', 'force'} or type(request.get('force', False)) is not bool:
             raise ValueError('Choose a supported DST update action.')
@@ -218,6 +232,8 @@ def register(root):
     (Path('/etc/systemd/system') / unit).write_text(content)
     subprocess.run(['systemctl', 'daemon-reload'], check=True)
     subprocess.run(['systemctl', 'enable', '--now', unit], check=True)
+    # Manual installer upgrades must load new host actions even when this unit is already running.
+    subprocess.run(['systemctl', 'restart', unit], check=True)
 
 
 if __name__ == '__main__':

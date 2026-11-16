@@ -1,4 +1,4 @@
-﻿# Local map UI host. Opening it starts an idle snapshot service, never live reads.
+# Local map UI host. Opening it starts an idle snapshot service, never live reads.
 # Opening the map restores its saved Live choice; Stop live persists until Start live.
 
 function Resolve-DuneAtlasAppDirectory {
@@ -255,6 +255,17 @@ function Get-DuneAtlasPreferenceIdentity {
     finally { $sha.Dispose() }
 }
 
+function Test-DuneAtlasCollectionControl {
+    param($Request, $Principal)
+    if ($env:DST_HOSTING_BACKEND -eq 'docker') {
+        # Docker is administered through authenticated browser accounts. A
+        # loopback proxy address is neither a role nor a host-control grant.
+        return ([string]$Principal.type -ceq 'portal-account' -and
+            [string]$Principal.role -cin @('owner','admin'))
+    }
+    return (Test-DuneLocalOnlyRequest -Request $Request)
+}
+
 function Test-DuneAtlasPlayerMarkers {
     param($Principal)
     if ([string]$Principal.type -eq 'linked-player') { return $false }
@@ -287,7 +298,7 @@ function Invoke-DuneAtlasProxy {
         $message = [Net.Http.HttpRequestMessage]::new([Net.Http.HttpMethod]::new($Method), $target)
         if ($session.hosting -eq 'vm') { $message.Headers.Host='127.0.0.1:18446' }
         # Derive permission from the authenticated transport, never a browser header.
-        $timingAccess = if (Test-DuneLocalOnlyRequest -Request $Request) { 'local' } else { 'remote' }
+        $timingAccess = if (Test-DuneAtlasCollectionControl -Request $Request -Principal $Principal) { 'local' } else { 'remote' }
         [void]$message.Headers.TryAddWithoutValidation('X-DST-Atlas-Timing', $timingAccess)
         # Always replace browser-supplied capability headers with principal facts.
         $playerMarkers = if (Test-DuneAtlasPlayerMarkers -Principal $Principal) { 'allowed' } else { 'denied' }
@@ -295,7 +306,7 @@ function Invoke-DuneAtlasProxy {
         # Account identity comes from the dispatch principal, never client headers.
         # The browser cookie is only a preference fallback for legacy token access.
         if ($Path -ne '/') {
-            $preferenceIdentity=Get-DuneAtlasPreferenceIdentity -Request $Request -Principal $Principal -Local ($timingAccess -eq 'local')
+            $preferenceIdentity=Get-DuneAtlasPreferenceIdentity -Request $Request -Principal $Principal -Local ($env:DST_HOSTING_BACKEND -ne 'docker' -and (Test-DuneLocalOnlyRequest -Request $Request))
             $expectedScope=[string]$Request.Headers['X-DST-Atlas-Scope']
             if ($Method -eq 'POST' -and $Path -eq '/preferences' -and $expectedScope -and $expectedScope -cne $preferenceIdentity) {
                 Write-DuneError -Response $Response -Status 409 -Message 'The map account changed. Reload the map before saving selections.'

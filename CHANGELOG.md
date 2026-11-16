@@ -1,5 +1,11 @@
 # DST Docker changelog
 
+## [1.0.18]
+
+- Set up browser HTTPS from Settings, download the public certificate and follow device trust instructions before switching connections.
+- Let Docker Owners and Admins adjust Live Map refresh timing and control live collection and snapshots.
+- Restore SQL editor access for Docker Owners.
+
 ## [1.0.17]
 
 - Remove the Windows-only Widget mode entry from the Docker portal.

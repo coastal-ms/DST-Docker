@@ -54,6 +54,10 @@ When Docker is selected, DST also prepares same-PC game traffic for the Docker l
 
 ## Optional HTTPS
 
+Owners can use **Settings > Browser HTTPS**: prepare HTTPS first, download the public CA certificate, install trust on each connecting device, then enable HTTPS. Preparation keeps HTTP available. DST does not automatically install client trust or export a private key. Changing the browser connection restarts the console/proxy only; game maps keep running. Tailscale HTTPS remains an alternative for devices that should not install this local certificate.
+
+The terminal commands remain available:
+
 ```sh
 sh bin/dst-docker https HOST_IPV4
 sh bin/dst-docker https-root "$HOME/dst-root.crt"
