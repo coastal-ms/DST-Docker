@@ -1,5 +1,5 @@
 import unittest
-from portal_urls import portal_urls
+from portal_urls import portal_urls,setup_links
 
 
 class PortalUrlsTests(unittest.TestCase):
@@ -16,3 +16,14 @@ class PortalUrlsTests(unittest.TestCase):
         for url in ['http://+:18765/', 'http://192.0.2.23:18765/', 'https://127.0.0.1:18765/', 'http://127.0.0.1/']:
             with self.subTest(url=url), self.assertRaises(ValueError):
                 portal_urls(url, [])
+
+    def test_setup_output_labels_one_pc_link_and_one_host_link(self):
+        value=setup_links('http://127.0.0.1:8088/?t=synthetic-only','172.25.199.100')
+        self.assertIn('Open setup on this PC:\n  http://127.0.0.1:8088/?t=synthetic-only',value)
+        self.assertIn('Direct Linux/WSL host address:\n  http://172.25.199.100:8088/?t=synthetic-only',value)
+        self.assertEqual(value.count('http://'),2)
+
+    def test_missing_host_route_does_not_offer_an_arbitrary_bridge_address(self):
+        value=setup_links('http://127.0.0.1:8088/?t=synthetic-only')
+        self.assertEqual(value.count('http://'),1)
+        self.assertNotIn('Direct Linux/WSL',value)

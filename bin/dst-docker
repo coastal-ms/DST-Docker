@@ -46,7 +46,7 @@ portal_links() {
     task_origin=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["x-dst-https-origin"])' "$task_https_override")
     compose exec -T dst cat /data/state/DuneServer/last-url.txt | python3 packaging/docker/portal_urls.py --https-origin "$task_origin"
   else
-    compose exec -T dst cat /data/state/DuneServer/last-url.txt | python3 packaging/docker/portal_urls.py $(hostname -I 2>/dev/null || true)
+    compose exec -T dst cat /data/state/DuneServer/last-url.txt | python3 packaging/docker/portal_urls.py --display
   fi
 }
 public_port() {
@@ -88,7 +88,7 @@ wait_portal() {
   task_attempt=0
   while [ "$task_attempt" -lt 30 ]; do
     if compose exec -T dst pwsh -NoLogo -NoProfile -File /opt/dst/healthcheck.ps1 >/dev/null 2>&1; then
-      printf '\nOpen DST in your browser:\n'
+      printf '\n'
       portal_links
       return 0
     fi

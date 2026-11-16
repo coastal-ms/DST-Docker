@@ -81,7 +81,7 @@ class HostSession:
             listed=self.compose(*command,'-Action','List')
             owners=[line.split('\t',1)[1] for line in listed.splitlines() if line.startswith(('Enabled\t','Disabled\t'))]
             if not owners:
-                print('No Owner account exists yet. Use the first-setup link printed by the installer.',flush=True);return
+                self.show_first_setup_link();return
             if len(owners)==1:username=owners[0]
             else:
                 for number,username in enumerate(owners,1):print(f'{number}. {username}',flush=True)
@@ -106,6 +106,19 @@ class HostSession:
         value=json.loads(path.read_text(encoding='utf-8')).get('browser','default')
         if value not in BROWSERS:raise ValueError('Choose a browser using option 6 in the hosting window.')
         return value
+    def owner_setup_required(self):
+        listed=self.compose('exec','-T','dst','pwsh','-NoLogo','-NoProfile','-File',
+                            '/opt/dst/packaging/docker/owner-recovery.ps1','-Action','List')
+        return not any(line.startswith(('Enabled\t','Disabled\t')) for line in listed.splitlines())
+    def show_first_setup_link(self):
+        from portal_urls import portal_urls
+        from urllib.parse import urlsplit,urlunsplit
+        local=portal_urls(self.compose('exec','-T','dst','cat','/data/state/DuneServer/last-url.txt'),[])[0]
+        parsed=urlsplit(local)
+        origin=urlsplit(getattr(self,'console_origin',f'http://127.0.0.1:{parsed.port}'))
+        link=urlunsplit(parsed._replace(scheme=origin.scheme,netloc=origin.netloc))
+        print('\nCreate your first Owner account:\n  '+link,flush=True)
+        print('Open this complete link in your browser. Keep this hosting window open; your setup continues from here.',flush=True)
     def choose_browser(self,reader=None):
         reader=reader or input
         current=self.browser_preference()
@@ -140,6 +153,10 @@ foreach($path in $paths){
         if not path:raise ValueError(f'{BROWSERS[browser]} is not installed. Install it or choose another browser with option 6.')
         return path
     def open_browser(self):
+        if self.owner_setup_required():
+            # Keep the private setup token in this local window, never in the
+            # permanent shortcut or a Windows process command line.
+            self.show_first_setup_link();return
         browser=self.browser_preference();url=self.browser_url()
         if browser=='default':windows_script('Start-Process '+ps_literal(url))
         else:
@@ -147,7 +164,7 @@ foreach($path in $paths){
             windows_script('Start-Process -FilePath '+ps_literal(path)+' -ArgumentList '+ps_literal(subprocess.list2cmdline([url])))
     def console_menu(self,reader=None):
         reader=reader or input
-        print('\nDST Docker\n  1  Open browser\n  2  Recover Owner password\n  3  Open management terminal\n  4  Recreate desktop shortcut\n  5  Shut down host\n  6  Choose browser',flush=True)
+        print('\nDST Docker\n  1  Open browser\n  2  Create Owner account / recover password\n  3  Open management terminal\n  4  Recreate desktop shortcut\n  5  Shut down host\n  6  Choose browser',flush=True)
         while True:
             try:
                 choice=reader('Choose an option: ').strip()

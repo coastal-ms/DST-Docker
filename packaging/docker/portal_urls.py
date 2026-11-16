@@ -1,6 +1,7 @@
 """Display authenticated portal links for the Linux host's IP addresses."""
 import ipaddress
 import sys
+import socket
 from urllib.parse import urlsplit, urlunsplit
 
 
@@ -22,9 +23,30 @@ def portal_urls(local_url, addresses):
     return urls
 
 
+def primary_address():
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as connection:
+            connection.connect(('1.1.1.1', 53))
+            return connection.getsockname()[0]
+    except OSError:
+        return None
+
+
+def setup_links(local_url, host_address=None):
+    # Select the host's route address, rather than every Docker bridge returned
+    # by hostname -I. Never guess a bridge subnet or a second interface.
+    links = portal_urls(local_url, [host_address] if host_address else [])
+    text = 'Open setup on this PC:\n  ' + links[0]
+    if len(links) > 1:
+        text += '\n\nDirect Linux/WSL host address:\n  ' + links[1]
+    return text
+
+
 if __name__ == '__main__':
     local = sys.stdin.read()
-    if sys.argv[1:2] == ['--https-origin']:
+    if sys.argv[1:2] == ['--display']:
+        print(setup_links(local, primary_address()))
+    elif sys.argv[1:2] == ['--https-origin']:
         parsed = urlsplit(portal_urls(local, [])[0])
         origin = urlsplit(sys.argv[2])
         if origin.scheme != 'https' or not origin.hostname or not origin.port or origin.path or origin.query or origin.fragment or origin.username:

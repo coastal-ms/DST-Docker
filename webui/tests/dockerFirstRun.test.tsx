@@ -107,6 +107,18 @@ it('does not replay an uncertain write or continue after a failure', async () =>
   await expect(prepareFirstWorld(details, vi.fn(), new AbortController().signal)).rejects.toThrow('A useful setup error')
   expect(actions).toEqual(['credentials.save', 'database.create', 'database.initialize'])
 })
+it('does not report success when a failed preparation already left prepared container records', async () => {
+  const state = { ...prepared(), phase: 'database-ready', credentialsSaved: true,
+    database: { name: 'db', port: 18932, state: 'running', health: 'healthy' },
+    operation: { action: 'services.prepare', phase: 'failed', error: 'Docker operation failed (404).' } }
+  const actions: string[] = []
+  vi.mocked(api).mockImplementation(async (_path, init) => {
+    if (init?.method === 'POST') actions.push(JSON.parse(init.body as string).action)
+    return { ok: true, data: state } as never
+  })
+  await expect(prepareFirstWorld(details, vi.fn(), new AbortController().signal)).rejects.toThrow('Docker operation failed (404).')
+  expect(actions).toEqual(['services.prepare'])
+})
 it('observes an in-flight operation after reload without starting more work', async () => {
   vi.useFakeTimers()
   const actions = mockWorld({ ...fresh(), operation: { action: 'database.create', phase: 'running' } })

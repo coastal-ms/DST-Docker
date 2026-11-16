@@ -154,17 +154,18 @@ function Test-DuneDockerWslHost {
 }
 
 function Get-DuneDockerNetworkAddresses {
+    param([switch]$LocalOnly)
     $localAddress=''
     $socket=[Net.Sockets.Socket]::new([Net.Sockets.AddressFamily]::InterNetwork,[Net.Sockets.SocketType]::Dgram,[Net.Sockets.ProtocolType]::Udp)
     try {$socket.Connect('1.1.1.1',53);$localAddress=$socket.LocalEndPoint.Address.ToString()} catch {} finally {$socket.Dispose()}
     $addresses=@{dockerIp=$localAddress;wslIp=$null;networkingMode='native'}
     if(Test-DuneDockerWslHost){
         $addresses.wslIp=$localAddress;$addresses.networkingMode='unknown'
-        try {
+        if(-not $LocalOnly){try {
             $cached=Get-Content -LiteralPath '/host-control/network-info.json' -Raw -ErrorAction Stop | ConvertFrom-Json -AsHashtable
             $parsed=$null
             if([Net.IPAddress]::TryParse([string]$cached.dockerIp,[ref]$parsed) -and $parsed.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetwork){$addresses=$cached}
-        } catch {}
+        } catch {}}
     }
     return $addresses
 }
