@@ -16,7 +16,7 @@ try:
     sys.stdout.buffer.write(response)
 except (FileNotFoundError, ConnectionRefusedError):
     print(json.dumps({'ok': True, 'data': {'supported': False, 'available': False,
-          'error': 'Rerun the installation command once with the same path to enable browser updates. The host needs systemd and GitHub access.'}}))
+          'error': 'Browser updates are not connected to this installation. Rerun the installer using the same installation folder to reconnect the host updater.'}}))
 except Exception:
     print(json.dumps({'ok': True, 'data': {'supported': True, 'available': False,
           'error': 'The DST update service did not respond. Check again; an update may still be running.'}}))

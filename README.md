@@ -4,7 +4,7 @@ Run Dune Server Tool from a browser, with the server and management services ins
 
 DST Docker is a standalone browser application for hosting and managing Dune Awakening servers on Linux and Windows WSL. It has its own releases and installer, separate from the Windows Dune Server Tool application.
 
-## Install DST Docker 1.0.13
+## Install DST Docker 1.0.14
 
 Windows users prepare Ubuntu below, then run the Linux installation command. Native Linux users can go directly to **Linux or WSL: install**.
 
@@ -24,29 +24,13 @@ If Ubuntu is already installed, open it and continue. See Microsoft's [WSL insta
 
 You need an x86_64 Linux environment and a Funcom self-host service token. The installer prepares missing prerequisites on supported Ubuntu/Debian systems, including Docker Engine and Compose. Docker runs inside Linux or WSL; Docker Desktop is not required.
 
-Run the commands below in **Ubuntu or your Linux terminal**, where the prompt looks like `name@host:~$`. A Windows PowerShell prompt starts with `PS`; GitHub CLI installed or signed in there is separate from GitHub CLI inside Ubuntu.
+Run the commands below in **Ubuntu or your Linux terminal**, where the prompt looks like `name@host:~$`. A Windows PowerShell prompt starts with `PS`; run the installation command inside Ubuntu.
 
 These Ubuntu/Debian commands require an account with `sudo` access. If your prompt shows you are logged in as `root`, omit `sudo` from the package commands.
 
-### Private repository: prepare GitHub CLI first
+### Install
 
-For the current private repository, install Git, GitHub CLI, HTTPS certificates and the download tool **inside Ubuntu before signing in**:
-
-```sh
-sudo apt update
-sudo apt install -y git gh ca-certificates curl
-gh auth login --hostname github.com --git-protocol https --web
-```
-
-Use a GitHub account with access to this repository. If a browser does not open, open https://github.com/login/device in your Windows browser and enter the one-time code printed by `gh`. Wait for authentication to complete, then run this in the same Ubuntu terminal:
-
-```sh
-gh api repos/coastal-ms/DST-Docker/contents/bootstrap.sh --jq .content | base64 --decode | bash
-```
-
-### Public repository: direct installation
-
-When the repository is public, GitHub sign-in is unnecessary. On fresh Ubuntu/Debian, prepare the download tools first:
+This repository is public. No GitHub account or sign-in is required. On fresh Ubuntu/Debian, prepare the download tools first:
 
 ```sh
 sudo apt update
@@ -56,7 +40,7 @@ curl -fsSL https://raw.githubusercontent.com/coastal-ms/DST-Docker/main/bootstra
 
 The bootstrap downloads the latest tagged source release and starts installation. Releases contain GitHub's source ZIP and tarball; there is no separate installer download. An unpublished local candidate must be installed using the candidate supplied for testing, rather than this latest-release command.
 
-The installer walks you through missing prerequisites on supported Ubuntu/Debian hosts and asks for the Web UI port (press Enter for 8088). It installs Docker Engine inside Linux when needed; Docker Desktop is not required. If the current terminal needs `sudo` to access Docker, setup continues using it. The installer builds and starts the Web UI, prints the complete browser link, then downloads the official Linux server package. You can open the Web UI and create your Owner account while the game files download. Keep the installer terminal open until it finishes. It preserves existing Docker data and does not remove another container runtime to resolve a conflict. Existing installations retain their console port; use `--port PORT` to change it. Scripted installations can use `--non-interactive` or an explicit `--port PORT`.
+The installer walks you through missing prerequisites on supported Ubuntu/Debian hosts and asks for the Web UI port (press Enter for 8088). It installs Docker Engine inside Linux when needed; Docker Desktop is not required. If the current terminal needs `sudo` to access Docker, setup continues using it. The installer builds and starts the Web UI, prints the complete browser link, then downloads the official Linux server package. You can open the Web UI and create your Owner account while the game files download. Keep the installer terminal open until it finishes. It preserves existing Docker data and does not remove another container runtime to resolve a conflict. The installer reuses the folder already owning the DST portal, including when the command is run under a different Linux user. An explicit different folder cannot take over that portal. Existing installations retain their console port; use `--port PORT` to change it. Scripted installations can use `--non-interactive` or an explicit `--port PORT`.
 
 Fresh WSLUI imports are prepared automatically. If systemd is missing or disabled, setup installs the required Ubuntu/Debian packages, preserves existing WSL settings, and enables it. Setup asks before restarting the named distribution, then continues the same installation in a Windows setup window with its selected destination and port. Processes in that distribution stop during the restart; other distributions stay open. Imported images are also prepared to avoid an interactive first-boot setup stall. Keep the new setup window open until installation finishes.
 

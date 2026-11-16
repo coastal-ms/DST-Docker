@@ -279,6 +279,7 @@ task_product_version=${task_product_version:-}
 task_stage='checking prerequisites'
 task_temp=''
 task_root="${XDG_DATA_HOME:-$HOME/.local/share}/dst-docker"
+task_prefix_explicit=0
 task_source=''
 task_archive=''
 task_prepare_only=0
@@ -296,7 +297,7 @@ while (($#)); do
   case "$1" in
     --prefix|--source|--source-archive|--port)
       (($# >= 2)) || fail "Missing value for $1."
-      case "$1" in --prefix) task_root=$2;; --source) task_source=$2;; --source-archive) task_archive=$2;; --port) task_port=$2;; esac
+      case "$1" in --prefix) task_root=$2; task_prefix_explicit=1;; --source) task_source=$2;; --source-archive) task_archive=$2;; --port) task_port=$2;; esac
       shift 2;;
     --check) task_check_only=1; shift;;
     --version) printf 'DST Docker %s (source %s)\n' "${task_product_version:-development}" "${task_package_revision:-checkout}"; exit 0;;
@@ -410,6 +411,47 @@ if [[ "$(ps -p 1 -o comm= | tr -d ' ')" == systemd ]] && ! systemctl is-enabled 
   "${task_sudo[@]}" systemctl enable docker
 fi
 
+# The portal project is shared by its launchers. Reuse its managed installation
+# even when a later installer runs with a different HOME (for example via root).
+# Otherwise an older desktop shortcut can recreate the same portal without the
+# new installation's host-updater mount.
+task_selected_root=$("${task_docker[@]}" python3 - "$task_root" "$task_prefix_explicit" <<'DST_INSTALL_ROOT_PY'
+import json, subprocess, sys
+from pathlib import Path
+
+requested = Path(sys.argv[1])
+if '..' in requested.parts or any(path.is_symlink() for path in [requested, *requested.parents]):
+    raise SystemExit('Choose an installation path without symbolic links or parent-directory traversal.')
+requested = requested.resolve()
+explicit = sys.argv[2] == '1'
+ids = subprocess.check_output(['docker', 'ps', '-aq', '--filter', 'label=com.docker.compose.project=dst-docker-preview',
+                               '--filter', 'label=com.docker.compose.service=dst'], text=True).split()
+roots = set()
+if ids:
+    for container in json.loads(subprocess.check_output(['docker', 'inspect', *ids], text=True)):
+        labels = container.get('Config', {}).get('Labels', {})
+        if labels.get('com.docker.compose.project') != 'dst-docker-preview' or labels.get('com.docker.compose.service') != 'dst':
+            raise SystemExit('The existing DST portal identity needs review; no installation was changed.')
+        source = Path(labels.get('com.docker.compose.project.working_dir', '')).resolve()
+        if source.parent.name != 'releases':
+            raise SystemExit('The existing DST portal is a source checkout. Stop that portal before installing a managed copy.')
+        root = source.parent.parent
+        if not (root / 'installation.json').is_file() or not (root / 'current').is_symlink() or (root / 'current').resolve().parent != root / 'releases':
+            raise SystemExit('The existing DST installation path needs review; no installation was changed.')
+        roots.add(root)
+if len(roots) > 1:
+    raise SystemExit('More than one installation owns the DST portal. No installation was changed.')
+selected = next(iter(roots), requested)
+if explicit and selected != requested:
+    raise SystemExit('DST already uses ' + str(selected) + '. Rerun with that installation folder to keep its desktop shortcut and browser updater connected.')
+print(selected)
+DST_INSTALL_ROOT_PY
+)
+if [[ "$task_selected_root" != "$task_root" ]]; then
+  printf 'Using the existing DST installation: %s\n' "$task_selected_root"
+  task_root=$task_selected_root
+fi
+
 if [[ -z "$task_port" && ! -f "$task_root/installation.json" ]] && ((!task_prepare_only && !task_non_interactive)); then
   # A piped installer owns stdin. Read answers from the controlling terminal.
   if { exec 3<>/dev/tty; } 2>/dev/null; then
@@ -486,7 +528,9 @@ with tarfile.open(archive) as source:
             shutil.rmtree(stage);raise
 previous.update(preparedSha256=digest,preparedRevision=revision)
 if port:previous['pendingConsolePort']=int(port)
-temporary=root/('.installation-'+uuid.uuid4().hex+'.tmp');temporary.write_text(json.dumps(previous));temporary.chmod(0o600);temporary.replace(manifest)
+temporary=root/('.installation-'+uuid.uuid4().hex+'.tmp');temporary.write_text(json.dumps(previous));temporary.chmod(0o600)
+if os.geteuid() == 0:os.chown(temporary,root.stat().st_uid,root.stat().st_gid,follow_symlinks=False)
+temporary.replace(manifest)
 PY
 task_release="$task_root/releases/$task_package_sha"
 if ((task_prepare_only)); then printf 'DST source prepared at %s\nNo containers were started.\n' "$task_release"; return 0; fi
@@ -508,11 +552,13 @@ if [[ -n "$task_port" ]]; then task_port_args=(--port "$task_port"); fi
 # consuming the rest of this installer when invoked through curl | bash.
 "${task_docker[@]}" bash "$task_release/bin/dst-docker" up "${task_port_args[@]}" < /dev/null
 python3 - "$task_root" "$task_package_sha" <<'PY'
-import json,sys,uuid
+import json,os,sys,uuid
 from pathlib import Path
 root=Path(sys.argv[1]);path=root/'installation.json';state=json.loads(path.read_text());state['activeSha256']=sys.argv[2]
 state.pop('pendingConsolePort',None)
-temporary=root/('.installation-'+uuid.uuid4().hex+'.tmp');temporary.write_text(json.dumps(state));temporary.chmod(0o600);temporary.replace(path)
+temporary=root/('.installation-'+uuid.uuid4().hex+'.tmp');temporary.write_text(json.dumps(state));temporary.chmod(0o600)
+if os.geteuid() == 0:os.chown(temporary,root.stat().st_uid,root.stat().st_gid,follow_symlinks=False)
+temporary.replace(path)
 link=root/'current'
 if link.exists() and not link.is_symlink():raise SystemExit('The current release pointer needs review.')
 candidate=root/('.current-'+uuid.uuid4().hex);candidate.symlink_to('releases/'+sys.argv[2],target_is_directory=True);candidate.replace(link)

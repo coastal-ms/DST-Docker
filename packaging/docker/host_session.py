@@ -37,7 +37,10 @@ def windows_script(script,timeout=60):
     return run([POWERSHELL,'-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',encoded],timeout=timeout).stdout.decode('utf-8',errors='replace').strip()
 
 def write_json(path,value):
-    temporary=path.with_suffix('.tmp');temporary.write_text(json.dumps(value),encoding='utf-8');temporary.chmod(0o600);temporary.replace(path)
+    temporary=path.with_suffix('.tmp');temporary.write_text(json.dumps(value),encoding='utf-8');temporary.chmod(0o600)
+    if os.geteuid()==0:
+        owner=path.parent.stat();os.chown(temporary,owner.st_uid,owner.st_gid,follow_symlinks=False)
+    temporary.replace(path)
 
 def running_distros():
     raw=run([WSL,'--list','--running','--quiet']).stdout
@@ -571,7 +574,11 @@ Write-Output $path
 
 def prepare_binding(root):
     if not os.environ.get('WSL_DISTRO_NAME') or not Path(WSL).exists():raise ValueError('Desktop hosting is available in Windows WSL.')
-    root=Path(root).resolve();directory=root/'host-session';directory.mkdir(parents=True,exist_ok=True);directory.chmod(0o755)
+    root=Path(root).resolve();directory=root/'host-session'
+    if directory.is_symlink():raise ValueError('The host directory must not be a symbolic link.')
+    directory.mkdir(parents=True,exist_ok=True);directory.chmod(0o755)
+    if os.geteuid()==0:
+        owner=root.stat();os.chown(directory,owner.st_uid,owner.st_gid,follow_symlinks=False)
     override=root/'host.compose.json'
     # The parent install directory is private. Only this socket directory is exposed.
     value={'services':{'dst':{'environment':{'DST_HOST_PLATFORM':'wsl'},'volumes':[{'type':'bind','source':str(directory),'target':'/host-control','read_only':True}]}}}

@@ -30,6 +30,23 @@ class ProductUpdateTests(unittest.TestCase):
         for value in ['v1.0.13-preview', '../../x', '', 12]:
             with self.assertRaises(ValueError): update.version(value)
 
+    @unittest.skipUnless(os.geteuid()==0,'Requires isolated root ownership fixture')
+    def test_root_prepare_preserves_original_updater_account_access(self):
+        os.chown(self.root,12345,12345)
+        (self.root/'portal-update/operation.json').write_text('{}')
+        (self.root/'portal-update/update.log').write_text('fixture')
+        update.prepare(self.root)
+        for name in ['portal-update','portal-update/operation.json','portal-update/update.log','update.compose.json']:
+            self.assertEqual((self.root/name).stat().st_uid,12345,name)
+
+    def test_update_directory_symlink_is_not_followed(self):
+        import shutil
+        shutil.rmtree(self.root/'portal-update')
+        target=self.root/'outside';target.mkdir()
+        (self.root/'portal-update').symlink_to(target,target_is_directory=True)
+        with self.assertRaisesRegex(ValueError,'symbolic link'):update.prepare(self.root)
+        self.assertEqual(list(target.iterdir()),[])
+
     def test_check_is_cached_and_force_rechecks_commit(self):
         responses = [{'tag_name':'v1.0.13'}, {'object':{'type':'commit','sha':'a'*40}}]
         module = {'urllib':__import__('urllib.request', fromlist=['request']), 'Redirect':Mock(), 'token':Mock(return_value=''),
