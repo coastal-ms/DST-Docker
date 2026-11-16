@@ -585,7 +585,7 @@ export function MenuBar({ sidebarCollapsed, onToggleSidebar, sidebarAvailable = 
         <span>Supporters</span>
       </Link>
 
-      {local && <Link to="/widget" className="px-3 h-7 inline-flex items-center gap-1.5 rounded-md text-text-muted hover:text-text hover:bg-surface-2/80">
+      {local && import.meta.env.VITE_DST_EDITION !== 'docker' && <Link to="/widget" className="px-3 h-7 inline-flex items-center gap-1.5 rounded-md text-text-muted hover:text-text hover:bg-surface-2/80">
         <Icon name="Monitor" size={14} />Widget mode
       </Link>}
       {/* Community Discord + marketing site links, pushed to the far right of

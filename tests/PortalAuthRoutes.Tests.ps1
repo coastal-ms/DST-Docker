@@ -326,3 +326,38 @@ Describe 'Registered portal login/logout production handlers' {
         $created.account.id | Should -Not -BeNullOrEmpty
     }
 }
+
+Describe 'Docker Player account role parity' {
+    BeforeEach {
+        $script:PreviousHostingBackend = $env:DST_HOSTING_BACKEND
+        $env:DST_HOSTING_BACKEND = 'docker'
+        Remove-Item -LiteralPath $script:PortalRouteTestRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    AfterEach { $env:DST_HOSTING_BACKEND = $script:PreviousHostingBackend }
+
+    It 'offers Player and creates a character-linked account through the Docker route' {
+        $response = New-RouteResponse
+        & (Get-RegisteredHandler GET '/api/remote-access/portal-accounts') (New-RouteRequest) $response @{} @{}
+        $result = [Text.Encoding]::UTF8.GetString($response.OutputStream.ToArray()) | ConvertFrom-Json
+        $result.roles | Should -Contain 'player'
+        $response = New-RouteResponse
+        & (Get-RegisteredHandler POST '/api/remote-access/portal-accounts') (New-RouteRequest) $response @{} @{username='docker-player';role='player';gameCharacterId='42';gameCharacterLabel='Own'}
+        $response.StatusCode | Should -Be 201
+        $account = Get-DunePortalAccountByUsername (Get-DunePortalAccountStore) 'docker-player'
+        $account.role | Should -Be 'player'
+        $account.gameCharacterId | Should -Be '42'
+    }
+
+    It 'rejects an unlinked Player but allows an Admin to be linked and changed to Player' {
+        $response = New-RouteResponse
+        & (Get-RegisteredHandler POST '/api/remote-access/portal-accounts') (New-RouteRequest) $response @{} @{username='unlinked';role='player'}
+        $response.StatusCode | Should -Be 400
+        $account = (New-DunePortalAccount -Username 'docker-admin' -Role admin).account
+        $response = New-RouteResponse
+        & (Get-RegisteredHandler PUT '/api/remote-access/portal-accounts/{id}') (New-RouteRequest) $response @{id=$account.id} @{role='player';gameCharacterId='42';gameCharacterLabel='Own'}
+        $response.StatusCode | Should -Be 200
+        $updated = Get-DunePortalAccountByUsername (Get-DunePortalAccountStore) 'docker-admin'
+        $updated.role | Should -Be 'player'
+        $updated.gameCharacterId | Should -Be '42'
+    }
+}

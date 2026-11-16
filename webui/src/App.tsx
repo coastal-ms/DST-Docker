@@ -74,6 +74,7 @@ function InstalledApp() {
   if (soloOnly && !isLocalViewer()) return <p>Solo Mode is available on the PC where DST is installed.</p>
   // Widget mode belongs to this viewer only. The backend stays available to
   // authenticated remote sessions, which drive their own on-demand work.
+  if (pathname === '/widget' && import.meta.env.VITE_DST_EDITION === 'docker') return <Navigate to="/" replace />
   if (pathname === '/widget' && isLocalViewer()) return <><SettingsApplyProgress /><WidgetMode soloOnly={soloOnly} /></>
 
   return (

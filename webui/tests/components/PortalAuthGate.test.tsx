@@ -54,7 +54,8 @@ describe('PortalAuthGate', () => {
     expect(mock.mock.calls[1][0]).toBe('/api/docker/owner/setup')
     expect(JSON.parse((mock.mock.calls[1][1] as RequestInit).body as string)).toEqual({ username: 'FixtureOwner', password: 'synthetic-password' })
   })
-  it('routes an authenticated Player to their portal instead of requested admin content', async () => {
+  it.each(['windows', 'docker'])('routes an authenticated Player to their portal instead of requested admin content (%s)', async edition => {
+    vi.stubEnv('VITE_DST_EDITION', edition)
     vi.spyOn(globalThis, 'fetch').mockImplementationOnce(() => jsonResponse({
       accountLoginEnabled: true, authenticated: true, mustChangePassword: false,
       account: { id: 'p', username: 'player', role: 'player', enabled: true },

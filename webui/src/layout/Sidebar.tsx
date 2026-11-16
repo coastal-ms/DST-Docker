@@ -1,4 +1,5 @@
 import { PRODUCT_NAME } from '../util/product'
+import { version as portalVersion } from '../../package.json'
 import { useSoloInstallation } from '../hooks/useInstallationMode'
 import { Link, NavLink, useLocation, useSearch } from '../router'
 import { useEffect, useMemo, useState, useRef } from 'react'
@@ -58,7 +59,7 @@ export function Sidebar({ collapsed, onExpand }: Props) {
   const { canAccessOwnerSurfaces, canAccessServerUpdates } = usePortalAccess()
   const soloOnly = useSoloInstallation()
   const { data: upd } = useUpdateCheck()
-  const version = upd?.currentVersion ?? ''
+  const version = import.meta.env.VITE_DST_EDITION === 'docker' ? portalVersion : upd?.currentVersion ?? ''
   const testBuild = getTestBuildIdentity(upd)
   const [showPortalConfirm, setShowPortalConfirm] = useState(false)
   const [portalDetaching, setPortalDetaching] = useState(false)
