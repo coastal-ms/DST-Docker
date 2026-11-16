@@ -1,5 +1,10 @@
 # DST Docker changelog
 
+## [1.0.11]
+
+- Keep setup pages scrollable so Back and Next stay reachable in short browser windows.
+- Support mouse-wheel and keyboard scrolling through the wizard on desktop and narrow screens.
+
 ## [1.0.10]
 
 - Show the detected Docker IP during first-run setup and fill the Private / LAN server address automatically.
