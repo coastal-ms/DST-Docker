@@ -157,7 +157,7 @@ class Updater:
         try: result = self.check(request.get('force', False))
         except Exception:
             result = {'currentVersion': self.current(), 'available': False,
-                      'error': 'Could not check GitHub. Check host internet access and GitHub CLI sign-in for private releases.'}
+                      'error': 'Could not check GitHub for updates. Check the host internet connection and try again.'}
         with self.lock: return {**result, 'supported': True, 'operation': self.operation}
 
     def serve(self):
@@ -187,9 +187,18 @@ class Updater:
 def prepare(root):
     root = Path(root).resolve()
     directory = root / 'portal-update'
+    if directory.is_symlink(): raise ValueError('The update directory must not be a symbolic link.')
     directory.mkdir(exist_ok=True); directory.chmod(0o755)
+    owner = root.stat()
+    if os.geteuid() == 0:
+        os.chown(directory, owner.st_uid, owner.st_gid, follow_symlinks=False)
+        for name in ('operation.json', 'update.log'):
+            path = directory / name
+            if path.is_symlink(): raise ValueError('The update files must not be symbolic links.')
+            if path.exists(): os.chown(path, owner.st_uid, owner.st_gid, follow_symlinks=False)
     atomic(root / 'update.compose.json', {'services': {'dst': {'volumes': [
         {'type': 'bind', 'source': str(directory), 'target': '/update-control', 'read_only': True}]}}})
+    if os.geteuid() == 0: os.chown(root / 'update.compose.json', owner.st_uid, owner.st_gid, follow_symlinks=False)
 
 
 def register(root):

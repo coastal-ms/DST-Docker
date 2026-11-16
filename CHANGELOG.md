@@ -1,5 +1,12 @@
 # DST Docker changelog
 
+## [1.0.14]
+
+- Reuse the existing portal installation when the installer is run under a different Linux user, keeping desktop hosting and browser updates connected.
+- Prevent another installation folder from taking over the same portal.
+- Explain an unavailable host updater without incorrectly suggesting that public releases require GitHub sign-in.
+- Make public installation commands the primary README instructions.
+
 ## [1.0.13]
 
 - Keep Shut down host and Create desktop shortcut available on supported WSL hosts after installation.

@@ -23,6 +23,56 @@ def archive(extra=None,launcher=None,updater=None):
     return output.getvalue()
 
 class InstallerTests(unittest.TestCase):
+    def test_default_reuses_existing_portal_installation_after_home_changes(self):
+        self.bundle()
+        prefix=self.root/'original-user'/'installed'
+        first=self.run_installer('--prefix',str(prefix),'--port','8099','--non-interactive')
+        self.assertEqual(first.returncode,0,first.stderr)
+        (prefix/'preserved-user-file').write_text('keep')
+        self.environment['DST_FIXTURE_EXISTING_SOURCE']=str((prefix/'current').resolve())
+        other_home=self.root/'other-user';other_home.mkdir()
+        self.environment['HOME']=str(other_home)
+        self.environment.pop('XDG_DATA_HOME',None)
+        result=self.run_installer('--non-interactive')
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertIn('Using the existing DST installation: '+str(prefix),result.stdout)
+        self.assertEqual((prefix/'preserved-user-file').read_text(),'keep')
+        self.assertFalse((other_home/'.local/share/dst-docker').exists())
+
+    def test_explicit_other_prefix_cannot_take_over_existing_portal(self):
+        self.bundle()
+        prefix=self.root/'installed'
+        first=self.run_installer('--prefix',str(prefix),'--non-interactive')
+        self.assertEqual(first.returncode,0,first.stderr)
+        self.environment['DST_FIXTURE_EXISTING_SOURCE']=str((prefix/'current').resolve())
+        before=(prefix/'installation.json').read_bytes()
+        other=self.root/'another-install'
+        result=self.run_installer('--prefix',str(other),'--non-interactive')
+        self.assertNotEqual(result.returncode,0)
+        self.assertIn('DST already uses '+str(prefix),result.stderr)
+        self.assertFalse(other.exists())
+        self.assertEqual((prefix/'installation.json').read_bytes(),before)
+
+    @unittest.skipUnless(os.geteuid()==0,'Requires isolated root ownership fixture')
+    def test_reused_installation_metadata_keeps_original_owner(self):
+        self.bundle()
+        prefix=self.root/'installed'
+        first=self.run_installer('--prefix',str(prefix),'--non-interactive')
+        self.assertEqual(first.returncode,0,first.stderr)
+        os.chown(prefix,12345,12345)
+        self.environment['DST_FIXTURE_EXISTING_SOURCE']=str((prefix/'current').resolve())
+        result=self.run_installer('--non-interactive')
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual((prefix/'installation.json').stat().st_uid,12345)
+
+    def test_existing_source_checkout_is_not_silently_reassigned(self):
+        self.environment['DST_FIXTURE_EXISTING_SOURCE']=str(self.root/'checkout')
+        prefix=self.root/'installed'
+        result=self.run_installer('--prefix',str(prefix),'--non-interactive')
+        self.assertNotEqual(result.returncode,0)
+        self.assertIn('source checkout',result.stderr)
+        self.assertFalse(prefix.exists())
+
     def test_update_service_prepared_before_portal_and_registered_after_activation(self):
         sudo=self.fake/'sudo';sudo.write_text('#!/bin/sh\nexec "$@"\n');sudo.chmod(0o755)
         helper=b'import sys;from pathlib import Path;root=Path(sys.argv[-1]);print("updater "+sys.argv[1]);assert (root/"current").is_symlink() if sys.argv[1]=="register" else not (root/"current").exists()\n'
@@ -49,6 +99,8 @@ case "$1" in
   info) case "$*" in *OperatingSystem*) printf 'Ubuntu fixture\n';; *) printf 'linux\n';; esac;;
   context) printf 'unix:///var/run/docker.sock\n';;
   version) printf '1.56\n';;
+  ps) if [ -n "${DST_FIXTURE_EXISTING_SOURCE:-}" ]; then printf 'aaaaaaaaaaaa\n'; fi;;
+  inspect) python3 -c 'import json,os; print(json.dumps([{"Config":{"Labels":{"com.docker.compose.project":"dst-docker-preview","com.docker.compose.service":"dst","com.docker.compose.project.working_dir":os.environ["DST_FIXTURE_EXISTING_SOURCE"]}}}]))';;
   compose) exit 0;;
   *) exit 99;;
 esac
