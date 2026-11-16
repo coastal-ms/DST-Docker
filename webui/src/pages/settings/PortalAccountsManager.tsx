@@ -51,7 +51,7 @@ export function PortalAccountsManager({ docker = false }: { docker?: boolean } =
 
   useEffect(() => {
     void load().catch(e => setError(e instanceof Error ? e.message : String(e)))
-    if (!docker) void api<{ players: PlayerOption[] }>('/api/gameplay/players')
+    void api<{ players: PlayerOption[] }>('/api/gameplay/players')
       .then(result => setPlayers(result.players ?? []))
       .catch(() => setPlayers([]))
   }, [docker])
@@ -123,11 +123,11 @@ export function PortalAccountsManager({ docker = false }: { docker?: boolean } =
           <div>
             <label htmlFor="portal-account-role" className="block text-sm font-medium mb-1">Role</label>
             <select id="portal-account-role" value={role} onChange={e => setRole(e.target.value as 'owner' | 'admin' | 'player')} className="w-full px-3 py-2 rounded-lg bg-surface-2 border border-border">
-              {!docker && <option value="player">Player</option>}<option value="admin">Admin</option><option value="owner">Owner</option>
+              <option value="player">Player</option><option value="admin">Admin</option><option value="owner">Owner</option>
             </select>
           </div>
         )}
-        {!docker && <div>
+        {<div>
           <label htmlFor="portal-account-character" className="block text-sm font-medium mb-1">Linked game character (required for Player)</label>
           <select id="portal-account-character" value={characterId} onChange={e => {
             setCharacterId(e.target.value)
@@ -195,12 +195,12 @@ export function PortalAccountsManager({ docker = false }: { docker?: boolean } =
                 }}
                 className="min-h-9 rounded-lg bg-surface border border-border px-2 text-sm text-text"
               >
-                {(!docker || account.role === 'player') && <option value="player">Player</option>}<option value="admin">Admin</option>
+                <option value="player">Player</option><option value="admin">Admin</option>
                 <option value="owner">Owner</option>
               </select>
             </label>
           </div>
-          {!docker && <label className="text-xs text-text-muted">
+          {<label className="text-xs text-text-muted">
             Linked game character
             <select aria-label={`Character for ${account.username}`} value={account.gameCharacterId}
               disabled={busy} className="w-full min-h-9 rounded-lg bg-surface border border-border px-2 text-sm text-text"
@@ -244,7 +244,7 @@ export function PortalAccountsManager({ docker = false }: { docker?: boolean } =
     <section className="border-t border-border pt-5 space-y-4" aria-labelledby="portal-accounts-title">
       <div>
         <h3 id="portal-accounts-title" className="font-semibold flex items-center gap-2"><Icon name="Users" size={16} /> Browser Portal accounts</h3>
-        <p className="text-xs text-text-dim mt-1">{docker ? 'Owners manage server configuration and browser accounts. Admins can operate the server and manage players; host configuration, files, credentials, Database, Sietches, Experimental and Settings remain restricted. New accounts must change their initial password at first sign-in.' : 'Owners have full remote access except host-only actions. Admins can operate the server and manage players; host configuration, files, credentials, Database, Sietches, Experimental and Settings remain restricted. Players can view status and maps, warm maps and manage only their linked character.'}</p>
+        <p className="text-xs text-text-dim mt-1">{docker ? 'Owners manage server configuration and browser accounts. Admins can operate the server and manage players; host configuration, files, credentials, Database, Sietches, Experimental and Settings remain restricted. Players can view status and maps, warm maps and manage only their linked character. New accounts must change their initial password at first sign-in.' : 'Owners have full remote access except host-only actions. Admins can operate the server and manage players; host configuration, files, credentials, Database, Sietches, Experimental and Settings remain restricted. Players can view status and maps, warm maps and manage only their linked character.'}</p>
       </div>
       {error && <div role="alert" className="text-sm text-danger bg-danger/10 border border-danger/40 rounded-lg px-3 py-2">{error}</div>}
       {message && <div className="text-sm text-success bg-success/10 border border-success/30 rounded-lg px-3 py-2">{message}</div>}

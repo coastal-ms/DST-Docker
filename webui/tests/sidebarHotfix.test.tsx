@@ -34,6 +34,21 @@ function renderSidebar(collapsed: boolean, onExpand?: () => void) {
 }
 
 describe('sidebar hotfix links', () => {
+  it.each(['docker', 'windows'])('limits Widget mode to the Windows portal (%s)', edition => {
+    vi.stubEnv('VITE_DST_EDITION', edition)
+    render(<BrowserRouter><MenuBar sidebarCollapsed={false} onToggleSidebar={vi.fn()} /></BrowserRouter>)
+    const widget = screen.queryByRole('link', { name: 'Widget mode' })
+    if (edition === 'docker') expect(widget).not.toBeInTheDocument()
+    else expect(widget).toHaveAttribute('href', '/widget')
+  })
+
+  it('shows the Docker portal version when Windows update data is unavailable', async () => {
+    vi.stubEnv('VITE_DST_EDITION', 'docker')
+    const { version } = await import('../package.json')
+    renderSidebar(false)
+    expect(screen.getByText(`v${version}`)).toBeInTheDocument()
+  })
+
   it('keeps support page-local, restores Hawk recognition, and removes PowerShell', () => {
     renderSidebar(false)
 

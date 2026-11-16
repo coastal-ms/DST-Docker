@@ -1,5 +1,12 @@
 # DST Docker changelog
 
+## [1.0.17]
+
+- Remove the Windows-only Widget mode entry from the Docker portal.
+
+- Show the Docker portal version in the sidebar footer.
+- Restore character-linked Player accounts and the Player Portal alongside Owner and Admin access.
+
 ## [1.0.16]
 
 - Clear the completed-update message and Reload portal button once the updated portal is loaded.

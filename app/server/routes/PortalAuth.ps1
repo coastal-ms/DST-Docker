@@ -101,14 +101,13 @@ Register-DuneRoute -Method GET -Path '/api/remote-access/portal-accounts' -Local
         accountLoginEnabled = [bool]$store.accountLoginEnabled
         nativeAppsBlockedInAccountMode = $true
         accounts = @($store.accounts | ForEach-Object { Get-DunePortalPublicAccount $_ })
-        roles = $(if($env:DST_HOSTING_BACKEND -eq 'docker'){@('owner','admin')}else{@('owner','admin','player')})
+        roles = @('owner','admin','player')
     }
 }
 
 Register-DuneRoute -Method POST -Path '/api/remote-access/portal-accounts' -LocalOnly -Handler {
     param($req, $res, $routeParams, $body)
     try {
-        if($env:DST_HOSTING_BACKEND -eq 'docker' -and [string](Get-DunePortalBodyValue $body 'role') -cnotin @('owner','admin')){throw 'Choose Owner or Admin for Docker server administration.'}
         $result = New-DunePortalAccount `
             -Username ([string](Get-DunePortalBodyValue $body 'username')) `
             -Role ([string](Get-DunePortalBodyValue $body 'role')) `
@@ -136,7 +135,6 @@ Register-DuneRoute -Method PUT -Path '/api/remote-access/portal-accounts/{id}' -
             if ($null -ne $enabledValue) { $account.enabled = [bool]$enabledValue }
             $role = [string](Get-DunePortalBodyValue $body 'role')
             if ($role) {
-                if($env:DST_HOSTING_BACKEND -eq 'docker' -and $role -cnotin @('owner','admin')){throw 'Choose Owner or Admin for Docker server administration.'}
                 if ($role -notin @('owner','admin','player')) { throw 'Invalid role.' }
                 $account.role = $role
             }

@@ -28,15 +28,21 @@ afterEach(() => {
 })
 
 describe('Docker browser administration', () => {
-  it('keeps sign-in mandatory and offers server roles without loading game data', async () => {
-    const request = vi.spyOn(globalThis, 'fetch').mockImplementation(() => jsonResponse({accountLoginEnabled:true,accounts:[owner],roles:['owner','admin']}))
+  it('keeps sign-in mandatory and offers linked Player accounts in Docker', async () => {
+    const request = vi.spyOn(globalThis, 'fetch').mockImplementation(input => String(input) === '/api/gameplay/players' ? jsonResponse({players:[{account_id:42,name:'Coastal'}]}) : jsonResponse({accountLoginEnabled:true,accounts:[owner],roles:['owner','admin','player']}))
     render(<PortalAccountsManager docker />)
     expect(await screen.findByText('Create another account')).toBeInTheDocument()
     expect(screen.getByText('Share this console address. Each user signs in with their own account. Account sign-in stays enabled.')).toBeInTheDocument()
-    expect(screen.queryByRole('option',{name:'Player',exact:true})).not.toBeInTheDocument()
+    expect(screen.getAllByRole('option',{name:'Player',exact:true})).toHaveLength(2)
     expect(screen.queryByRole('button',{name:'Emergency: Disable account login'})).not.toBeInTheDocument()
-    expect(screen.queryByLabelText('Linked game character (required for Player)')).not.toBeInTheDocument()
-    expect(request.mock.calls.every(([url]) => String(url)==='/api/remote-access/portal-accounts')).toBe(true)
+    expect(screen.getByLabelText('Linked game character (required for Player)')).toBeInTheDocument()
+    const user=userEvent.setup()
+    await user.selectOptions(screen.getByLabelText('Role'),'player')
+    await user.type(screen.getByLabelText('Username'),'player-one')
+    expect(screen.getByRole('button',{name:'Create account',exact:true})).toBeDisabled()
+    await user.selectOptions(screen.getByLabelText('Linked game character (required for Player)'),'42')
+    expect(screen.getByRole('button',{name:'Create account',exact:true})).toBeEnabled()
+    expect(request.mock.calls.some(([url]) => String(url)==='/api/gameplay/players')).toBe(true)
   })
 })
 
