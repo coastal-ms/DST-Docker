@@ -16,6 +16,7 @@ COPY webui/package.json webui/package-lock.json ./
 RUN npm ci --no-audit --no-fund
 COPY webui/ ./
 COPY tools/assets/ /src/tools/assets/
+COPY tools/security/ /src/tools/security/
 COPY app/tools/DuneAtlas/ /src/app/tools/DuneAtlas/
 COPY app/resources/solo-mods/dst-solo-live-map/Companion/ /src/app/resources/solo-mods/dst-solo-live-map/Companion/
 ENV VITE_DST_EDITION=docker

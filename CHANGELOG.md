@@ -2,6 +2,7 @@
 
 ## [1.0.20]
 
+- Keep portal installation and updates working while the battlegroup is running.
 - Restore missing cosmetic grant entries, including the Contagion Cowl and Contagion Visor.
 - Add the emote picker for granting selected emote items to server characters.
 

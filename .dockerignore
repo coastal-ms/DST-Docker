@@ -6,6 +6,8 @@
 !tools/
 !tools/assets/
 !tools/assets/**
+!tools/security/
+!tools/security/**
 !packaging/
 !packaging/docker/
 !packaging/docker/**
