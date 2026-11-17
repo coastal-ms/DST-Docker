@@ -1,5 +1,10 @@
 # DST Docker changelog
 
+## [1.0.20]
+
+- Restore missing cosmetic grant entries, including the Contagion Cowl and Contagion Visor.
+- Add the emote picker for granting selected emote items to server characters.
+
 ## [1.0.19]
 
 - Copy Windows Explorer paths for WSL backup folders while retaining Linux paths for other devices.
