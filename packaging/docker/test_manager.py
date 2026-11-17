@@ -28,9 +28,20 @@ class ManagerTests(unittest.TestCase):
             self.assertTrue(manager.dispatch({'action':'portal-update.release','id':'b'*32},FakeEngine())['released'])
             self.assertNotIn('portalUpdate',state)
 
-    def test_portal_update_refuses_running_maps_backups_and_server_operations(self):
-        states=[{'desiredState':'running'},{'operation':{'phase':'running'}},{},{}]
-        metadata=[{}, {}, {'services':[{'component':'game-1','state':'running'}]}, {'backups':[{'phase':'running'}]}]
+    def test_portal_update_keeps_running_battlegroup_and_map_targets_unchanged(self):
+        state={'id':'a'*32,'desiredState':'running','mapTargets':{'game-1':'running','game-2':'stopped'}}
+        engine=FakeEngine()
+        metadata={'services':[{'component':'game-1','state':'running'}],'backups':[]}
+        with patch.object(manager,'project_state',return_value=state),patch.object(manager,'save'),patch.object(manager,'public_state',return_value=metadata):
+            self.assertTrue(manager.dispatch({'action':'portal-update.reserve','id':'b'*32},engine)['reserved'])
+            self.assertEqual(state['desiredState'],'running')
+            self.assertEqual(state['mapTargets'],{'game-1':'running','game-2':'stopped'})
+            self.assertEqual(engine.execs,[])
+            self.assertTrue(manager.dispatch({'action':'portal-update.release','id':'b'*32},engine)['released'])
+
+    def test_portal_update_refuses_backups_and_concurrent_maintenance(self):
+        states=[{'portalUpdate':'c'*32},{'operation':{'phase':'running'}},{},{}]
+        metadata=[{}, {}, {'backups':[{'phase':'preparing'}]}, {'backups':[{'phase':'running'}]}]
         for state,observed in zip(states,metadata):
             with patch.object(manager,'project_state',return_value=state),patch.object(manager,'save') as save,patch.object(manager,'public_state',return_value=observed):
                 with self.assertRaises(manager.OperationBusyError):manager.dispatch({'action':'portal-update.reserve','id':'b'*32},FakeEngine())

@@ -1744,11 +1744,11 @@ def dispatch(request, engine=None, *, resume_running_only=False):
             return {'released': not state.get('portalUpdate')}
         if action == 'portal-update.reserve':
             if not re.fullmatch(r'[a-f0-9]{32}', str(request.get('id', ''))): raise ValueError('Invalid update identifier.')
-            if state.get('portalUpdate') or state.get('desiredState') == 'running' or state.get('operation', {}).get('phase') == 'running':
-                raise OperationBusyError('Stop the battlegroup and wait for maintenance to finish before updating DST Docker.')
+            if state.get('portalUpdate') or state.get('operation', {}).get('phase') == 'running':
+                raise OperationBusyError('Wait for maintenance to finish before updating DST Docker.')
             metadata = public_state(state, engine)
-            if any(row.get('component', '').startswith('game-') and row.get('state') in {'running','restarting'} for row in metadata.get('services', [])) or any(row.get('phase') in {'running','preparing'} for row in metadata.get('backups', [])):
-                raise OperationBusyError('Wait for all maps and backups to stop before updating DST Docker.')
+            if any(row.get('phase') in {'running','preparing'} for row in metadata.get('backups', [])):
+                raise OperationBusyError('Wait for backups to finish before updating DST Docker.')
             state['portalUpdate'] = request['id']; save(state)
             return {'reserved': True}
         if state.get('portalUpdate') and action not in {'updates.progress','resources.get','assets.version','backups.history','backups.jobs','backups.schedule.get','scale.get','memory.policy','regis.status','regis.support','memory-swap.status','files.endpoint','director.endpoint'}:

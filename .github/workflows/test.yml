@@ -114,6 +114,8 @@ jobs:
       - name: Run WebUI tests
         working-directory: webui
         run: npm test
+      - name: Build portal image from its Docker context
+        run: docker build --target web -f packaging/docker/Dockerfile -t dst-web-build-check .
 
   platform-helper:
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}

@@ -39,6 +39,18 @@ class HttpsLauncherTests(unittest.TestCase):
     def run_launcher(self,*args,release=0):
         return subprocess.run(['sh',str(self.releases[release]/'bin/dst-docker'),*args],env=self.env,capture_output=True,text=True)
 
+    def test_image_build_failure_does_not_stop_or_replace_running_services(self):
+        docker=Path(self.env['PATH'].split(':')[0])/'docker'
+        docker.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$DST_FIXTURE_DOCKER_LOG"\ncase "$*" in *"config --format json"*) echo \'{"name":"fixture"}\';; *" build"*) exit 37;; esac\nexit 0\n')
+        docker.chmod(0o755)
+        result=self.run_launcher('up')
+        self.assertEqual(result.returncode,37,result.stderr)
+        calls=self.log.read_text()
+        self.assertIn(' build',calls)
+        self.assertNotIn(' up ',calls)
+        self.assertNotIn(' stop ',calls)
+        self.assertNotIn(' down',calls)
+
     def test_owner_reset_requires_confirmation_and_preserves_the_exact_username_argument(self):
         docker=Path(self.env['PATH'].split(':')[0])/'docker'
         docker.write_text('#!/usr/bin/env python3\nimport json,os,sys\nwith open(os.environ["DST_FIXTURE_DOCKER_LOG"],"a") as stream:stream.write(json.dumps(sys.argv[1:])+"\\n")\n');docker.chmod(0o755)
