@@ -34,7 +34,7 @@ jobs:
         shell: bash
         run: |
           apt-get update -qq
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tzdata
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tzdata python3
       - name: Install Pester
         shell: pwsh
         run: |
@@ -45,6 +45,9 @@ jobs:
         shell: pwsh
         run: |
           ./tests/Run-DockerTests.ps1 -CI
+      - name: Verify actual catalog workflow coverage
+        shell: bash
+        run: python3 -B -m unittest discover -s tests -p test_item_catalog_coverage.py -v
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4
@@ -82,13 +85,12 @@ jobs:
       - name: Run native Docker manager and transport tests
         working-directory: packaging/docker
         run: python -B -m unittest discover -s . -p 'test_*.py' -v
-      - name: Verify map assets and item coverage
+      - name: Verify map assets
         run: |
           python -B -m unittest discover -s tests -p test_atlas_builds.py -v
           python -B -m unittest discover -s tools/atlas -p test_live.py -v
           python -B -m unittest discover -s tools/atlas -p test_assets.py -v
           python -B -m unittest discover -s tools/atlas -p test_elf.py -v
-          python -B -m unittest discover -s tests -p test_item_catalog_coverage.py -v
 
   vitest:
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}

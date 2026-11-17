@@ -11,6 +11,8 @@ try {
     [void][IO.Directory]::CreateDirectory($env:APPDATA)
     [void][IO.Directory]::CreateDirectory($env:LOCALAPPDATA)
     $tests=@(Get-ChildItem $PSScriptRoot -Filter 'Docker*.Tests.ps1' -File|Sort-Object Name)
+    $tests+=@(Get-Item (Join-Path $PSScriptRoot 'CosmeticsCatalog.Tests.ps1'),
+        (Join-Path $PSScriptRoot 'PlayerCosmeticOwnership.Tests.ps1'))
     if(-not $tests.Count){throw 'No Docker Pester tests were discovered.'}
     & (Join-Path $PSScriptRoot 'Run-Tests.ps1') -Path $tests.FullName -CI:$CI
     exit $LASTEXITCODE
