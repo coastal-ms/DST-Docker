@@ -1,5 +1,9 @@
 # DST Docker changelog
 
+## [1.0.24]
+
+- Replace the picomatch dependency with the same file-pattern matcher used by DST for Windows.
+
 ## [1.0.23]
 
 - Save Keep Maps Warm changes immediately and apply them in the background. Keep working on other maps while the latest choice per map takes effect. Turning Warm off lets the Director unload the map when it is empty.
