@@ -1,5 +1,10 @@
 # DST Docker changelog
 
+## [1.0.21]
+
+- Search Complete Contracts by in-game contract or chain name and find 13 additional supported contracts.
+- Clarify that the battlegroup can stay running during portal updates and the portal restarts automatically.
+
 ## [1.0.20]
 
 - Keep portal installation and updates working while the battlegroup is running.

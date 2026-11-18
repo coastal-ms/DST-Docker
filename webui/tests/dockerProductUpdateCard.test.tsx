@@ -57,6 +57,14 @@ describe('DST Docker product updater', () => {
     expect(screen.getByRole('button',{name:'Reload portal'})).toBeInTheDocument()
     expect(screen.getByRole('button',{name:'Update DST Docker'})).toBeDisabled()
   })
+  it('ignores completed update history for a different installed version', async () => {
+    vi.mocked(api).mockResolvedValue({ ...latest, currentVersion: portalVersion, available: false,
+      operation: { phase: 'completed', toVersion: '1.0.13', id: 'old-update', message: 'Finished' } })
+    render(<DockerProductUpdateCard />)
+    await screen.findByText('You have this or a newer version.')
+    expect(screen.queryByRole('status')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Reload portal' })).toBeNull()
+  })
   it('clears the completed update prompt when the loaded portal already matches the installed version', async () => {
     vi.mocked(api).mockResolvedValue({ ...latest, currentVersion:portalVersion, latestVersion:portalVersion, available:false,
       operation:{phase:'completed',toVersion:portalVersion,id:'job',message:'Finished'} })
