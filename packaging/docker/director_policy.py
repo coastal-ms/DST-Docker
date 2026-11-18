@@ -13,8 +13,12 @@ def apply(request):
     if not isinstance(name,str) or not re.fullmatch(r'[A-Za-z0-9_]{1,80}',name):raise ValueError('Invalid map identity.')
     if type(floor) is not int or not 0<=floor<=64:raise ValueError('Invalid map floor.')
     base='http://'+host+':11717/'
+    confirm=request.get('confirm',True)
+    # Background requests skip activation polling, but the live status read
+    # and override submission still need time to finish on a busy Director.
+    timeout=10
     def read():
-        with urllib.request.urlopen(base+'v0/battlegroup',timeout=10) as response:
+        with urllib.request.urlopen(base+'v0/battlegroup',timeout=timeout) as response:
             raw=response.read(8*1024*1024+1)
         if len(raw)>8*1024*1024:raise ValueError('Director response exceeds its limit.')
         return json.loads(raw)['instancedMaps'][name]
@@ -27,7 +31,7 @@ def apply(request):
             break
         except (urllib.error.URLError,TimeoutError,ConnectionError) as error:
             if isinstance(error,urllib.error.HTTPError) and error.code not in {408,502,503,504}:raise
-            if time.monotonic()>=deadline:raise ValueError('The director is still starting; retry the map control.') from None
+            if not confirm or time.monotonic()>=deadline:raise ValueError('The director is still starting; retry the map control.') from None
             time.sleep(.25)
     pending=current.get('webOverrideCfg') or {}
     pending_floor=next((value for key,value in pending.items() if key.lower()=='minservers'),floor)
@@ -36,7 +40,8 @@ def apply(request):
     override['MinServers']=floor
     payload=json.dumps({'MapName':name,'ClassicalInstancingGroupConfig':override}).encode()
     call=urllib.request.Request(base+'v0/BattlegroupUpdateServerGroupConfig',data=payload,method='POST',headers={'Content-Type':'application/json'})
-    with urllib.request.urlopen(call,timeout=10) as response:response.read(65536)
+    with urllib.request.urlopen(call,timeout=timeout) as response:response.read(65536)
+    if not confirm:return {'applied':True}
     deadline=time.monotonic()+10
     while time.monotonic()<deadline:
         if read()['cfg']['minServers']==floor:return {'applied':True}

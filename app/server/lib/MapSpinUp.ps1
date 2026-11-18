@@ -129,7 +129,7 @@ function _Get-DuneDirectorIni {
         if(-not $reply.ok){return @{ok=$false;status=503;message=$reply.error}}
         $partitions=@(foreach($map in $reply.data.maps){@{map=$map.map;partitions=@(foreach($id in $map.partitions){@{id=$id}})}})
         $bg=@{spec=@{database=@{template=@{spec=@{deployment=@{spec=@{worldPartitions=$partitions}}}}}}} | ConvertTo-Json -Depth 12 | ConvertFrom-Json
-        return @{ok=$true;ini=[string]$reply.data.ini;modes=$reply.data.modes;installedMaps=@($reply.data.maps | ForEach-Object {$_.map});info=@{Ns='Docker';Name=$reply.data.world;Bg=$bg}}
+        return @{ok=$true;ini=[string]$reply.data.ini;modes=$reply.data.modes;warmRequests=$reply.data.warmRequests;installedMaps=@($reply.data.maps | ForEach-Object {$_.map});info=@{Ns='Docker';Name=$reply.data.world;Bg=$bg}}
     }
     $ctx = Get-DuneMapsContext
     if (-not $ctx.ok) { return @{ ok = $false; status = $ctx.status; message = $ctx.message } }
@@ -294,12 +294,16 @@ function Get-DuneSpinUpMaps {
         $native = $script:DuneSpinUpNativeMaps -contains $s.Name
         $targetCount = _Get-DuneSpinUpTargetCount -Map $s.Name -Bg $r.info.Bg
         $mode = if ($env:DST_HOSTING_BACKEND -eq 'docker' -and $r.modes) { [string]$r.modes[$s.Name] } else { $null }
+        $warmRequest = if ($r.warmRequests) { $r.warmRequests[$s.Name] }
+        if ($warmRequest) { $mode = if ($warmRequest.enabled) { 'always-on' } else { 'dynamic' } }
         $maps += [pscustomobject]@{
             map        = $s.Name
             label      = _Get-DuneSpinUpLabel -Map $s.Name
             group      = if ($native) { 'supported' } else { 'experimental' }
-            minServers = [int]$s.MinServers
-            enabled    = ([int]$s.MinServers -ge 1 -and $mode -notin @('overmap-active','disabled'))
+            minServers = if ($warmRequest) { if ($warmRequest.enabled) { $targetCount } else { 0 } } else { [int]$s.MinServers }
+            enabled    = if ($warmRequest) { [bool]$warmRequest.enabled } else { ([int]$s.MinServers -ge 1 -and $mode -notin @('overmap-active','disabled')) }
+            warmPending = [bool]$warmRequest
+            warmError = if ($warmRequest) { [string]$warmRequest.error }
             mode       = $mode
             availablePartitions = $targetCount
             supportsPartySharing = ($script:DuneSpinUpPartySharingMaps -contains $s.Name)

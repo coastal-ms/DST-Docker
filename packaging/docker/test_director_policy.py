@@ -40,6 +40,23 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(body['ClassicalInstancingGroupConfig'],{'playerHardCap':42,'MinServers':1})
         self.assertEqual(body['MapName'],'SH_Arrakeen')
 
+    def test_floor_release_submits_without_waiting_for_activation(self):
+        response=Mock()
+        response.__enter__=Mock(return_value=response)
+        response.__exit__=Mock()
+        response.read.return_value=json.dumps({'instancedMaps':{'SH_HarkoVillage':{
+            'cfg':{'minServers':1},'webOverrideCfg':{'minServers':1}}}}).encode()
+        def busy_director(request, timeout):
+            if timeout < 3:
+                raise TimeoutError('Director request exceeded its time budget')
+            return response
+
+        with patch('director_policy.urllib.request.urlopen',side_effect=busy_director) as opened:
+            self.assertTrue(apply({'host':'dst-'+'a'*32+'-director','map':'SH_HarkoVillage',
+                                   'floor':0,'confirm':False})['applied'])
+        self.assertEqual(opened.call_count,2)
+        self.assertEqual(json.loads(opened.call_args.args[0].data)['ClassicalInstancingGroupConfig'],{'MinServers':0})
+
     def test_foreign_destinations_and_invalid_values_never_make_a_request(self):
         valid={'host':'dst-'+'a'*32+'-director','map':'SH_Arrakeen','floor':1}
         with patch('director_policy.urllib.request.urlopen') as opened:

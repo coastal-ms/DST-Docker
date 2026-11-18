@@ -17,7 +17,7 @@ describe('Map management', () => {
     let mode = 'overmap-active'
     vi.mocked(api).mockImplementation(async () => ({ ...snapshot(), modes: { Survival_1: 'core', DeepDesert_1: mode } }))
     render(<DockerMapManagement legacyTools={(modes, onPolicyChange) => <><p>Detailed mode: {modes.DeepDesert_1}</p><button onClick={() => { mode = 'always-on'; onPolicyChange() }}>Manual Warm</button></>} />)
-    fireEvent.click(screen.getByRole('button', { name: 'Additional map tools' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Keep Maps Warm' }))
     await screen.findByText('Detailed mode: overmap-active')
     fireEvent.click(screen.getByRole('button', { name: 'Manual Warm' }))
     await screen.findByText('Detailed mode: always-on')
@@ -163,7 +163,7 @@ describe('Map management', () => {
     await waitFor(() => expect(vi.mocked(api).mock.calls.some(([, options]) => options?.method === 'PUT')).toBe(true))
     const write = vi.mocked(api).mock.calls.find(([, options]) => options?.method === 'PUT')!
     expect(JSON.parse(String(write[1]?.body))).toEqual({ setting: 'mode', map: 'DeepDesert_1', mode: 'overmap-active' })
-    fireEvent.click(screen.getByRole('button', { name: 'Additional map tools' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Keep Maps Warm' }))
     expect(screen.getByText('Existing detailed map tools')).toBeInTheDocument()
   })
   it('does not present stale measurements as live usage', async () => {

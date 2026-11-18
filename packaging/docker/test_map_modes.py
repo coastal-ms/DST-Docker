@@ -18,9 +18,10 @@ class MapModesTests(unittest.TestCase):
                'mapModes':{row['map']:'overmap-active' for row in rows},'manualPins':{'game-3':False,'game-4':True},'overmapEmptySince':0}
         engine=Mock(spec=manager.Engine)
         engine.read_director_config.side_effect=lambda *args:state.get('directorIni','[ SH_Arrakeen ]\nMinServers=0\nMaxParties=1\n[ SH_HarkoVillage ]\nMinServers=1\n').encode()
-        with patch.object(manager,'project_state',return_value=state),patch.object(manager,'save'),patch.object(manager,'scheduler_occupancy',return_value={2:0,3:0,4:0}):
+        with tempfile.TemporaryDirectory() as storage,patch.object(manager,'STATE',Path(storage)),patch.object(manager,'project_state',return_value=state),patch.object(manager,'save'),patch.object(manager,'scheduler_occupancy',return_value={2:0,3:0,4:0}):
             result=manager.dispatch({'action':'maps.floor','map':'SH_Arrakeen','enabled':True},engine)
             self.assertEqual(result['mode'],'always-on');self.assertEqual(result['minServers'],1)
+            manager.reconcile_warm_requests(engine)
             manager.map_mode_tick(engine,1000)
             self.assertTrue(state['manualPins']['game-3']);self.assertFalse(state['manualPins']['game-4'])
             self.assertEqual(state['mapModes']['SH_Arrakeen'],'always-on')
@@ -39,9 +40,10 @@ class MapModesTests(unittest.TestCase):
                             'games':[{'map':'Overmap','partition':2},{'map':'DeepDesert_1','partition':8},{'map':'DeepDesert_1','partition':18}]},
                'mapModes':{'DeepDesert_1':'overmap-active'},'manualPins':{'game-8':True,'game-18':True}}
         engine=Mock(spec=manager.Engine);engine.read_director_config.return_value=b'[ DeepDesert_1 ]\nMinServers=2\n'
-        with patch.object(manager,'project_state',return_value=state),patch.object(manager,'save'),patch.object(manager,'scheduler_occupancy') as occupancy:
+        with tempfile.TemporaryDirectory() as storage,patch.object(manager,'STATE',Path(storage)),patch.object(manager,'project_state',return_value=state),patch.object(manager,'save'),patch.object(manager,'scheduler_occupancy') as occupancy:
             result=manager.dispatch({'action':'maps.floor','map':'DeepDesert_1','enabled':False},engine)
             self.assertEqual(result['mode'],'dynamic');self.assertEqual(result['availablePartitions'],2)
+            manager.reconcile_warm_requests(engine)
             self.assertFalse(state['manualPins']['game-8']);self.assertFalse(state['manualPins']['game-18'])
             manager.map_mode_tick(engine,1000)
             occupancy.assert_not_called()
@@ -49,6 +51,37 @@ class MapModesTests(unittest.TestCase):
             for enabled in (1,'true',None):
                 with self.assertRaisesRegex(ValueError,'JSON boolean'):
                     manager.set_manual_map_floor(state,engine,'DeepDesert_1',enabled)
+
+    def test_a_newer_warm_click_survives_an_inflight_apply(self):
+        first, second = 'SH_Arrakeen', 'SH_HarkoVillage'
+        state = {'id': 'a'*32, 'desiredState': 'running', 'services': {'director': {'id': 'director'}},
+                 'worldPlan': {'maps': [{'map': name, 'partitions': [partition], 'initialReplicas': 0}
+                                        for name, partition in ((first, 3), (second, 4))]}}
+        engine = Mock(spec=manager.Engine)
+
+        def click(name, enabled):
+            return manager.dispatch({'action': 'maps.floor', 'map': name, 'enabled': enabled}, engine)
+
+        def apply(state, engine, name, enabled, *, confirm):
+            if name == first and enabled:
+                click(first, False)
+
+        with tempfile.TemporaryDirectory() as storage, patch.object(manager, 'STATE', Path(storage)), \
+                patch.object(manager, 'project_state', return_value=state), patch.object(manager, 'save'), \
+                patch.object(manager, 'set_map_floor', side_effect=apply) as floor:
+            self.assertTrue(click(first, True)['pending'])
+            self.assertTrue(click(second, True)['pending'])
+            floor.assert_not_called()
+
+            manager.reconcile_warm_requests(engine)
+            self.assertEqual(state['mapModes'][second], 'always-on')
+            self.assertFalse(manager.warm_requests(state)[first]['enabled'])
+
+            manager.reconcile_warm_requests(engine)
+            self.assertEqual(state['mapModes'][first], 'dynamic')
+            self.assertEqual(manager.warm_requests(state), {})
+            self.assertEqual([call.args[2:] for call in floor.call_args_list],
+                             [(first, True), (second, True), (first, False)])
 
     def test_return_to_overmap_cancels_a_stop_before_signalling(self):
         state={'mapModes':{'SH_HarkoVillage':'overmap-active'},'worldPlan':{'games':[{'map':'SH_HarkoVillage','partition':4}]},'scalePending':{}}
@@ -204,6 +237,40 @@ class MapModesTests(unittest.TestCase):
             self.assertEqual(state['mapModes']['DeepDesert_1'],'disabled')
             with self.assertRaises(ValueError):manager.set_map_mode(state,engine,'Survival_1','disabled')
         engine.assert_not_called()
+
+    def test_on_demand_saves_immediately_without_confirming_the_director(self):
+        name='SH_HarkoVillage'
+        state={'mapModes':{name:'always-on'},'manualPins':{'game-4':True},
+               'worldPlan':{'maps':[{'map':name,'partitions':[4],'initialReplicas':0}]},
+               'pendingMapMode':{'map':name,'mode':'dynamic'},'mapTargets':{'game-4':'running'}}
+        engine=Mock(spec=manager.Engine)
+        with patch.object(manager,'save') as save:
+            result=manager.set_map_mode(state,engine,name,'dynamic')
+            save.assert_called_once_with(state)
+        self.assertEqual(result['mode'],'dynamic')
+        self.assertFalse(state['manualPins']['game-4'])
+        self.assertNotIn('pendingMapMode',state)
+        self.assertEqual(state['pendingMapFloorReleases'],[name])
+        self.assertEqual(state['mapTargets']['game-4'],'running')
+        engine.assert_not_called()
+
+    def test_legacy_pending_release_retries_without_blocking_scale_requests(self):
+        name='SH_HarkoVillage'
+        state={'id':'fixture','desiredState':'running','mapModes':{name:'always-on'},
+               'worldPlan':{'maps':[{'map':name,'partitions':[4],'initialReplicas':0}]},
+               'pendingMapMode':{'map':name,'mode':'dynamic'}}
+        engine=Mock(spec=manager.Engine)
+        with patch.object(manager,'project_state',return_value=state),patch.object(manager,'save'), \
+             patch.object(manager,'set_map_floor',side_effect=[ValueError('Director unavailable'),None]) as floor, \
+             patch.object(manager,'request_scale',return_value={'accepted':True}) as scale:
+            self.assertEqual(manager.dispatch({'action':'scale.patch','name':'fixture','patch':[]},engine),{'accepted':True})
+            scale.assert_called_once()
+            manager.reconcile_map_floor_release(engine)
+            self.assertNotIn('pendingMapMode',state)
+            self.assertEqual(state['pendingMapFloorReleases'],[name])
+            manager.reconcile_map_floor_release(engine)
+            floor.assert_called_with(state,engine,name,False,confirm=False)
+            self.assertEqual(state['pendingMapFloorReleases'],[])
 
     def test_failed_mode_write_retains_previous_selection(self):
         state={'mapModes':{'DeepDesert_1':'dynamic'},'worldPlan':{'maps':[{'map':'DeepDesert_1','partitions':[8],'initialReplicas':0}]}}

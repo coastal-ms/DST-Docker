@@ -112,6 +112,9 @@ function LegacyMapSpinUp({ embedded = false, modeRevision, onPolicyChange }: { e
   const [maps, setMaps] = useState<SpinUpMap[] | null>(null)
   const [missingSections, setMissingSections] = useState<SpinUpMissingSection[]>([])
   const [notStartedSections, setNotStartedSections] = useState<SpinUpNotStartedSection[]>([])
+  const [warmDrafts, setWarmDrafts] = useState<Record<string, boolean>>({})
+  const warmSaves = useRef(new Map<string, Promise<void>>())
+  const refreshId = useRef(0)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
@@ -145,26 +148,64 @@ function LegacyMapSpinUp({ embedded = false, modeRevision, onPolicyChange }: { e
     setLoadErrors(prev => { const n = { ...prev }; delete n[mapName]; return n })
   }, [])
 
-  const refresh = useCallback(async () => {
-    setLoading(true); setError(null)
+  const refresh = useCallback(async (foreground = true) => {
+    const requestId = ++refreshId.current
+    if (foreground) { setLoading(true); setError(null) }
     try {
       const r = await getMapSpinUp()
+      if (requestId !== refreshId.current) return
       setMaps(r.maps ?? [])
       setMissingSections(r.missingSections ?? [])
       setNotStartedSections(r.notStartedSections ?? [])
     } catch (e) {
+      if (!foreground || requestId !== refreshId.current) return
       setMaps(null)
       setMissingSections([])
       setNotStartedSections([])
       setError(e instanceof ApiError ? e.message : String(e))
     } finally {
-      setLoading(false)
+      if (requestId === refreshId.current) setLoading(false)
     }
   }, [])
 
   useEffect(() => { void refresh() }, [refresh, modeRevision])
 
+  const warmPending = dockerEdition && maps?.some(map => map.warmPending)
+  useEffect(() => {
+    if (!warmPending) return
+    const timer = window.setInterval(() => { void refresh(false) }, 3000)
+    return () => window.clearInterval(timer)
+  }, [warmPending, refresh])
+
   const onToggle = useCallback(async (m: SpinUpMap, next: boolean) => {
+    if (dockerEdition) {
+      setWarmDrafts(previous => ({ ...previous, [m.map]: next }))
+      const previous = warmSaves.current.get(m.map) ?? Promise.resolve()
+      const save = previous.then(async () => {
+        try {
+          const result = await setMapSpinUp(m.map, next)
+          if (!result.ok) throw new Error(result.message ?? 'Warm choice could not be saved.')
+          ++refreshId.current
+          setMaps(maps => maps?.map(map => map.map === m.map ? {
+            ...map, enabled: next, mode: next ? 'always-on' : 'dynamic', warmPending: true, warmError: undefined,
+          } : map) ?? maps)
+        } catch (e) {
+          if (warmSaves.current.get(m.map) === save) setError(e instanceof Error ? e.message : String(e))
+        } finally {
+          if (warmSaves.current.get(m.map) === save) {
+            warmSaves.current.delete(m.map)
+            setWarmDrafts(drafts => {
+              const remaining = { ...drafts }
+              delete remaining[m.map]
+              return remaining
+            })
+            void refresh(false)
+          }
+        }
+      })
+      warmSaves.current.set(m.map, save)
+      return
+    }
     setBusy(m.map); setMessage(null); setError(null)
     if (!next) { stopTracking(m.map); dismissLoadError(m.map) }
     // optimistic
@@ -347,8 +388,8 @@ function LegacyMapSpinUp({ embedded = false, modeRevision, onPolicyChange }: { e
     const out = seq.map(k => byKey.get(k)).filter((m): m is SpinUpMap => Boolean(m))
     // Defensive: append any map missing from the order sequence.
     for (const m of maps) if (!seq.includes(m.map)) out.push(m)
-    return out
-  }, [maps, order])
+    return out.map(map => map.map in warmDrafts ? { ...map, enabled: warmDrafts[map.map], warmPending: true, warmError: undefined } : map)
+  }, [maps, order, warmDrafts])
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
@@ -682,12 +723,15 @@ function SortableMapCard({ map: m, busy, onToggle, onPartySharing, elapsed, load
               type="checkbox"
               className="h-4 w-4 accent-accent"
               checked={m.enabled}
-              disabled={busy !== null || loading}
+              disabled={busy !== null || (!dockerEdition && loading)}
               onChange={e => onToggle(m, e.target.checked)}
             />
           </div>
         </label>
       </div>
+      {m.warmPending && (
+        <p role="status" className="pl-12 text-xs text-text-muted">{m.warmError || 'Applying…'}</p>
+      )}
       {m.supportsPartySharing && (
         <label className="flex items-start justify-between gap-3 border-t border-border/40 pt-2 text-xs cursor-pointer">
           <span>

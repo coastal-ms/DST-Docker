@@ -1,5 +1,10 @@
 # DST Docker changelog
 
+## [1.0.23]
+
+- Save Keep Maps Warm changes immediately and apply them in the background. Keep working on other maps while the latest choice per map takes effect. Turning Warm off lets the Director unload the map when it is empty.
+- Open Keep Maps Warm directly from its own tab in Map management.
+
 ## [1.0.22]
 
 - Allow redeploying the installed DST Docker release from the portal while leaving the battlegroup running.
