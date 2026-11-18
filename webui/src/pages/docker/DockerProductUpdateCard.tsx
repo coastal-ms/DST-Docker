@@ -13,7 +13,6 @@ export function DockerProductUpdateCard() {
   const [error, setError] = useState('')
   const [reconnecting, setReconnecting] = useState(false)
   const running = status?.operation?.phase === 'running'
-  const waiting = status?.operation?.phase === 'completed' && status.currentVersion !== status.operation.toVersion
   const load = useCallback(async (force = false) => {
     try {
       await checkDockerProductUpdate(force)
@@ -25,10 +24,10 @@ export function DockerProductUpdateCard() {
   }, [])
   useEffect(() => { void load() }, [load])
   useEffect(() => {
-    if (!running && !waiting && !reconnecting) return
+    if (!running && !reconnecting) return
     const timer = window.setInterval(() => { void load() }, 3000)
     return () => window.clearInterval(timer)
-  }, [load, running, waiting, reconnecting])
+  }, [load, running, reconnecting])
   async function check() {
     setBusy(true)
     try { await load(true) } finally { setBusy(false) }
@@ -49,7 +48,7 @@ export function DockerProductUpdateCard() {
   }
   const completed = status?.operation?.phase === 'completed' && status.currentVersion === status.operation.toVersion
   const needsReload = completed && portalVersion !== status.currentVersion
-  const showOperation = status?.operation && (!completed || needsReload)
+  const showOperation = status?.operation && (status.operation.phase !== 'completed' || needsReload)
   return <section id="settings.docker-updates" className="card p-5 space-y-4" data-section-nav-id="settings.docker-updates" data-section-nav-label="DST Docker updates">
     <h2 className="text-lg font-semibold">DST Docker updates</h2>
     <p className="text-sm text-text-muted">Update the DST management portal and Docker services. Official game-server updates are managed separately in Server updates.</p>
@@ -62,7 +61,7 @@ export function DockerProductUpdateCard() {
     <p className="text-sm text-text-muted">The battlegroup can stay running. The portal restarts automatically. Keep this tab open so it can reconnect. Accounts, server data and the selected console port are kept.</p>
     {(error || status?.error) && <p role="alert" className="text-danger">{running && reconnecting ? 'The portal is reconnecting. Update completion has not been confirmed yet.' : error || status?.error}</p>}
     {showOperation && status?.operation && <p role="status" className={status.operation.phase === 'failed' ? 'text-danger' : completed ? 'text-success' : 'text-text-muted'}>
-      {completed ? `DST Docker ${status.currentVersion} is installed. Reload the portal to use the updated interface.` : status.operation.phase === 'completed' ? 'Waiting for the updated portal to respond…' : status.operation.message}
+      {completed ? `DST Docker ${status.currentVersion} is installed. Reload the portal to use the updated interface.` : status.operation.message}
     </p>}
     {status?.operation?.phase === 'failed' && <p className="text-sm text-text-muted">The update log is in portal-update/update.log under your installation folder. You can retry after correcting the reported problem.</p>}
     <div className="flex flex-wrap gap-3">
