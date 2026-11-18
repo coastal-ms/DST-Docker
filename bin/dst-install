@@ -550,7 +550,7 @@ task_port_args=()
 if [[ -n "$task_port" ]]; then task_port_args=(--port "$task_port"); fi
 # Compose run may attach stdin even in a detached setup. Keep it from
 # consuming the rest of this installer when invoked through curl | bash.
-"${task_docker[@]}" bash "$task_release/bin/dst-docker" up "${task_port_args[@]}" < /dev/null
+"${task_docker[@]}" env "DST_PORTAL_REDEPLOY=${DST_PORTAL_REDEPLOY:-0}" bash "$task_release/bin/dst-docker" up "${task_port_args[@]}" < /dev/null
 python3 - "$task_root" "$task_package_sha" <<'PY'
 import json,os,sys,uuid
 from pathlib import Path

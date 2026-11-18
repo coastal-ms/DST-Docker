@@ -110,7 +110,8 @@ class Updater:
             if self.operation and self.operation['phase'] == 'running': raise ValueError('An update is already running.')
             if self.https and self.https.operation and self.https.operation.get('phase')=='running': raise ValueError('Wait for HTTPS setup to finish.')
             selected = self.check(force=True)
-            if not selected['available']: raise ValueError('DST Docker is already on this or a newer version.')
+            if version(selected['latestVersion']) < version(selected['currentVersion']):
+                raise ValueError('The latest release is older than this installation.')
             if (request['tag'], request['commit']) != (selected['tag'], selected['commit']):
                 raise ValueError('The latest release changed. Check again and review the new version.')
             identifier = uuid.uuid4().hex
@@ -130,7 +131,8 @@ class Updater:
     def worker(self, selected, identifier):
         try:
             env = {**os.environ, 'DST_SELF_UPDATE': '1', 'DST_EXPECTED_RELEASE_TAG': selected['tag'],
-                   'DST_EXPECTED_RELEASE_COMMIT': selected['commit']}
+                   'DST_EXPECTED_RELEASE_COMMIT': selected['commit'],
+                   'DST_PORTAL_REDEPLOY': '1' if version(selected['currentVersion']) == version(selected['latestVersion']) else '0'}
             with (self.directory / 'update.log').open('w', encoding='utf-8') as log:
                 (self.directory / 'update.log').chmod(0o600)
                 result = subprocess.run(['bash', str(self.source() / 'bootstrap.sh'), '--prefix', str(self.root),

@@ -51,6 +51,15 @@ class HttpsLauncherTests(unittest.TestCase):
         self.assertNotIn(' stop ',calls)
         self.assertNotIn(' down',calls)
 
+    def test_redeploy_forces_recreation_of_only_the_portal(self):
+        self.override.unlink()
+        self.env['DST_PORTAL_REDEPLOY']='1'
+        result=self.run_launcher('up')
+        self.assertEqual(result.returncode,0,result.stderr)
+        forced=[line for line in self.log.read_text().splitlines() if '--force-recreate' in line]
+        self.assertEqual(len(forced),1)
+        self.assertTrue(forced[0].endswith('up --no-build -d --no-deps --force-recreate dst'))
+
     def test_owner_reset_requires_confirmation_and_preserves_the_exact_username_argument(self):
         docker=Path(self.env['PATH'].split(':')[0])/'docker'
         docker.write_text('#!/usr/bin/env python3\nimport json,os,sys\nwith open(os.environ["DST_FIXTURE_DOCKER_LOG"],"a") as stream:stream.write(json.dumps(sys.argv[1:])+"\\n")\n');docker.chmod(0o755)
