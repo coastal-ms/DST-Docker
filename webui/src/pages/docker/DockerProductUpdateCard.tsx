@@ -34,7 +34,7 @@ export function DockerProductUpdateCard() {
     try { await load(true) } finally { setBusy(false) }
   }
   async function install() {
-    if (!status?.tag || !status.commit || !confirmAction(`Update DST Docker from ${status.currentVersion} to ${status.latestVersion}? Stop the battlegroup first. The portal will restart; keep this tab open. Your saved server data and accounts are retained.`)) return
+    if (!status?.tag || !status.commit || !confirmAction(`Update DST Docker from ${status.currentVersion} to ${status.latestVersion}? The battlegroup can stay running. The portal restarts automatically; keep this tab open. Your saved server data and accounts are retained.`)) return
     setBusy(true); setError('')
     try {
       const result = await api<DockerProductUpdate>('/api/docker/product-update', {
@@ -59,7 +59,7 @@ export function DockerProductUpdateCard() {
     </dl>
     {!status?.available && status?.latestVersion && !status.error && <p className="text-success">You have this or a newer version.</p>}
     {status?.available && <p>Version {status.latestVersion} is available.</p>}
-    <p className="text-sm text-text-muted">Stop the battlegroup in Commands before updating. Keep this tab open; the portal reconnects after its restart. Accounts, server data and the selected console port are kept.</p>
+    <p className="text-sm text-text-muted">The battlegroup can stay running. The portal restarts automatically. Keep this tab open so it can reconnect. Accounts, server data and the selected console port are kept.</p>
     {(error || status?.error) && <p role="alert" className="text-danger">{running && reconnecting ? 'The portal is reconnecting. Update completion has not been confirmed yet.' : error || status?.error}</p>}
     {showOperation && status?.operation && <p role="status" className={status.operation.phase === 'failed' ? 'text-danger' : completed ? 'text-success' : 'text-text-muted'}>
       {completed ? `DST Docker ${status.currentVersion} is installed. Reload the portal to use the updated interface.` : status.operation.phase === 'completed' ? 'Waiting for the updated portal to respond…' : status.operation.message}

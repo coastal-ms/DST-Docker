@@ -42,11 +42,11 @@ describe('DST Docker product updater', () => {
   })
   it('shows a refused update without reporting success', async () => {
     vi.mocked(confirmAction).mockReturnValue(true)
-    vi.mocked(api).mockResolvedValueOnce(latest).mockRejectedValueOnce(new Error('Stop the battlegroup first'))
+    vi.mocked(api).mockResolvedValueOnce(latest).mockRejectedValueOnce(new Error('Wait for backups to finish before updating DST Docker.'))
     render(<DockerProductUpdateCard />)
     await screen.findByText('Version 1.0.13 is available.')
     fireEvent.click(screen.getByRole('button',{name:'Update DST Docker'}))
-    await screen.findByText('Stop the battlegroup first')
+    await screen.findByText('Wait for backups to finish before updating DST Docker.')
     expect(screen.queryByText(/installed\. Reload/)).toBeNull()
   })
   it('confirms completion only after the running version matches', async () => {
