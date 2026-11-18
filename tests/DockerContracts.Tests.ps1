@@ -24,6 +24,19 @@ Describe 'Native contract catalog payload' {
         $result.payload['remove']|Should -Contain 'Contract.Tracking.FactionStory.ShowSkorda'
         ($result.payload.bumps | Where-Object name -eq Atreides).minimum|Should -BeGreaterOrEqual 250
     }
+    It 'completes Loop Zero by removing its verified flag and rejects reversal' {
+        $result=Get-DuneDockerContractPayload -ContractIds @('Halloween_Week3_03')
+        $result.ok|Should -BeTrue
+        $result.payload['add'].Count|Should -Be 0
+        $result.payload['remove']|Should -BeExactly 'Contract.Target.Dialogue.Halloween.Complete303'
+        $result.payload.short_names|Should -BeExactly 'Halloween_Week3_03'
+        (Get-DuneDockerContractPayload -ContractIds @('Halloween_Week3_03') -Reverse).ok|Should -BeFalse
+    }
+    It 'exposes the five Counter-Insurgency steps with their game chain title' {
+        $catalog=Get-DuneContractCatalog
+        $catalog.total|Should -Be 283
+        @($catalog.contracts | Where-Object {$_.chains -contains 'Counter-Insurgency'}).Count|Should -Be 5
+    }
     It 'rejects mixed unknown IDs before submitting a transaction' {
         Mock Invoke-DuneSqlQuery {throw 'No query expected'}
         (Invoke-DuneDockerPlayerContracts -AccountId 17 -ContractIds @('Arrakeen_Banquet_01','unknown-fixture')).ok|Should -BeFalse

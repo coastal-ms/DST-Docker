@@ -7,7 +7,7 @@ function Get-DuneDockerContractPayload {
     $skills=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     $remove=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     foreach($id in $ContractIds){
-        $resolved=Resolve-DuneContractTagsForId -ContractId $id
+        $resolved=Resolve-DuneContractTagsForId -ContractId $id -AllowRemovalOnly:(-not $Reverse)
         if(-not $resolved.ok){return @{ok=$false;error=$resolved.error}}
         $canonical=@($script:DuneTagsData.contractTags.Keys | Where-Object {[string]::Equals([string]$_,[string]$resolved.name,[StringComparison]::OrdinalIgnoreCase)})
         if($canonical.Count -ne 1){return @{ok=$false;error='The contract catalog identity is ambiguous.'}}
