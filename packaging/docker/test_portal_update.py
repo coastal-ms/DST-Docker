@@ -62,12 +62,21 @@ class ProductUpdateTests(unittest.TestCase):
         self.updater.current.return_value='1.0.20'
         self.assertFalse(self.updater.check()['available'])
 
-    def test_changed_release_or_same_version_never_starts_worker(self):
+    def test_changed_release_or_downgrade_never_starts_worker(self):
         self.updater.check=Mock(return_value={**self.selected,'commit':'b'*40})
         with self.assertRaisesRegex(ValueError,'changed'): self.updater.install(self.request())
         self.updater.manager.assert_not_called()
-        self.updater.check.return_value={**self.selected,'available':False}
-        with self.assertRaisesRegex(ValueError,'newer'): self.updater.install(self.request())
+        self.updater.check.return_value={**self.selected,'available':False,'currentVersion':'1.0.14'}
+        with self.assertRaisesRegex(ValueError,'older'): self.updater.install(self.request())
+
+    def test_same_version_starts_redeploy_worker(self):
+        selected = {**self.selected, 'currentVersion': '1.0.13', 'available': False}
+        self.updater.check = Mock(return_value=selected)
+        with patch('threading.Thread') as thread:
+            result = self.updater.install(self.request())
+            self.assertEqual(result['phase'], 'running')
+            self.updater.manager.assert_called_once_with('portal-update.reserve', result['id'])
+            thread.assert_called_once_with(target=self.updater.worker, args=(selected, result['id']), daemon=True)
 
     def test_confirmation_and_arbitrary_arguments_rejected(self):
         for request in [{**self.request(),'prefix':'/other'}, {**self.request(),'confirmation':''}]:

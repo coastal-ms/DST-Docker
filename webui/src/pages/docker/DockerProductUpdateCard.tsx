@@ -13,6 +13,7 @@ export function DockerProductUpdateCard() {
   const [error, setError] = useState('')
   const [reconnecting, setReconnecting] = useState(false)
   const running = status?.operation?.phase === 'running'
+  const redeploy = !!status?.latestVersion && status.currentVersion === status.latestVersion
   const load = useCallback(async (force = false) => {
     try {
       await checkDockerProductUpdate(force)
@@ -33,7 +34,9 @@ export function DockerProductUpdateCard() {
     try { await load(true) } finally { setBusy(false) }
   }
   async function install() {
-    if (!status?.tag || !status.commit || !confirmAction(`Update DST Docker from ${status.currentVersion} to ${status.latestVersion}? The battlegroup can stay running. The portal restarts automatically; keep this tab open. Your saved server data and accounts are retained.`)) return
+    if (!status?.tag || !status.commit) return
+    const action = redeploy ? `Redeploy DST Docker ${status.currentVersion}?` : `Update DST Docker from ${status.currentVersion} to ${status.latestVersion}?`
+    if (!confirmAction(`${action} The battlegroup can stay running. The portal restarts automatically; keep this tab open. Your saved server data and accounts are retained.`)) return
     setBusy(true); setError('')
     try {
       const result = await api<DockerProductUpdate>('/api/docker/product-update', {
@@ -66,7 +69,7 @@ export function DockerProductUpdateCard() {
     {status?.operation?.phase === 'failed' && <p className="text-sm text-text-muted">The update log is in portal-update/update.log under your installation folder. You can retry after correcting the reported problem.</p>}
     <div className="flex flex-wrap gap-3">
       <button type="button" className="btn-secondary" disabled={busy || running} onClick={() => void check()}>{busy ? 'Working…' : 'Check now'}</button>
-      <button type="button" className="btn-primary" disabled={busy || running || !status?.supported || !status.available || !!status.error || !status.tag || !status.commit} onClick={() => void install()}>{running ? 'Updating DST Docker…' : 'Update DST Docker'}</button>
+      <button type="button" className="btn-primary" disabled={busy || running || !status?.supported || !(status.available || redeploy) || !!status.error || !status.tag || !status.commit} onClick={() => void install()}>{running ? 'Updating DST Docker…' : redeploy ? 'Redeploy DST Docker' : 'Update DST Docker'}</button>
       {needsReload && <button type="button" className="btn-secondary" onClick={() => window.location.reload()}>Reload portal</button>}
     </div>
   </section>

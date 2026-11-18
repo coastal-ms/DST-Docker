@@ -128,6 +128,9 @@ case "${1:-up}" in
       set_port
     fi
     compose up --no-build -d
+    if [ "${DST_PORTAL_REDEPLOY:-0}" = 1 ]; then
+      compose up --no-build -d --no-deps --force-recreate dst
+    fi
     wait_portal
     if ! docker compose -p dst-docker-assets -f packaging/docker/compose.assets.yaml run --rm --entrypoint python3 assets -c 'import json; from pathlib import Path; state=json.loads(Path("/srv/dst/install-state.json").read_text()); raise SystemExit(0 if state.get("state")=="downloaded" else 1)' >/dev/null 2>&1; then
       printf '\nThe Web UI is running. You can open the link above while the official game files download.\nKeep this terminal open until the download finishes; progress appears below.\n'

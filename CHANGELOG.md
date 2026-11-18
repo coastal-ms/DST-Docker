@@ -1,5 +1,9 @@
 # DST Docker changelog
 
+## [1.0.22]
+
+- Allow redeploying the installed DST Docker release from the portal while leaving the battlegroup running.
+
 ## [1.0.21]
 
 - Search Complete Contracts by in-game contract or chain name and find 13 additional supported contracts.

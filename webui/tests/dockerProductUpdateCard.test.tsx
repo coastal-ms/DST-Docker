@@ -19,6 +19,17 @@ describe('DST Docker product updater', () => {
     expect(api).toHaveBeenLastCalledWith('/api/docker/product-update', { method:'POST',body:JSON.stringify({tag:latest.tag,commit:latest.commit,confirmation:'UPDATE DST DOCKER'}) })
     expect(screen.getByRole('button',{name:'Updating DST Docker…'})).toBeDisabled()
   })
+  it('allows redeploying the installed release', async () => {
+    vi.mocked(confirmAction).mockReturnValue(true)
+    vi.mocked(api).mockResolvedValueOnce({ ...latest, currentVersion: latest.latestVersion, available: false })
+      .mockResolvedValueOnce({ operation: { id: 'redeploy', phase: 'running', message: 'Building DST' } })
+    render(<DockerProductUpdateCard />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Redeploy DST Docker' }))
+    await screen.findByText('Building DST')
+    expect(api).toHaveBeenLastCalledWith('/api/docker/product-update', {
+      method: 'POST', body: JSON.stringify({ tag: latest.tag, commit: latest.commit, confirmation: 'UPDATE DST DOCKER' }),
+    })
+  })
   it('forces a fresh version check', async () => {
     vi.mocked(api).mockResolvedValue(latest)
     render(<DockerProductUpdateCard />)
@@ -55,7 +66,7 @@ describe('DST Docker product updater', () => {
     render(<DockerProductUpdateCard />)
     await screen.findByText('DST Docker 1.0.13 is installed. Reload the portal to use the updated interface.')
     expect(screen.getByRole('button',{name:'Reload portal'})).toBeInTheDocument()
-    expect(screen.getByRole('button',{name:'Update DST Docker'})).toBeDisabled()
+    expect(screen.getByRole('button',{name:'Redeploy DST Docker'})).toBeEnabled()
   })
   it('ignores completed update history for a different installed version', async () => {
     vi.mocked(api).mockResolvedValue({ ...latest, currentVersion: portalVersion, available: false,
