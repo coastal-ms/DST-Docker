@@ -9,6 +9,8 @@ export interface SpinUpMap {
   enabled: boolean
   mode?: string | null
   availablePartitions?: number
+  warmPending?: boolean
+  warmError?: string
   supportsPartySharing?: boolean
   sharedParties?: boolean
 }

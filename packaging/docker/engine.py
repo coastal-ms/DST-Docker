@@ -702,9 +702,9 @@ class Engine:
             raise ValueError('Invalid container identifier.')
         return self.request('GET', '/containers/' + quote(identifier, safe='') + '/json')
 
-    def set_director_floor(self,scaler,director,project,map_name,floor):
+    def set_director_floor(self,scaler,director,project,map_name,floor,*,confirm=True):
         self.assert_owned(scaler,project,'scaler');self.assert_owned(director,project,'director')
-        payload={'host':'dst-'+project+'-director','map':map_name,'floor':floor}
+        payload={'host':'dst-'+project+'-director','map':map_name,'floor':floor,'confirm':confirm}
         script=Path(__file__).with_name('director_policy.py').read_text()
         try:
             result=json.loads(self.exec_internal(scaler,project,'scaler',['python3','-c',script,json.dumps(payload)]))

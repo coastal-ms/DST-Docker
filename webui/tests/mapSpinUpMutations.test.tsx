@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MapSpinUp } from '../src/pages/MapSpinUp'
@@ -44,7 +44,7 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
-describe('Map Spin-Up mutation feedback', () => {
+describe.runIf(import.meta.env.VITE_DST_EDITION !== 'docker')('Map Spin-Up mutation feedback', () => {
   it('keeps a failed toggle result visible after refresh without a success-styled duplicate', async () => {
     const user = userEvent.setup()
     vi.mocked(setMapSpinUp).mockResolvedValue({
@@ -72,4 +72,30 @@ describe('Map Spin-Up mutation feedback', () => {
     await waitFor(() => expect(getMapSpinUp).toHaveBeenCalledTimes(2))
     expect(screen.getByText(/Party-sharing request failed\./)).toHaveClass('text-danger')
   })
+})
+
+it.runIf(import.meta.env.VITE_DST_EDITION === 'docker')('saves other Docker maps while an earlier choice is pending and sends the latest choice in order', async () => {
+  const user = userEvent.setup()
+  const other = { ...map, map: 'SH_Arrakeen', label: 'Arrakeen' }
+  vi.mocked(getMapSpinUp).mockResolvedValue({ ok: true, maps: [map, other] })
+  let finishFirst!: () => void
+  vi.mocked(setMapSpinUp).mockImplementationOnce(() => new Promise(resolve => {
+    finishFirst = () => resolve({ ok: true, map: map.map })
+  })).mockImplementation(async name => ({ ok: true, map: name }))
+
+  render(<MapSpinUp embedded />)
+  await user.click(screen.getByRole('button', { name: 'Keep Maps Warm' }))
+  const warmTab = within(screen.getByRole('region', { name: 'Keep Maps Warm' }))
+  const zanovar = await warmTab.findByRole('checkbox', { name: /Zanovar CB_Story_DestroyedZanovar/ })
+  const arrakeen = warmTab.getByRole('checkbox', { name: /Arrakeen SH_Arrakeen/ })
+  await user.click(zanovar)
+  expect(zanovar).toBeChecked()
+  await user.click(arrakeen)
+  await user.click(zanovar)
+  expect(zanovar).not.toBeChecked()
+  expect(setMapSpinUp).toHaveBeenCalledTimes(2)
+  expect(setMapSpinUp).toHaveBeenNthCalledWith(2, other.map, true)
+
+  finishFirst()
+  await waitFor(() => expect(setMapSpinUp).toHaveBeenNthCalledWith(3, map.map, false))
 })

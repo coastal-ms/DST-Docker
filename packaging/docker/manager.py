@@ -50,6 +50,8 @@ STATE = Path('/projects')
 CONFIG = Path('/app-config/DuneServer')
 SOCKET = Path('/control/manager.sock')
 LOCK = threading.Lock()
+WARM_LOCK = threading.Lock()
+WARM_WAKE = threading.Event()
 BACKUP_WORKER = None
 
 
@@ -1245,11 +1247,11 @@ def map_policy(state,engine):
     entry=state.get('services',{}).get('director')
     if not entry:raise ValueError('Prepare the world services first.')
     return {'ini':engine.read_director_config(entry['id'],state['id']).decode(),
-            'world':state['worldId'],'maps':state['worldPlan']['maps'],
+            'world':state['worldId'],'maps':state['worldPlan']['maps'],'warmRequests':warm_requests(state),
             'modes':{row['map']:map_modes.mode_for(state,row) for row in state['worldPlan']['maps']}}
 
 
-def set_map_floor(state,engine,map_name,enabled,allow_initial=False):
+def set_map_floor(state,engine,map_name,enabled,allow_initial=False,*,confirm=True):
     if type(enabled) is not bool:raise ValueError('enabled must be a JSON boolean.')
     maps=[row for row in state['worldPlan']['maps'] if row['map']==map_name and (allow_initial or row['initialReplicas']==0)]
     if len(maps)!=1:raise ValueError('This map does not have a configurable warm floor.')
@@ -1263,7 +1265,9 @@ def set_map_floor(state,engine,map_name,enabled,allow_initial=False):
     scaler=state.get('scaler',{})
     director=state['services']['director']['id']
     if scaler.get('phase')=='prepared' and engine.assert_owned(director,state['id'],'director')['State']['Status']=='running':
-        engine.set_director_floor(scaler['id'],director,state['id'],map_name,len(maps[0]['partitions']) if enabled else 0)
+        floor=len(maps[0]['partitions']) if enabled else 0
+        if confirm:engine.set_director_floor(scaler['id'],director,state['id'],map_name,floor)
+        else:engine.set_director_floor(scaler['id'],director,state['id'],map_name,floor,confirm=False)
     return {'map':map_name,'enabled':enabled,'minServers':len(maps[0]['partitions']) if enabled else 0,
             'availablePartitions':len(maps[0]['partitions'])}
 
@@ -1286,8 +1290,23 @@ def set_map_mode(state,engine,map_name,mode):
     row=next((row for row in state.get('worldPlan',{}).get('maps',[]) if row['map']==map_name),None)
     if not row or row.get('initialReplicas',0)>0 or not isinstance(mode,str) or mode not in map_modes.MODES:
         raise ValueError('Choose a supported lifecycle mode for an optional map. Core maps stay available.')
-    previous=dict(state.get('mapModes',{}))
     pending=state.get('pendingMapMode')
+    if mode=='dynamic':
+        # Persist the operator's choice before contacting the Director. A warm
+        # floor release is safe to retry separately from map operations.
+        state.setdefault('mapModes',{})[map_name]=mode
+        pins=state.setdefault('manualPins',{})
+        for partition in row['partitions']:pins['game-'+str(partition)]=False
+        releases=state.setdefault('pendingMapFloorReleases',[])
+        if map_name not in releases:releases.append(map_name)
+        state.setdefault('overmapIdleSince',{}).pop(map_name,None)
+        if pending and pending['map']==map_name:
+            state.pop('pendingMapMode',None);state.pop('mapModeError',None)
+        save(state)
+        return {'map':map_name,'mode':mode,'enabled':False,'minServers':0,
+                'availablePartitions':len(row['partitions']),
+                'message':'On demand saved. The Director can unload the map when it is empty.'}
+    previous=dict(state.get('mapModes',{}))
     if pending and (pending['map']!=map_name or pending['mode']!=mode):
         raise ValueError('Retry the pending map mode before changing another map rule.')
     state['pendingMapMode']={'map':map_name,'mode':mode};save(state)
@@ -1301,19 +1320,70 @@ def set_map_mode(state,engine,map_name,mode):
         raise
     state.setdefault('overmapIdleSince',{}).pop(map_name,None)
     state.pop('pendingMapMode',None);state.pop('mapModeError',None)
+    releases=state.get('pendingMapFloorReleases',[])
+    if map_name in releases:releases.remove(map_name)
     save(state)
     return {'map':map_name,'mode':mode,'enabled':warm,'minServers':len(row['partitions']) if warm else 0,
             'availablePartitions':len(row['partitions']),
             'message':'Map mode saved. The director reloads its rules within 60 seconds. Running maps are not forcibly stopped.'}
 
 
+def warm_requests(state):
+    try:queue=json.loads((STATE/'map-warm-requests.json').read_text())
+    except FileNotFoundError:return {}
+    return queue['maps'] if queue['project']==state['id'] else {}
+
+
+def save_warm_requests(state,requests):
+    atomic(STATE/'map-warm-requests.json',json.dumps({'project':state['id'],'maps':requests}))
+
+
 def set_manual_map_floor(state,engine,map_name,enabled):
     if type(enabled) is not bool:raise ValueError('enabled must be a JSON boolean.')
-    # A user-selected warm map owns its lifecycle; the automatic Overmap
-    # scheduler continues using set_map_floor without changing that selection.
-    result=set_map_mode(state,engine,map_name,'always-on' if enabled else 'dynamic')
-    result['message']='Manual Warm enabled: Keep running.' if enabled else 'Manual Warm disabled: On demand.'
-    return result
+    row=next((row for row in state.get('worldPlan',{}).get('maps',[]) if row['map']==map_name and row['initialReplicas']==0),None)
+    if not row:raise ValueError('Choose an optional map. Core maps stay available.')
+    with WARM_LOCK:
+        requests=warm_requests(state)
+        requests[map_name]={'id':uuid.uuid4().hex,'enabled':enabled}
+        save_warm_requests(state,requests)
+    WARM_WAKE.set()
+    return {'map':map_name,'mode':'always-on' if enabled else 'dynamic','enabled':enabled,'pending':True,
+            'minServers':len(row['partitions']) if enabled else 0,
+            'availablePartitions':len(row['partitions']),
+            'message':'Warm saved; applying in the background.' if enabled else 'On demand saved; applying in the background.'}
+
+
+def reconcile_warm_requests(engine):
+    # A separate, durable intent file lets clicks save while the worker is
+    # contacting the Director or another maintenance operation owns project state.
+    state=project_state()
+    with WARM_LOCK:maps=list(warm_requests(state))
+    for map_name in maps:
+        with LOCK:
+            state=project_state()
+            if not map_mode_sync_ready(state):return
+            with WARM_LOCK:request=warm_requests(state).get(map_name)
+            if not request:continue
+            error=None
+            if any(row['map']==map_name and row['initialReplicas']==0 for row in state.get('worldPlan',{}).get('maps',[])):
+                try:
+                    state.setdefault('mapModes',{})[map_name]='always-on' if request['enabled'] else 'dynamic'
+                    set_map_floor(state,engine,map_name,request['enabled'],confirm=False)
+                    pending=state.get('pendingMapMode') or {}
+                    if pending.get('map')==map_name:
+                        state.pop('pendingMapMode',None);state.pop('mapModeError',None)
+                    releases=state.get('pendingMapFloorReleases',[])
+                    if map_name in releases:releases.remove(map_name)
+                    state.setdefault('overmapIdleSince',{}).pop(map_name,None)
+                    save(state)
+                except (ValueError,EngineError,OSError):
+                    error='Director sync failed. DST will retry.'
+            with WARM_LOCK:
+                requests=warm_requests(state)
+                if requests.get(map_name,{}).get('id')!=request['id']:continue
+                if error:requests[map_name]['error']=error
+                else:requests.pop(map_name)
+                save_warm_requests(state,requests)
 
 
 def scheduler_occupancy(state,engine):
@@ -1410,13 +1480,45 @@ def map_mode_tick(engine=None,now=None):
         if players is not None and players>0:queue_follow_overmap_starts(state,engine,rows)
 
 
+def map_mode_sync_ready(state):
+    return (state.get('desiredState')=='running' and not state.get('portalUpdate')
+            and state.get('operation',{}).get('phase')!='running'
+            and state.get('restore',{}).get('phase') not in {'stopping','preparing','restoring','recovering','recovery-required'}
+            and state.get('updateRun',{}).get('phase','completed') in world_update.TERMINAL
+            and state.get('worldRestart',{}).get('phase','done') in world_restart.TERMINAL
+            and state.get('worldResearchRecovery',{}).get('phase','completed') in {'completed','rolled-back','failed-preflight'})
+
+
+def reconcile_map_floor_release(engine):
+    with LOCK:
+        state=project_state()
+        legacy=state.get('pendingMapMode') or {}
+        if legacy.get('mode')=='dynamic':
+            set_map_mode(state,engine,legacy['map'],'dynamic')
+        releases=state.get('pendingMapFloorReleases',[])
+        if not releases or not map_mode_sync_ready(state):return
+        map_name=releases[0]
+        if state.get('mapModes',{}).get(map_name)=='dynamic':
+            try:set_map_floor(state,engine,map_name,False,confirm=False)
+            except (ValueError,EngineError,OSError):
+                # Rotate failed requests so unrelated map settings can sync.
+                releases.append(releases.pop(0));save(state)
+                return
+        releases.pop(0);save(state)
+
+
 def run_map_mode_scheduler():
     while True:
-        try:map_mode_tick()
+        try:
+            engine=Engine()
+            reconcile_warm_requests(engine)
+            reconcile_map_floor_release(engine)
+            map_mode_tick(engine)
         except Exception:
             with LOCK:
                 state=project_state();state['mapModeError']='Overmap Active could not refresh its map rules. Check map status and retry the mode setting.';save(state)
-        time.sleep(15)
+        WARM_WAKE.wait(15)
+        WARM_WAKE.clear()
 
 
 def stop_services(state,engine):
@@ -1720,6 +1822,7 @@ def run_operation(state,engine,request):
 def dispatch(request, engine=None, *, resume_running_only=False):
     engine = engine or Engine()
     action = request.get('action')
+    if action=='maps.floor':return set_manual_map_floor(project_state(),engine,request.get('map'),request.get('enabled'))
     if action in {'status','maps.management'}:
         # Read the atomically saved state without waiting behind director I/O.
         # Job transitions are observed only by the request owning the lock.
@@ -1793,7 +1896,7 @@ def dispatch(request, engine=None, *, resume_running_only=False):
         if state.get('worldResearchRecovery',{}).get('phase','completed') not in {'completed','rolled-back','failed-preflight'} and action not in {'world-restart.research-recover','logs.export'}:
             raise ValueError('Recover the interrupted research operation before starting another operation.')
         if state.get('pendingMemoryChange') and action!='maps.memory':raise ValueError('Finish the pending map memory allocation first.')
-        if state.get('pendingMapMode') and action not in {'maps.mode','services.stop','logs.export'}:raise ValueError('Retry the pending map mode before another server operation.')
+        if state.get('pendingMapMode') and state['pendingMapMode'].get('mode')!='dynamic' and action not in {'maps.mode','services.stop','logs.export'}:raise ValueError('Retry the pending map mode before another server operation.')
         if state.get('pendingResourceChange') and action!='resources.set':raise ValueError('Finish the pending resource allocation first.')
         if state.get('pendingSwapChange') and action not in {'memory-swap.set','memory-swap.recover','services.stop','logs.export'}:
             raise ValueError('Retry or restore the pending Memory Swap change before another server operation.')
@@ -1826,7 +1929,6 @@ def dispatch(request, engine=None, *, resume_running_only=False):
             return {'enabled':state['memoryBalancingEnabled']}
         if action=='maps.memory':return set_map_memory(state,engine,request.get('map'),request.get('memoryGiB'))
         if action=='scale.patch':return request_scale(state,engine,request.get('name'),request.get('patch'))
-        if action=='maps.floor':return set_manual_map_floor(state,engine,request.get('map'),request.get('enabled'))
         if action=='maps.mode':return set_map_mode(state,engine,request.get('map'),request.get('mode'))
         if action=='maps.party-sharing':return set_party_sharing(state,engine,request.get('map'),request.get('shared'))
         if action in {'chat.queue.declare','chat.queue.delete','chat.queue.drain'}:
