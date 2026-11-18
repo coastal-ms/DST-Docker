@@ -6,6 +6,8 @@
 !tools/
 !tools/assets/
 !tools/assets/**
+!tools/glob-matcher/
+!tools/glob-matcher/**
 !tools/security/
 !tools/security/**
 !packaging/

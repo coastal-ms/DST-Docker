@@ -12,7 +12,8 @@ RUN mkdir -p /out/licenses \
 
 FROM node:24-bookworm-slim AS web
 WORKDIR /src/webui
-COPY webui/package.json webui/package-lock.json ./
+COPY webui/package.json webui/package-lock.json webui/.npmrc ./
+COPY tools/glob-matcher/ /src/tools/glob-matcher/
 RUN npm ci --no-audit --no-fund
 COPY webui/ ./
 COPY tools/assets/ /src/tools/assets/

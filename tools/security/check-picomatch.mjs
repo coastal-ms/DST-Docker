@@ -1,6 +1,5 @@
 // CVE-2026-112366: exercise the installed replacement, not just its package name.
 // Upstream advisory: https://github.com/advisories/GHSA-fc5q-39xc-vjpf
-// Reviewed patch: https://github.com/ryotsu-kankichi/secured-picomatch
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -10,12 +9,17 @@ import {spawnSync} from 'node:child_process';
 const root=path.resolve(process.argv[2]||'.');
 const require=createRequire(path.join(root,'package.json'));
 const lock=JSON.parse(fs.readFileSync(path.join(root,'package-lock.json'),'utf8'));
+const expected=JSON.parse(fs.readFileSync(new URL('../glob-matcher/package.json',import.meta.url),'utf8'));
 const copies=Object.entries(lock.packages).filter(([name])=>name.endsWith('node_modules/picomatch'));
 assert(copies.length>0,'Expected installed glob matcher dependencies');
 for(const [name,entry] of copies){
-  assert.equal(entry.name,'@ryotsu/picomatch');
-  assert.equal(entry.version,'4.0.7-a');
-  assert.equal(entry.integrity,'sha512-JroBFEmaejC7szGSfqOhF1QZHLKvX2wTA1+fWyfkpy3BjzdQKNPLKa2FtgeKVUDy5/UPUNkXEeCHJ5ZRBMLTVA==');
+  assert.equal(entry.name,expected.name);
+  assert.equal(entry.version,expected.version);
+  assert.equal(entry.resolved,'file:../tools/glob-matcher');
+  const installed=JSON.parse(fs.readFileSync(path.join(root,name,'package.json'),'utf8'));
+  assert.equal(installed.name,expected.name);
+  assert.equal(installed.version,expected.version);
+  assert.deepEqual(installed.dependencies,expected.dependencies);
   const matcher=require(path.join(root,name));
   assert(matcher('**/*.{js,ts}')('src/example.ts'));
   assert(!matcher('**/*.js')('src/example.css'));
