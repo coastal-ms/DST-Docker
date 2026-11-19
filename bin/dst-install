@@ -48,10 +48,56 @@ task_package_sha=$task_actual_sha
 # Kept in the installer itself: bootstrap and curl | bash need no extra download.
 dst_wsl_helper() {
   local task_helper_sudo=()
-  if [[ "$1" == configure ]]; then task_helper_sudo=("${task_sudo[@]}"); fi
+  if [[ "$1" == configure || "$1" == tailscale-mtu ]]; then task_helper_sudo=("${task_sudo[@]}"); fi
+  if [[ "$1" == tailscale-mtu && "$task_non_interactive" == 1 && ${#task_helper_sudo[@]} -gt 0 ]]; then
+    task_helper_sudo+=(-n)
+  fi
   "${task_helper_sudo[@]}" python3 - "$@" <<'DST_WSL_PY'
 import base64, os, re, shlex, shutil, stat, subprocess, sys, tempfile, uuid
 from pathlib import Path
+
+
+TAILSCALE_MTU_UNIT = """[Unit]
+Description=Set the default WSL eth0 MTU for DST Docker Tailscale
+Wants=sys-subsystem-net-devices-eth0.device
+After=sys-subsystem-net-devices-eth0.device
+Before=docker.service
+JobTimeoutSec=20s
+
+[Service]
+Type=oneshot
+ExecCondition=/usr/bin/grep -qx 1280 /sys/class/net/eth0/mtu
+ExecStart=/usr/sbin/ip link set dev eth0 mtu 1340
+
+[Install]
+WantedBy=multi-user.target docker.service
+"""
+
+
+def configure_tailscale_mtu(mtu=Path('/sys/class/net/eth0/mtu'),
+                            unit=Path('/etc/systemd/system/dst-wsl-tailscale-mtu.service')):
+    # Tailscale's userspace container shares the WSL host network. The
+    # 1280-byte WSL default can drop its encapsulated packets.
+    current = mtu.read_text().strip() if mtu.is_file() else None
+    if current not in ('1280', '1340'):
+        return
+    expected = TAILSCALE_MTU_UNIT.encode()
+    if current == '1280' and not unit.exists() and not unit.is_symlink():
+        with tempfile.NamedTemporaryFile(prefix='.dst-wsl-mtu-', dir=unit.parent) as temporary:
+            temporary.write(expected)
+            temporary.flush()
+            os.fchmod(temporary.fileno(), 0o644)
+            try:
+                os.link(temporary.name, unit)
+            except FileExistsError:
+                pass
+    if unit.is_symlink() or not unit.is_file() or unit.read_bytes() != expected:
+        return
+    subprocess.run(['systemctl', 'enable', '--now', unit.name],
+                   check=True, timeout=30, stdin=subprocess.DEVNULL)
+    if mtu.read_text().strip() != '1340':
+        raise ValueError('The WSL Tailscale MTU service did not raise eth0 to 1340.')
+    print('WSL Tailscale MTU setup is enabled for future starts.')
 
 
 def enable_systemd(path=Path('/etc/wsl.conf')):
@@ -206,6 +252,7 @@ def main(args):
         # the first systemd boot so interactive systemd-firstboot cannot block it.
         initialize_machine_id()
         enable_systemd()
+    elif args[0] == 'tailscale-mtu': configure_tailscale_mtu()
     elif args[0] == 'launch': launch(*args[1:])
     else: raise ValueError('Unknown WSL setup action.')
 
@@ -535,6 +582,9 @@ PY
 task_release="$task_root/releases/$task_package_sha"
 if ((task_prepare_only)); then printf 'DST source prepared at %s\nNo containers were started.\n' "$task_release"; return 0; fi
 if [[ -n "${WSL_DISTRO_NAME:-}" ]]; then
+  if ! dst_wsl_helper tailscale-mtu; then
+    printf 'DST could not configure the WSL MTU for Tailscale. You can finish setup and rerun the installer with Linux administrator access to retry.\n' >&2
+  fi
   # Bind the host socket and platform marker on the first portal container.
   # Desktop shortcut/config activation still happens only after startup succeeds.
   python3 "$task_release/packaging/docker/host_session.py" bind --root "$task_root"
@@ -573,6 +623,10 @@ if [[ -n "${WSL_DISTRO_NAME:-}" ]]; then
     :
   else
     printf 'DST is installed. Desktop shortcut creation did not complete; use the Ubuntu terminal and retry: bash %q/bin/dst-docker shortcut\n' "$task_root/current" >&2
+  fi
+elif [[ -f "$task_release/packaging/docker/linux_desktop.py" ]]; then
+  if ! python3 "$task_release/packaging/docker/linux_desktop.py" register "$task_root"; then
+    printf 'DST is installed. Use the browser address above, or retry the Linux shortcut with: sh %q/bin/dst-docker shortcut\n' "$task_root/current" >&2
   fi
 fi
 if [[ "${DST_SELF_UPDATE:-}" != 1 && -f "$task_release/packaging/docker/portal_update.py" && "$(ps -p 1 -o comm= | tr -d ' ')" == systemd ]]; then

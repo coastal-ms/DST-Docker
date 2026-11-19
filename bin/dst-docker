@@ -42,11 +42,13 @@ fi
 command -v docker >/dev/null 2>&1 || { echo 'Docker is required. Run this inside Linux or your WSL distribution.' >&2; exit 1; }
 docker compose version >/dev/null
 portal_links() {
+  task_desktop_port=''
+  if [ -z "${WSL_DISTRO_NAME:-}" ]; then task_desktop_port=$task_https_state/desktop-portal.port; fi
   if [ -f "$task_https_override" ]; then
     task_origin=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["x-dst-https-origin"])' "$task_https_override")
-    compose exec -T dst cat /data/state/DuneServer/last-url.txt | python3 packaging/docker/portal_urls.py --https-origin "$task_origin"
+    compose exec -T dst cat /data/state/DuneServer/last-url.txt | DST_DESKTOP_PORT_FILE="$task_desktop_port" python3 packaging/docker/portal_urls.py --https-origin "$task_origin"
   else
-    compose exec -T dst cat /data/state/DuneServer/last-url.txt | python3 packaging/docker/portal_urls.py --display
+    compose exec -T dst cat /data/state/DuneServer/last-url.txt | DST_DESKTOP_PORT_FILE="$task_desktop_port" python3 packaging/docker/portal_urls.py --display
   fi
 }
 public_port() {
@@ -158,6 +160,10 @@ case "${1:-up}" in
     ;;
   shortcut)
     [ "$#" -eq 1 ] || { echo 'Usage: sh bin/dst-docker shortcut' >&2; exit 1; }
+    if [ -z "${WSL_DISTRO_NAME:-}" ]; then
+      portal_links >/dev/null
+      exec python3 packaging/docker/linux_desktop.py register "$task_https_state"
+    fi
     exec python3 packaging/docker/host_session.py shortcut --root "$task_https_state"
     ;;
   http)

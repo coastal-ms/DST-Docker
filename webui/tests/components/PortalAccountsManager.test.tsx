@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import React from 'react'
+import { PortalAuthGate } from '../../src/auth/PortalAuthGate'
 import { PortalAccountsManager } from '../../src/pages/settings/PortalAccountsManager'
 
 function jsonResponse(body: unknown, status = 200) {
@@ -28,6 +29,32 @@ afterEach(() => {
 })
 
 describe('Docker browser administration', () => {
+  it('shows sign-in after saving the current Owner character link without refreshing revoked access', async () => {
+    const sessionOwner = { ...owner, mustChangePassword: false, gameCharacterId: '', gameCharacterLabel: '' }
+    let linkSaved = false
+    const request = vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
+      const path = String(input)
+      if (path === '/api/portal-auth/status') {
+        return jsonResponse({ accountLoginEnabled: true, authenticated: true, account: sessionOwner })
+      }
+      if (path === '/api/gameplay/players') return jsonResponse({ players: [{ account_id: 42, name: 'Coastal' }] })
+      if (path === '/api/remote-access/portal-accounts/owner-id' && init?.method === 'PUT') {
+        expect(JSON.parse(String(init.body))).toEqual({ gameCharacterId: '42', gameCharacterLabel: 'Coastal' })
+        linkSaved = true
+        return jsonResponse({ account: { ...sessionOwner, gameCharacterId: '42', gameCharacterLabel: 'Coastal' } })
+      }
+      if (linkSaved) return jsonResponse({ message: 'Authentication required.' }, 401)
+      return jsonResponse({ accountLoginEnabled: true, accounts: [sessionOwner], roles: ['owner', 'admin', 'player'] })
+    })
+    render(<PortalAuthGate><PortalAccountsManager docker /></PortalAuthGate>)
+    const user = userEvent.setup()
+    await user.selectOptions(await screen.findByLabelText('Character for Coastal'), '42')
+    expect(await screen.findByText('Character link saved. Sign in again to continue.')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Sign in' })).toBeInTheDocument()
+    expect(screen.queryByText('Authentication required.')).not.toBeInTheDocument()
+    expect(request.mock.calls.filter(([path]) => path === '/api/remote-access/portal-accounts')).toHaveLength(1)
+  })
+
   it('keeps sign-in mandatory and offers linked Player accounts in Docker', async () => {
     const request = vi.spyOn(globalThis, 'fetch').mockImplementation(input => String(input) === '/api/gameplay/players' ? jsonResponse({players:[{account_id:42,name:'Coastal'}]}) : jsonResponse({accountLoginEnabled:true,accounts:[owner],roles:['owner','admin','player']}))
     render(<PortalAccountsManager docker />)

@@ -20,6 +20,7 @@ class HttpsLauncherTests(unittest.TestCase):
         self.env.pop('DST_HTTPS_OVERRIDE',None)
         self.env.pop('DST_MIRROR_OVERRIDE',None)
         self.env.pop('DST_BACKUP_MIRROR_DIR',None)
+        self.env.pop('WSL_DISTRO_NAME', None)
         self.releases=[]
         for name in ('a'*64,'b'*64):
             release=self.prefix/'releases'/name;(release/'bin').mkdir(parents=True)
@@ -27,6 +28,7 @@ class HttpsLauncherTests(unittest.TestCase):
             (release/'compose.yaml').write_text('name: fixture\nservices: {}\n')
             tools=release/'packaging/docker';tools.mkdir(parents=True)
             shutil.copy(Path(__file__).with_name('portal_urls.py'),tools/'portal_urls.py')
+            shutil.copy(Path(__file__).with_name('linux_desktop.py'), tools/'linux_desktop.py')
             shutil.copy(Path(__file__).with_name('mirror_config.py'),tools/'mirror_config.py')
             (tools/'https.py').write_text("import json,sys\na=sys.argv; value=lambda flag:a[a.index(flag)+1]\np=value('--output'); old=json.load(open(p))\nif a[1]=='restart-policy':\n old.setdefault('services',{}).setdefault('https',{})['restart']='unless-stopped'; json.dump(old,open(p,'w')); sys.exit()\nold['x-dst-https-origin']='https://'+value('--address')+':'+value('--port'); old['x-dst-http-internal-port']=int(value('--upstream-port')); old['x-dst-https-format']=2; json.dump(old,open(p,'w'))\n")
             self.releases.append(release)
