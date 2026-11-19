@@ -4,7 +4,7 @@ Run Dune Server Tool from a browser, with the server and management services ins
 
 DST Docker is a standalone browser application for hosting and managing Dune Awakening servers on Linux and Windows WSL. It has its own releases and installer, separate from the Windows Dune Server Tool application.
 
-## Install DST Docker 1.0.24
+## Install DST Docker 1.1.0
 
 Windows users prepare Ubuntu below, then run the Linux installation command. Native Linux users can go directly to **Linux or WSL: install**.
 
@@ -43,6 +43,8 @@ The bootstrap downloads the latest tagged source release and starts installation
 The installer walks you through missing prerequisites on supported Ubuntu/Debian hosts and asks for the Web UI port (press Enter for 8088). It installs Docker Engine inside Linux when needed; Docker Desktop is not required. If the current terminal needs `sudo` to access Docker, setup continues using it. The installer builds and starts the Web UI, prints the complete browser link, then downloads the official Linux server package. You can open the Web UI and create your Owner account while the game files download. Keep the installer terminal open until it finishes. It preserves existing Docker data and does not remove another container runtime to resolve a conflict. The installer reuses the folder already owning the DST portal, including when the command is run under a different Linux user. An explicit different folder cannot take over that portal. Existing installations retain their console port; use `--port PORT` to change it. Scripted installations can use `--non-interactive` or an explicit `--port PORT`.
 
 Fresh WSLUI imports are prepared automatically. If systemd is missing or disabled, setup installs the required Ubuntu/Debian packages, preserves existing WSL settings, and enables it. Setup asks before restarting the named distribution, then continues the same installation in a Windows setup window with its selected destination and port. Processes in that distribution stop during the restart; other distributions stay open. Imported images are also prepared to avoid an interactive first-boot setup stall. Keep the new setup window open until installation finishes.
+
+When WSL's `eth0` uses the default MTU of 1280, setup raises it to 1340 for Tailscale and reapplies the fix at startup. The change takes effect without a restart and preserves other MTU values.
 
 For unattended setup, add `--restart-wsl` to permit the restart explicitly. Without that option, `--non-interactive` prepares WSL and exits with code 75 and the exact restart/resume commands. If Windows interoperability is disabled, setup provides the same manual recovery path. Restart progress and the final result are recorded under `%LOCALAPPDATA%\DSTDocker\Setup`; a failed setup retains its private Linux resume package for retry.
 

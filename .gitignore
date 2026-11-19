@@ -72,3 +72,4 @@ https.compose.json
 
 # Persistent local host backup folder binding
 /mirror.compose.json
+/desktop-portal.port

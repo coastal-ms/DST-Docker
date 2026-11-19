@@ -19,6 +19,8 @@ On Windows, the **DST Docker** desktop icon opens a visible hosting window and t
 
 On native Linux, stop the battlegroup through the browser before running `sh bin/dst-docker down` to stop the console containers. Docker starts the console services again when the host starts; a world deliberately stopped through its normal controls stays stopped.
 
+On native Linux with a desktop, **DST Docker** opens the portal in your default browser from the applications menu or desktop icon. Use the link printed by the installer to create your first Owner account. Run `sh bin/dst-docker shortcut` from the installation if you add a desktop later or need to recreate the shortcut.
+
 ## Console address and port
 
 HTTP is the default on port8088. The installer prints addresses reachable from the Linux host. Select a different port during installation or run `sh bin/dst-docker port PORT` later. Windows WSL NAT users can access the WSL address from Windows. To use the Windows LAN address, run `packaging/docker/Enable-DstDockerLan.ps1 -ListenAddress <Windows-LAN-IP> -Port 8088` from administrator PowerShell. Rerun it if WSL receives a new address. `-WhatIf` previews changes. Other devices also need the host firewall to permit the chosen port.

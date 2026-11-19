@@ -22,6 +22,51 @@ exec(compile(CODE, str(TEMPLATE), 'exec'), module)
 
 
 class WslConfigTests(unittest.TestCase):
+    def test_installs_and_enables_the_mtu_unit_for_the_wsl_default(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            mtu = root / 'mtu'
+            mtu.write_text('1280\n')
+            unit = root / 'dst-wsl-tailscale-mtu.service'
+
+            def enable(args, **kwargs):
+                self.assertEqual(args, ['systemctl', 'enable', '--now', unit.name])
+                self.assertIn('ExecCondition=/usr/bin/grep -qx 1280', unit.read_text())
+                self.assertIn('ExecStart=/usr/sbin/ip link set dev eth0 mtu 1340', unit.read_text())
+                self.assertIn('WantedBy=multi-user.target docker.service', unit.read_text())
+                mtu.write_text('1340\n')
+
+            with patch('subprocess.run', side_effect=enable) as run:
+                module['configure_tailscale_mtu'](mtu, unit)
+                first_inode = unit.stat().st_ino
+                module['configure_tailscale_mtu'](mtu, unit)
+                self.assertEqual(run.call_count, 2)
+            self.assertEqual(unit.stat().st_ino, first_inode)
+            self.assertEqual(unit.stat().st_mode & 0o777, 0o644)
+
+    def test_leaves_custom_mtu_and_existing_unit_intact(self):
+        with tempfile.TemporaryDirectory() as folder, patch('subprocess.run') as run:
+            root = Path(folder)
+            mtu = root / 'mtu'
+            unit = root / 'dst-wsl-tailscale-mtu.service'
+            for current in ('1500', '1340'):
+                mtu.write_text(current)
+                module['configure_tailscale_mtu'](mtu, unit)
+                self.assertFalse(unit.exists())
+            mtu.write_text('1280')
+            unit.write_text('existing configuration')
+            module['configure_tailscale_mtu'](mtu, unit)
+            self.assertEqual(unit.read_text(), 'existing configuration')
+            run.assert_not_called()
+
+    def test_reports_when_the_service_leaves_the_default_mtu_in_place(self):
+        with tempfile.TemporaryDirectory() as folder, patch('subprocess.run'):
+            root = Path(folder)
+            mtu = root / 'mtu'
+            mtu.write_text('1280')
+            with self.assertRaisesRegex(ValueError, 'did not raise eth0'):
+                module['configure_tailscale_mtu'](mtu, root / 'dst-wsl-tailscale-mtu.service')
+
     def test_preserves_existing_sections_comments_crlf_bom_mode_and_backup(self):
         original = b'\xef\xbb\xbf# user settings\r\n[automount]\r\nroot=/windows/\r\n[boot]\r\ncommand=echo ready\r\nSystemd = false # user comment\r\n[interop]\r\nenabled=true\r\n'
         with tempfile.TemporaryDirectory() as folder:
@@ -205,6 +250,7 @@ class WslInstallerFlowTests(unittest.TestCase):
         result=subprocess.run(['bash',str(self.resume)],env=self.env,capture_output=True,text=True,timeout=20)
         self.assertEqual(result.returncode,0,result.stderr)
         self.assertIn('portal fixture started up --port 9292',result.stdout)
+        self.assertEqual(Path(self.env['DST_WSL_FIXTURE']).read_text().splitlines().count('tailscale-mtu'), 1)
         state=json.loads((self.prefix/'installation.json').read_text())
         self.assertEqual(state['activeSha256'],hashlib.sha256(self.payload).hexdigest())
         self.assertFalse(self.resume.parent.exists())

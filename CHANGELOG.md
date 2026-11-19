@@ -1,5 +1,12 @@
 # DST Docker changelog
 
+## [1.1.0]
+
+- Prevent Tailscale HTTPS timeouts on WSL by applying the compatible MTU during setup and at startup when the affected default is in use.
+- Show a save confirmation and return to sign-in after you change the character link on your own portal account.
+
+- Open the portal from a desktop or applications-menu shortcut on native Linux.
+
 ## [1.0.24]
 
 - Replace the picomatch dependency with the same file-pattern matcher used by DST for Windows.

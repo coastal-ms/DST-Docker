@@ -1,5 +1,7 @@
 """Display authenticated portal links for the Linux host's IP addresses."""
 import ipaddress
+import os
+from pathlib import Path
 import sys
 import socket
 from urllib.parse import urlsplit, urlunsplit
@@ -44,13 +46,22 @@ def setup_links(local_url, host_address=None):
 
 if __name__ == '__main__':
     local = sys.stdin.read()
+    port_file = os.environ.get('DST_DESKTOP_PORT_FILE')
+    origin = None
     if sys.argv[1:2] == ['--display']:
-        print(setup_links(local, primary_address()))
+        display = setup_links(local, primary_address())
     elif sys.argv[1:2] == ['--https-origin']:
         parsed = urlsplit(portal_urls(local, [])[0])
         origin = urlsplit(sys.argv[2])
         if origin.scheme != 'https' or not origin.hostname or not origin.port or origin.path or origin.query or origin.fragment or origin.username:
             raise ValueError('The HTTPS origin is invalid.')
-        print(urlunsplit(parsed._replace(scheme='https', netloc=origin.netloc)))
+        display = urlunsplit(parsed._replace(scheme='https', netloc=origin.netloc))
     else:
-        print('\n'.join(portal_urls(local, sys.argv[1:])))
+        display = '\n'.join(portal_urls(local, sys.argv[1:]))
+    if port_file:
+        from linux_desktop import remember_port
+        try:
+            remember_port(Path(port_file), origin.geturl() if origin else local.strip())
+        except OSError as error:
+            print('DST could not update the desktop shortcut address: ' + str(error), file=sys.stderr)
+    print(display)

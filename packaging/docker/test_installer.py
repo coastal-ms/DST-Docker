@@ -11,11 +11,12 @@ TEMPLATE=Path(__file__).parent.parent.parent/'bin/dst-install'
 # In the Docker test mount only this directory is provided separately.
 if not TEMPLATE.exists():TEMPLATE=Path('/installer-template')
 
-def archive(extra=None,launcher=None,updater=None):
+def archive(extra=None,launcher=None,updater=None,desktop=None):
     output=io.BytesIO()
     files={'bin/dst-docker':b'#!/bin/sh\nprintf "portal fixture started %s\\n" "$*"\n','compose.yaml':b'name: fixture\nservices: {}\n','packaging/docker/host_session.py':b'import sys;print("shortcut fixture prepared "+" ".join(sys.argv[1:]))\n','packaging/docker/Dockerfile':b'FROM scratch\n'}
     if launcher is not None:files['bin/dst-docker']=launcher
     if updater is not None:files['packaging/docker/portal_update.py']=updater
+    if desktop is not None:files['packaging/docker/linux_desktop.py']=desktop
     with tarfile.open(fileobj=output,mode='w:gz') as target:
         for name,data in files.items():
             entry=tarfile.TarInfo(name);entry.size=len(data);entry.mode=0o755 if name.startswith('bin/') else 0o644;target.addfile(entry,io.BytesIO(data))
@@ -23,6 +24,21 @@ def archive(extra=None,launcher=None,updater=None):
     return output.getvalue()
 
 class InstallerTests(unittest.TestCase):
+    def test_native_desktop_registration_runs_after_installation_activation(self):
+        desktop = b"""import sys
+from pathlib import Path
+assert sys.argv[1] == 'register'
+root = Path(sys.argv[2])
+assert (root / 'current').is_symlink()
+print('native desktop fixture registered')
+"""
+        self.bundle(archive(desktop=desktop))
+        prefix = self.root / 'desktop fixture'
+        result = self.run_installer('--prefix', str(prefix))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertLess(result.stdout.index('portal fixture started'),
+                        result.stdout.index('native desktop fixture registered'))
+
     def test_default_reuses_existing_portal_installation_after_home_changes(self):
         self.bundle()
         prefix=self.root/'original-user'/'installed'

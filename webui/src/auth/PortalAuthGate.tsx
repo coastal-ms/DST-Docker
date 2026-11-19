@@ -13,6 +13,7 @@ import {
 interface PortalAuthContextValue {
   status: PortalAuthStatus
   logout: () => Promise<void>
+  requireSignIn: (notice: string) => void
 }
 
 const PortalAuthContext = createContext<PortalAuthContextValue | null>(null)
@@ -72,7 +73,7 @@ function OwnerSetup({ onSuccess }: { onSuccess: (status: PortalAuthStatus) => vo
   </AuthFrame>
 }
 
-function Login({ onSuccess }: { onSuccess: (status: PortalAuthStatus) => void }) {
+function Login({ onSuccess, notice }: { onSuccess: (status: PortalAuthStatus) => void; notice: string }) {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [rememberMe, setRememberMe] = useState(false)
@@ -95,6 +96,7 @@ function Login({ onSuccess }: { onSuccess: (status: PortalAuthStatus) => void })
   return (
     <AuthFrame title={PRODUCT_NAME} subtitle="Sign in to the Browser Portal">
       <form id="portal-login-form" name="portal-login" autoComplete="on" onSubmit={submit} className="space-y-4">
+        {notice && <p role="status" className="text-sm text-text-muted">{notice}</p>}
         {error && <div role="alert" className="text-sm text-danger bg-danger/10 border border-danger/40 rounded-lg px-3 py-2">{error}</div>}
         <div>
           <label htmlFor="portal-username" className="block text-sm font-medium mb-1">Username</label>
@@ -198,6 +200,7 @@ function ForcedPasswordChange({ username, onSuccess }: { username: string; onSuc
 export function PortalAuthGate({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<PortalAuthStatus | null>(null)
   const [error, setError] = useState('')
+  const [signInNotice, setSignInNotice] = useState('')
 
   const refresh = async () => {
     try {
@@ -233,7 +236,10 @@ export function PortalAuthGate({ children }: { children: ReactNode }) {
       </AuthFrame>
   }
   if (!status.accountLoginEnabled) return <ServerSetupGate>{children}</ServerSetupGate>
-  if (!status.authenticated) return <Login onSuccess={setStatus} />
+  if (!status.authenticated) return <Login notice={signInNotice} onSuccess={next => {
+    setSignInNotice('')
+    setStatus(next)
+  }} />
   if (status.mustChangePassword) {
     return <ForcedPasswordChange username={status.account?.username ?? ''} onSuccess={() => void refresh()} />
   }
@@ -241,7 +247,11 @@ export function PortalAuthGate({ children }: { children: ReactNode }) {
     await logoutPortal()
     await refresh()
   }
-  return <PortalAuthContext.Provider value={{ status, logout }}>
+  const requireSignIn = (notice: string) => {
+    setSignInNotice(notice)
+    setStatus({ ...status, authenticated: false, account: null, mustChangePassword: false })
+  }
+  return <PortalAuthContext.Provider value={{ status, logout, requireSignIn }}>
     {status.account?.role === 'player'
       ? <Suspense fallback={<p role="status">Loading Player Portal…</p>}><PlayerPortal /></Suspense>
       : <ServerSetupGate canSetup={status.account?.role === 'owner'}>{children}</ServerSetupGate>}

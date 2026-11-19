@@ -2,6 +2,7 @@ import { confirmAction } from '../../util/actionConfirmation'
 import { useEffect, useState } from 'react'
 import { Icon } from '../../components/Icon'
 import { api } from '../../api/client'
+import { usePortalAuth } from '../../auth/PortalAuthGate'
 import {
   createPortalAccount,
   deletePortalAccount,
@@ -20,6 +21,7 @@ interface PlayerOption {
 }
 
 export function PortalAccountsManager({ docker = false }: { docker?: boolean } = {}) {
+  const portalAuth = usePortalAuth()
   const [state, setState] = useState<PortalAccountsState | null>(null)
   const [players, setPlayers] = useState<PlayerOption[]>([])
   const [username, setUsername] = useState('')
@@ -56,9 +58,9 @@ export function PortalAccountsManager({ docker = false }: { docker?: boolean } =
       .catch(() => setPlayers([]))
   }, [docker])
 
-  const run = async (action: () => Promise<void>) => {
+  const run = async (action: () => Promise<void>, reload = true) => {
     setBusy(true); setError(''); setMessage('')
-    try { await action(); await load() } catch (e) { setError(e instanceof Error ? e.message : String(e)) } finally { setBusy(false) }
+    try { await action(); if (reload) await load() } catch (e) { setError(e instanceof Error ? e.message : String(e)) } finally { setBusy(false) }
   }
 
   const create = () => run(async () => {
@@ -207,10 +209,15 @@ export function PortalAccountsManager({ docker = false }: { docker?: boolean } =
               onChange={event => {
                 const id = event.target.value
                 const player = players.find(item => String(item.account_id) === id)
+                const editingOwnAccount = portalAuth?.status.account?.id === account.id
                 void run(async () => {
                   await updatePortalAccount(account.id, { gameCharacterId: id, gameCharacterLabel: player?.name ?? '' })
-                  setMessage('Character link updated. Existing sessions were revoked; sign in again.')
-                })
+                  if (editingOwnAccount) {
+                    portalAuth.requireSignIn('Character link saved. Sign in again to continue.')
+                  } else {
+                    setMessage('Character link updated. Existing sessions for this account were revoked.')
+                  }
+                }, !editingOwnAccount)
               }}>
               <option value="" disabled={account.role === 'player'}>No character link</option>
               {account.gameCharacterId && !players.some(player => String(player.account_id) === account.gameCharacterId) &&
