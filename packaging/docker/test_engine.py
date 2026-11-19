@@ -21,6 +21,44 @@ class RecordingEngine(engine.Engine):
 
 
 class EngineTests(unittest.TestCase):
+    def test_backup_export_recovers_a_removed_manager_image_with_a_qualified_helper(self):
+        project = 'a' * 32
+        request = {'id': 'b' * 32, 'name': 'backup-123-12345678.dump',
+                   'sha256': 'c' * 64, 'bytes': 123}
+        class Client(engine.Engine):
+            original = None
+            fallback = {'Id': 'sha256:new', 'Config': {'Labels': {'io.dst.backup-export-helper': '2'}}}
+            created = None
+            def inspect(self, identifier):
+                return {'Image': 'sha256:old', 'Mounts': [
+                    {'Type': 'volume', 'Destination': '/control', 'Name': 'owned-control'}]}
+            def request(self, method, path, body=None, expected=None, timeout=30):
+                if path == '/volumes/dst-' + project + '-backups':
+                    return {'Labels': {'io.dst.managed': 'true', 'io.dst.project': project}}
+                if path == '/volumes/owned-control':
+                    return {'Labels': {'com.docker.compose.volume': 'dst-control'}}
+                if path == '/images/sha256%3Aold/json': return self.original
+                if path == '/images/dst-docker-manager%3Alocal/json': return self.fallback
+                if method == 'POST':
+                    self.created = body
+                    return {'Id': 'd' * 64}
+                return None
+        client = Client()
+        with patch.dict('os.environ', {'HOSTNAME': 'manager'}):
+            client.create_backup_export_job(project, request)
+            self.assertEqual(client.created['Image'], 'sha256:new')
+            client.original = {'Id': 'sha256:old'}
+            client.create_backup_export_job(project, {**request, 'name': 'backup-123-12345678.backup'})
+            self.assertEqual(client.created['Image'], 'sha256:old')
+            client.original = None
+            for fallback in (None, {'Id': 'untrusted', 'Config': {'Labels': {}}},
+                             {'Id': 'wrong-protocol', 'Config': {'Labels': {'io.dst.backup-export-helper': '1'}}}):
+                client.fallback = fallback
+                client.created = None
+                with self.assertRaisesRegex(ValueError, 'backup download helper image is unavailable'):
+                    client.create_backup_export_job(project, request)
+                self.assertIsNone(client.created)
+
     def test_game_stop_completes_after_its_full_grace_period_without_removing_storage(self):
         project='a'*32
         class Client(RecordingEngine):

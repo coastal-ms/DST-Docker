@@ -126,7 +126,7 @@ class NativeUpdate:
         image=next(tag for item in self.m.assets_state()['images'] if item['archive']=='battlegroup/server-db-utils.tar' for tag in item['tags'])
         self.e.ensure_package_image('/assets/server/images/battlegroup/server-db-utils.tar',image)
         identifier=self.e.create_migration_job(self.s['id'],image,self.s['database']['network'],self.state_volume(),self.s['database']['name'],
-            (Path('/opt/dst-manager')/'migration-job.py').read_text(),'dst-'+self.s['id']+'-backups','pre-update-schema-'+self.run['id'][:16]+'.dump',operation=self.run['id'])
+            (Path('/opt/dst-manager')/'migration-job.py').read_text(),'dst-'+self.s['id']+'-backups','pre-update-schema-'+self.run['id'][:16]+'.backup',operation=self.run['id'])
         self.phase('migrating-schema',migrationJob=identifier)
         observed=self.owned_job(identifier,'db-migrate')
         if observed['State']['Status']=='created':self.e.lifecycle(identifier,self.s['id'],'start')

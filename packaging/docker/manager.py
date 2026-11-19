@@ -228,6 +228,20 @@ def public_state(state, engine, *, observe=True):
             'restore':{key:state['restore'][key] for key in ['id','name','phase','startedAt','finishedAt'] if key in state['restore']} if state.get('restore') else None}
 
 
+def next_backup_name(state, now):
+    world = state.get('worldId', '')
+    if not re.fullmatch(r'sh-[a-z0-9][a-z0-9-]{0,52}-[a-z]{6}', world):
+        return 'backup-' + str(int(now)) + '-' + secrets.token_hex(4) + '.backup'
+    used = {row['name'] for row in state.get('backups', {}).values()}
+    second = int(now)
+    while True:
+        timestamp = time.strftime('%Y%m%d-%H%M%S', time.gmtime(second))
+        name = f'{world}-{timestamp}.backup'
+        if name not in used:
+            return name
+        second += 1
+
+
 def start_backup(state,engine,backup_id=None,scheduled_resume=None):
     if state['phase']!='database-ready':raise ValueError('Prepare the game schema before creating backups.')
     for identifier,entry in state.get('backups',{}).items():
@@ -255,7 +269,8 @@ def start_backup(state,engine,backup_id=None,scheduled_resume=None):
         backup_id=scheduled_resume;mode='create';record=entry
     elif backup_id is None:
         backup_id=uuid.uuid4().hex
-        entry={'phase':'preparing','createdAt':time.time(),'name':'backup-'+str(int(time.time()))+'-'+secrets.token_hex(4)+'.dump'}
+        created_at = time.time()
+        entry={'phase':'preparing','createdAt':created_at,'name':next_backup_name(state, created_at)}
         if state.get('scheduledBackup',{}).get('phase')=='dispatching':
             entry['scheduledSlot']=state['scheduledBackup']['slot']
             entry['requestId']=state['scheduledBackup']['requestId']
@@ -344,7 +359,7 @@ def start_backup_export(state,engine,backup_id):
     directory.mkdir(mode=0o750,parents=True,exist_ok=True);directory.chmod(0o750);os.chown(directory,-1,10001)
     if shutil.disk_usage(directory).free<entry['bytes']+512*1024**2:raise ValueError('Backup export needs space for a temporary copy plus512 MiB free.')
     active={row['export']['id'] for row in state.get('backups',{}).values() if row.get('export',{}).get('phase') in {'preparing','running'}}
-    previous=sorted((path for path in directory.glob('*.dump') if re.fullmatch(r'[a-f0-9]{32}',path.stem) and not path.is_symlink() and path.stem not in active),key=lambda path:path.stat().st_mtime,reverse=True)
+    previous=sorted((path for path in directory.iterdir() if path.suffix in {'.backup','.dump'} and re.fullmatch(r'[a-f0-9]{32}',path.stem) and not path.is_symlink() and path.stem not in active),key=lambda path:path.stat().st_mtime,reverse=True)
     for old in previous[2:]:old.unlink()
     record=entry.get('export')
     if not record or record['phase'] not in {'preparing','running'}:
@@ -382,7 +397,7 @@ def start_backup_import(state,engine,request):
     engine.ensure_package_image('/assets/server/images/battlegroup/server-db-utils.tar',tags[0])
     if entry is None:
         entry={'source':'import','uploadId':upload,'sha256':request['sha256'],'bytes':request['bytes'],
-               'phase':'preparing','createdAt':time.time(),'name':'backup-'+str(int(time.time()))+'-'+secrets.token_hex(4)+'.dump'}
+               'phase':'preparing','createdAt':time.time(),'name':'backup-'+str(int(time.time()))+'-'+secrets.token_hex(4)+'.backup'}
         if original_filename:entry['originalFilename']=original_filename
         entries[upload]=entry;save(state)
     payload={key:entry[key] for key in ('uploadId','name','sha256','bytes')}
@@ -499,7 +514,7 @@ def recover_scheduled_backup(state,engine):
         observed=engine.assert_owned(jobs[0]['id'],state['id'],'db-backup')
         values=dict(value.split('=',1) for value in observed.get('Config',{}).get('Env',[]) if '=' in value)
         name=values.get('DST_BACKUP_NAME','')
-        if values.get('DST_BACKUP_MODE')!='create' or not re.fullmatch(r'backup-[0-9]+-[a-f0-9]{8}\.dump',name):raise ValueError('The existing helper does not match the saved backup operation.')
+        if values.get('DST_BACKUP_MODE')!='create' or not re.fullmatch(r'(?:backup-[0-9]+-[a-f0-9]{8}\.(?:backup|dump)|sh-[a-z0-9][a-z0-9-]{0,52}-[a-z]{6}-[0-9]{8}-[0-9]{6}\.backup)',name):raise ValueError('The existing helper does not match the saved backup operation.')
         identifier=uuid.uuid4().hex
         state.setdefault('backups',{})[identifier]={'phase':'preparing','name':name,'createdAt':jobs[0]['createdAt'],
             'scheduledSlot':run['slot'],'requestId':run['requestId'],'job':jobs[0]['id']}
@@ -528,7 +543,7 @@ def restore_backup(state,engine,backup_id,confirmation,keep_maintenance=False):
     own=engine.inspect(os.environ['HOSTNAME'])
     volume=next(mount['Name'] for mount in own['Mounts'] if mount.get('Destination')=='/projects' and mount.get('Type')=='volume')
     operation=uuid.uuid4().hex;resume=state.get('desiredState')=='running'
-    before='backup-'+str(int(time.time()))+'-'+secrets.token_hex(4)+'.dump'
+    before=next_backup_name(state, time.time())
     record={'id':operation,'backupId':backup_id,'name':backup['name'],'phase':'stopping','resume':resume,'startedAt':time.time(),
             'beforeName':before,'image':image,'stateVolume':volume,'keepMaintenance':keep_maintenance}
     state['restore']=record;save(state)
@@ -1692,7 +1707,7 @@ def migrate_database(state,engine):
     self_container=engine.inspect(os.environ['HOSTNAME'])
     mounts=[mount for mount in self_container.get('Mounts',[]) if mount.get('Destination')=='/projects' and mount.get('Type')=='volume']
     if len(mounts)!=1: raise ValueError('Private project storage could not be identified.')
-    backup_name='pre-migration-'+str(int(time.time()))+'-'+secrets.token_hex(4)+'.dump'
+    backup_name='pre-migration-'+str(int(time.time()))+'-'+secrets.token_hex(4)+'.backup'
     if state.get('migration'):
         state.setdefault('migrationHistory',[]).append(state['migration'])
     state['phase']='database-migration-preparing'; save(state)
@@ -1823,6 +1838,15 @@ def dispatch(request, engine=None, *, resume_running_only=False):
     engine = engine or Engine()
     action = request.get('action')
     if action=='maps.floor':return set_manual_map_floor(project_state(),engine,request.get('map'),request.get('enabled'))
+    if action == 'backups.export.filename':
+        export_id = request.get('id')
+        if not isinstance(export_id, str) or not re.fullmatch(r'[a-f0-9]{32}', export_id):
+            raise ValueError('Backup export not found.')
+        for entry in project_state().get('backups', {}).values():
+            export = entry.get('export', {})
+            if entry['phase'] == 'completed' and export.get('id') == export_id and export.get('phase') == 'completed':
+                return {'filename': re.sub(r'\.dump$', '.backup', entry['name'])}
+        raise ValueError('This prepared download is unavailable or expired. Prepare it again from Database.')
     if action in {'status','maps.management'}:
         # Read the atomically saved state without waiting behind director I/O.
         # Job transitions are observed only by the request owning the lock.

@@ -45,7 +45,7 @@ function Invoke-DuneDockerSafetyBackup {
             $record=$backup[0]
             if($record.phase -eq 'failed'){return @{ok=$false;error='The fresh safety backup failed verification.'}}
             if($record.phase -eq 'completed'){
-                if($record.name -notmatch '^backup-[0-9]+-[a-f0-9]{8}\.dump$' -or [long]$record.bytes -le 1024 -or $record.sha256 -notmatch '^[a-f0-9]{64}$'){
+                if($record.name -notmatch '^(?:backup-[0-9]+-[a-f0-9]{8}\.(?:backup|dump)|sh-[a-z0-9][a-z0-9-]{0,52}-[a-z]{6}-[0-9]{8}-[0-9]{6}\.backup)$' -or [long]$record.bytes -le 1024 -or $record.sha256 -notmatch '^[a-f0-9]{64}$'){
                     return @{ok=$false;error='The fresh safety backup has no verified archive proof.'}
                 }
                 $current=Get-DuneDockerHostScope

@@ -79,11 +79,11 @@ class StorageTests(unittest.TestCase):
         request={**self.row,'id':'a'*32,'bytes':len(b'original-owned-backup')}
         result=backup_storage.export(self.root,output,request)
         self.assertEqual(result['sha256'],self.row['sha256'])
-        self.assertEqual((output/('a'*32+'.dump')).read_bytes(),b'original-owned-backup')
-        self.assertEqual((output/('a'*32+'.dump')).stat().st_mode&0o777,0o644)
+        self.assertEqual((output/('a'*32+'.backup')).read_bytes(),b'original-owned-backup')
+        self.assertEqual((output/('a'*32+'.backup')).stat().st_mode&0o777,0o644)
         self.assertEqual((self.root/self.name).read_bytes(),b'original-owned-backup')
         with self.assertRaises(ValueError):backup_storage.export(self.root,output,{**request,'id':'b'*32,'sha256':'c'*64})
-        self.assertFalse((output/('b'*32+'.dump')).exists())
+        self.assertFalse((output/('b'*32+'.backup')).exists())
         self.assertFalse((output/('b'*32+'.partial')).exists())
 
 
@@ -115,6 +115,59 @@ class WorkerTests(unittest.TestCase):
         value={'id':'a'*32,'phase':'database-ready','database':{'id':'owned-db'},'backups':{}}
         policy.configure(value,{'preset':'Hourly','keepLast':8},at('2026-11-09T08:00:01'))
         return value
+
+    def test_scheduled_and_manual_backups_use_the_same_creation_job_and_filename(self):
+        now = at('2026-11-09T09:01:00')
+        args_by_source = []
+        for scheduled in (False, True):
+            state = self.state()
+            state['worldId'] = 'sh-coastal-abcdef'
+            state['database']['network'] = 'owned-network'
+            engine = Mock(spec=manager.Engine)
+            engine.assert_owned.side_effect = lambda _, __, component: {
+                'State': {'Status': 'running', 'Health': {'Status': 'healthy'}}
+                if component == 'postgres' else {'Status': 'created'}}
+            engine.inspect.return_value = {'Mounts': [{'Destination': '/projects', 'Type': 'volume', 'Name': 'project-state'}]}
+            engine.create_backup_job.return_value = 'owned-job'
+            assets = {'images': [{'archive': 'battlegroup/server-db-utils.tar', 'tags': ['fixture']}]}
+            with (patch.dict(manager.os.environ, {'HOSTNAME': 'manager'}),
+                  patch.object(manager, 'project_state', return_value=state), patch.object(manager, 'save'),
+                  patch.object(manager, 'assets_state', return_value=assets), patch.object(manager, 'public_state'),
+                  patch.object(manager.Path, 'read_text', return_value='backup helper'),
+                  patch.object(manager.time, 'time', return_value=now)):
+                if scheduled:
+                    manager.backup_schedule_tick(engine, now)
+                else:
+                    manager.start_backup(state, engine)
+            entry, = state['backups'].values()
+            self.assertEqual(entry['name'], 'sh-coastal-abcdef-20261109-090100.backup')
+            self.assertEqual('scheduledSlot' in entry, scheduled)
+            args_by_source.append(engine.create_backup_job.call_args.args)
+            engine.lifecycle.assert_called_once_with('owned-job', state['id'], 'start')
+        self.assertEqual(*args_by_source)
+
+    def test_restore_safety_backup_uses_the_same_filename_format(self):
+        state = self.state()
+        state['worldId'] = 'sh-coastal-abcdef'
+        state['database']['network'] = 'owned-network'
+        backup_id = 'b' * 32
+        state['backups'][backup_id] = {
+            'phase': 'completed', 'name': 'backup-123-abcdef12.dump', 'sha256': 'a' * 64,
+            'verification': {'phase': 'completed', 'restored': dict.fromkeys(
+                ('duneTables', 'duneViews', 'partitions', 'players'), 1)},
+        }
+        engine = Mock(spec=manager.Engine)
+        engine.inspect.return_value = {'Mounts': [{'Destination': '/projects', 'Type': 'volume', 'Name': 'project-state'}]}
+        assets = {'images': [{'archive': 'battlegroup/server-db-utils.tar', 'tags': ['fixture']}]}
+        with (patch.dict(manager.os.environ, {'HOSTNAME': 'manager'}), patch.object(manager, 'save'),
+              patch.object(manager, 'assets_state', return_value=assets), patch.object(manager, 'atomic'),
+              patch.object(manager, 'stop_services'), patch.object(manager, 'finish_restore'),
+              patch.object(manager.Path, 'read_text', return_value='restore helper'),
+              patch.object(manager.time, 'time', return_value=at('2026-11-09T09:01:00'))):
+            manager.restore_backup(state, engine, backup_id, 'RESTORE')
+        name = 'sh-coastal-abcdef-20261109-090100.backup'
+        self.assertEqual(state['restore']['beforeName'], name)
+        self.assertEqual(engine.create_restore_job.call_args.args[-2], name)
 
     def test_stopped_database_does_not_start_any_container_or_consume_the_slot(self):
         state=self.state();engine=Mock(spec=manager.Engine)

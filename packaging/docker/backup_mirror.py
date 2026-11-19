@@ -8,7 +8,7 @@ def copy_backups(source,destination,request):
         raise ValueError('Choose a bounded mirror batch from this world.')
     seen=set()
     for row in request['files']:
-        if (not isinstance(row,dict) or not re.fullmatch(r'backup-[0-9]+-[a-f0-9]{8}\.dump',str(row.get('name',''))) or
+        if (not isinstance(row,dict) or not re.fullmatch(r'(?:backup-[0-9]+-[a-f0-9]{8}\.(?:backup|dump)|sh-[a-z0-9][a-z0-9-]{0,52}-[a-z]{6}-[0-9]{8}-[0-9]{6}\.backup)',str(row.get('name',''))) or
             not re.fullmatch(r'[a-f0-9]{64}',str(row.get('sha256',''))) or type(row.get('bytes')) is not int or row['bytes']<=0 or row['name'] in seen):
             raise ValueError('Mirror entries must match recorded native backups.')
         seen.add(row['name'])

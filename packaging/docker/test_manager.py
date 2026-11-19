@@ -19,6 +19,24 @@ class FakeEngine:
 
 
 class ManagerTests(unittest.TestCase):
+    def test_backup_names_preserve_the_world_and_download_identity(self):
+        world = 'sh-coastal-abcdef'
+        first_name = world + '-20260101-000000.backup'
+        state = {'worldId': world, 'backups': {}}
+        self.assertEqual(manager.next_backup_name(state, 1767225600), first_name)
+        for name in (first_name, 'backup-12345678-abcdef12.dump'):
+            state['backups']['one'] = {'name': name, 'phase': 'completed',
+                                       'export': {'id': 'a' * 32, 'phase': 'completed'}}
+            with patch.object(manager, 'project_state', return_value=state):
+                result = manager.dispatch({'action': 'backups.export.filename', 'id': 'a' * 32})
+                self.assertEqual(result['filename'], name.removesuffix('.dump') + '.backup'
+                                 if name.endswith('.dump') else name)
+                with self.assertRaises(ValueError):
+                    manager.dispatch({'action': 'backups.export.filename', 'id': 'b' * 32})
+            if name == first_name:
+                self.assertEqual(manager.next_backup_name(state, 1767225600),
+                                 world + '-20260101-000001.backup')
+
     def test_portal_update_reservation_blocks_world_changes_until_matching_release(self):
         state={'id':'a'*32,'desiredState':'stopped'}
         with patch.object(manager,'project_state',return_value=state),patch.object(manager,'save'),patch.object(manager,'public_state',return_value={'services':[],'backups':[]}):

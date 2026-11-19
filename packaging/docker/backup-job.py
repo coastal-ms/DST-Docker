@@ -28,7 +28,7 @@ def main():
     result={'ok':False,'startedAt':time.time()}
     try:
         mode=os.environ['DST_BACKUP_MODE'];name=os.environ['DST_BACKUP_NAME']
-        if mode not in {'create','verify'} or not re.fullmatch(r'backup-[0-9]+-[a-f0-9]{8}\.dump',name):
+        if mode not in {'create','verify'} or not re.fullmatch(r'(?:backup-[0-9]+-[a-f0-9]{8}\.(?:backup|dump)|sh-[a-z0-9][a-z0-9-]{0,52}-[a-z]{6}-[0-9]{8}-[0-9]{6}\.backup)',name):
             raise ValueError('Invalid owned backup job.')
         host=os.environ['DST_DATABASE_HOST']
         if not re.fullmatch(r'dst-[a-f0-9]{32}-postgres',host):raise ValueError('Invalid owned database.')

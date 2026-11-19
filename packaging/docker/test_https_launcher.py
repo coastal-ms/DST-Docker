@@ -62,6 +62,21 @@ class HttpsLauncherTests(unittest.TestCase):
         self.assertEqual(len(forced),1)
         self.assertTrue(forced[0].endswith('up --no-build -d --no-deps --force-recreate dst'))
 
+    def test_upgrade_waits_for_the_manager_before_opening_the_portal(self):
+        self.override.unlink()
+        docker = Path(self.env['PATH'].split(':')[0]) / 'docker'
+        fake = docker.read_text()
+        probe = '*"exec -T manager"*)\n  if [ ! -f "$DST_FIXTURE_DOCKER_LOG.ready" ]; then\n    touch "$DST_FIXTURE_DOCKER_LOG.ready"\n    exit 1\n  fi;; '
+        docker.write_text(fake.replace('case "$*" in ', 'case "$*" in ' + probe))
+        result = self.run_launcher('up')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = self.log.read_text().splitlines()
+        start = next(i for i, call in enumerate(calls) if call.endswith('up --no-build -d --no-deps manager'))
+        probes = [i for i, call in enumerate(calls) if 'exec -T manager python3 -c' in call]
+        portal = next(i for i, call in enumerate(calls) if call.endswith('up --no-build -d'))
+        self.assertEqual(len(probes), 2)
+        self.assertTrue(start < probes[0] < probes[1] < portal)
+
     def test_owner_reset_requires_confirmation_and_preserves_the_exact_username_argument(self):
         docker=Path(self.env['PATH'].split(':')[0])/'docker'
         docker.write_text('#!/usr/bin/env python3\nimport json,os,sys\nwith open(os.environ["DST_FIXTURE_DOCKER_LOG"],"a") as stream:stream.write(json.dumps(sys.argv[1:])+"\\n")\n');docker.chmod(0o755)

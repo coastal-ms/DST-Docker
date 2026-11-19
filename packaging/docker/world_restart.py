@@ -4,7 +4,7 @@ No volume deletion. Recovery keeps game access fenced until the exact recorded
 database operation is resolved. A published world is never automatically reset
 back over possible new gameplay.
 """
-import json,secrets,time,uuid
+import json,time,uuid
 from pathlib import Path
 from world_update import NativeUpdate
 from world_template import read_template,fresh_partition_sql
@@ -46,7 +46,7 @@ class NativeWorldRestart(NativeUpdate):
     def fresh_archive(self):
         if not self.run.get('freshOperation'):
             self.phase('preparing-fresh-schema',freshOperation=uuid.uuid4().hex,
-                       freshName='backup-'+str(int(time.time()))+'-'+secrets.token_hex(4)+'.dump',freshBackupId=uuid.uuid4().hex)
+                       freshName=self.m.next_backup_name(self.s,time.time()),freshBackupId=uuid.uuid4().hex)
         image=next(tag for item in self.m.assets_state()['images'] if item['archive']=='battlegroup/server-db-utils.tar' for tag in item['tags'])
         template=read_template()
         if template['sha256']!=self.run['templateSha256']:raise ValueError('The installed official template changed during World Restart.')

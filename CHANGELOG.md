@@ -1,5 +1,11 @@
 # DST Docker changelog
 
+## [1.1.1]
+
+- Restore database backup downloads after Docker image-cache cleanup.
+- Name new database backups with the battlegroup identifier and UTC timestamp, and preserve the identifying name when downloading the .backup file.
+- Start the Docker manager before opening the portal after an install or upgrade.
+
 ## [1.1.0]
 
 - Prevent Tailscale HTTPS timeouts on WSL by applying the compatible MTU during setup and at startup when the affected default is in use.

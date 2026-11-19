@@ -21,7 +21,7 @@ def main():
     try:
         operation=os.environ['DST_OPERATION_ID'];host=os.environ['DST_DATABASE_HOST'];name=os.environ['DST_BACKUP_NAME']
         if not re.fullmatch(r'[a-f0-9]{32}',operation) or not re.fullmatch(r'dst-[a-f0-9]{32}-postgres',host):raise ValueError('Invalid owned fresh-world identity.')
-        if not re.fullmatch(r'backup-[0-9]+-[a-f0-9]{8}\.dump',name):raise ValueError('Invalid fresh-world archive name.')
+        if not re.fullmatch(r'(?:backup-[0-9]+-[a-f0-9]{8}\.(?:backup|dump)|sh-[a-z0-9][a-z0-9-]{0,52}-[a-z]{6}-[0-9]{8}-[0-9]{6}\.backup)',name):raise ValueError('Invalid fresh-world archive name.')
         stage='dst_fresh_'+operation[:24]
         result.update(operationId=operation,name=name,stagingDatabase=stage)
         admin=Path('/run/dst/postgres-admin.password').read_text();password=Path('/run/dst/dune-app.password').read_text()

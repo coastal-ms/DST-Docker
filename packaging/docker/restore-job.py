@@ -87,7 +87,7 @@ def main():
             raise ValueError('Invalid restore database scope.')
         if mode not in {'restore','recover'} or fault not in {'','before-promotion','after-promotion','kill-after-promotion'} or fault and not qualification:
             raise ValueError('Invalid internal restore mode.')
-        if not all(re.fullmatch(r'backup-[0-9]+-[a-f0-9]{8}\.dump',value) for value in [name,before]):raise ValueError('Invalid owned backup name.')
+        if not all(re.fullmatch(r'(?:backup-[0-9]+-[a-f0-9]{8}\.(?:backup|dump)|sh-[a-z0-9][a-z0-9-]{0,52}-[a-z]{6}-[0-9]{8}-[0-9]{6}\.backup)',value) for value in [name,before]):raise ValueError('Invalid owned backup name.')
         if not re.fullmatch(r'[a-f0-9]{64}',expected):raise ValueError('Invalid backup checksum.')
         host=os.environ['DST_DATABASE_HOST']
         if host!='dst-'+project+'-postgres':raise ValueError('Restore database is outside this installation.')

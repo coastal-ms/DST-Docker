@@ -1,5 +1,5 @@
 FROM python:3.13-slim-bookworm
-LABEL io.dst.asset-activator="true" io.dst.backup-mirror-helper="1"
+LABEL io.dst.asset-activator="true" io.dst.backup-mirror-helper="1" io.dst.backup-export-helper="2" io.dst.backup-mirror-filenames="2"
 RUN apt-get update && apt-get install -y --no-install-recommends openssl && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir PyYAML==6.0.3
 RUN groupadd --gid 10001 dst && mkdir -p /control /projects && chgrp dst /control && chmod 750 /control
