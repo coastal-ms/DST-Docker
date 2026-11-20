@@ -165,10 +165,18 @@ Register-DuneRoute -Method GET -Path '/api/docker/backup-exports/{id}' -Handler 
     if($env:DST_HOSTING_BACKEND -ne 'docker' -or $id -cnotmatch '^[a-f0-9]{32}$'){
         Write-DuneError -Response $res -Status 404 -Message 'Backup export not found.';return
     }
-    $path=Join-Path '/control/backup-exports' ($id+'.dump')
+    $path=Join-Path '/control/backup-exports' ($id+'.backup')
+    if(-not (Get-Item -LiteralPath $path -ErrorAction SilentlyContinue)){
+        $path=Join-Path '/control/backup-exports' ($id+'.dump')
+    }
     $file=Get-Item -LiteralPath $path -ErrorAction SilentlyContinue
     if(-not $file -or $file.PSIsContainer -or $file.LinkType){Write-DuneError -Response $res -Status 404 -Message 'This prepared download is unavailable or expired. Prepare it again from Database.';return}
-    $res.Headers['Content-Disposition']='attachment; filename="DST-backup.dump"'
+    $metadata=Invoke-DuneDockerManager -Request @{action='backups.export.filename';id=$id}
+    $filename=[string]$metadata.data.filename
+    if(-not $metadata.ok -or $filename -cnotmatch '^(?:backup-[0-9]+-[a-f0-9]{8}|sh-[a-z0-9][a-z0-9-]{0,52}-[a-z]{6}-[0-9]{8}-[0-9]{6})\.backup$'){
+        Write-DuneError -Response $res -Status 404 -Message 'This prepared download is unavailable or expired. Prepare it again from Database.';return
+    }
+    $res.Headers['Content-Disposition']='attachment; filename="' + $filename + '"'
     $res.Headers['X-Content-Type-Options']='nosniff'
     Write-DuneFile -Response $res -Path $path
 }

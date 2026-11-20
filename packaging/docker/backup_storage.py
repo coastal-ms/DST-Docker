@@ -7,7 +7,7 @@ import re
 import stat
 import time
 
-NAME = re.compile(r'backup-[0-9]+-[a-f0-9]{8}\.dump\Z')
+NAME = re.compile(r'(?:backup-[0-9]+-[a-f0-9]{8}\.(?:backup|dump)|sh-[a-z0-9][a-z0-9-]{0,52}-[a-z]{6}-[0-9]{8}-[0-9]{6}\.backup)\Z')
 
 
 def export(root,directory,request):
@@ -17,7 +17,7 @@ def export(root,directory,request):
         raise ValueError('Choose a recorded backup export.')
     source=os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
     output=os.open(directory,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
-    fd=None;temporary=request['id']+'.partial';destination=request['id']+'.dump'
+    fd=None;temporary=request['id']+'.partial';destination=request['id']+'.backup'
     try:
         fd=os.open(request['name'],os.O_RDONLY|os.O_NOFOLLOW,dir_fd=source)
         info=os.fstat(fd)

@@ -12,7 +12,7 @@ import time
 
 def import_file(source,destination,request):
     if (not isinstance(request,dict) or not re.fullmatch(r'[a-f0-9]{32}',str(request.get('uploadId',''))) or
-        not re.fullmatch(r'backup-[0-9]+-[a-f0-9]{8}\.dump',str(request.get('name',''))) or
+        not re.fullmatch(r'(?:backup-[0-9]+-[a-f0-9]{8}\.(?:backup|dump)|sh-[a-z0-9][a-z0-9-]{0,52}-[a-z]{6}-[0-9]{8}-[0-9]{6}\.backup)',str(request.get('name',''))) or
         not re.fullmatch(r'[a-f0-9]{64}',str(request.get('sha256',''))) or
         type(request.get('bytes')) is not int or not 5<=request['bytes']<=25*1024**3):
         raise ValueError('Choose a bounded PostgreSQL backup upload.')

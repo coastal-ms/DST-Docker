@@ -232,7 +232,7 @@ class Engine:
             raise ValueError('Invalid restore target scope.')
         if mode not in {'restore','recover'} or fault not in {'','before-promotion','after-promotion','kill-after-promotion'} or fault and not qualification:
             raise ValueError('Invalid internal restore mode.')
-        if not all(isinstance(value,str) and re.fullmatch(r'backup-[0-9]+-[a-f0-9]{8}\.dump',value) for value in [name,before_name]):
+        if not all(isinstance(value,str) and re.fullmatch(r'(?:backup-[0-9]+-[a-f0-9]{8}\.(?:backup|dump)|sh-[a-z0-9][a-z0-9-]{0,52}-[a-z]{6}-[0-9]{8}-[0-9]{6}\.backup)',value) for value in [name,before_name]):
             raise ValueError('Invalid restore backup name.')
         if not isinstance(expected_sha,str) or not re.fullmatch(r'[a-f0-9]{64}',expected_sha):raise ValueError('Invalid restore checksum.')
         if not isinstance(expected_counts,dict) or set(expected_counts)!={'duneTables','duneViews','partitions','players'} or any(type(value) is not int or value<0 for value in expected_counts.values()):
@@ -297,7 +297,7 @@ class Engine:
         if not re.fullmatch(r'registry\.funcom\.com/funcom/self-hosting/seabass-server-db-utils:[A-Za-z0-9_.-]+',image):
             raise ValueError('Backup tools must come from the official package.')
         if network!='dst-'+project+'-network' or backup_volume!='dst-'+project+'-backups':raise ValueError('Invalid backup storage.')
-        if not re.fullmatch(r'backup-[0-9]+-[a-f0-9]{8}\.dump',name):raise ValueError('Invalid backup name.')
+        if not re.fullmatch(r'(?:backup-[0-9]+-[a-f0-9]{8}\.(?:backup|dump)|sh-[a-z0-9][a-z0-9-]{0,52}-[a-z]{6}-[0-9]{8}-[0-9]{6}\.backup)',name):raise ValueError('Invalid backup name.')
         if type(retain_database) is not bool or (retain_database and mode!='verify'):
             raise ValueError('A retained database requires an internal restore qualification job.')
         if request_id is not None and (mode!='create' or not isinstance(request_id,str) or not re.fullmatch(r'[a-f0-9]{32}',request_id)):
@@ -344,7 +344,7 @@ class Engine:
         if not re.fullmatch(r'[a-f0-9]{32}',project) or not isinstance(request_id,str) or not re.fullmatch(r'[a-f0-9]{32}',request_id) or not isinstance(files,list) or not 1<=len(files)<=100:
             raise ValueError('Invalid backup cleanup request.')
         for row in files:
-            if not isinstance(row,dict) or not re.fullmatch(r'backup-[0-9]+-[a-f0-9]{8}\.dump',str(row.get('name',''))) or not re.fullmatch(r'[a-f0-9]{64}',str(row.get('sha256',''))):
+            if not isinstance(row,dict) or not re.fullmatch(r'(?:backup-[0-9]+-[a-f0-9]{8}\.(?:backup|dump)|sh-[a-z0-9][a-z0-9-]{0,52}-[a-z]{6}-[0-9]{8}-[0-9]{6}\.backup)',str(row.get('name',''))) or not re.fullmatch(r'[a-f0-9]{64}',str(row.get('sha256',''))):
                 raise ValueError('Choose recorded backup files and checksums.')
         volume='dst-'+project+'-backups'
         labels=self.request('GET','/volumes/'+volume).get('Labels') or {}
@@ -384,7 +384,7 @@ class Engine:
     def create_backup_export_job(self,project,request):
         if (not re.fullmatch(r'[a-f0-9]{32}',project) or not isinstance(request,dict) or
             not re.fullmatch(r'[a-f0-9]{32}',str(request.get('id',''))) or
-            not re.fullmatch(r'backup-[0-9]+-[a-f0-9]{8}\.dump',str(request.get('name',''))) or
+            not re.fullmatch(r'(?:backup-[0-9]+-[a-f0-9]{8}\.(?:backup|dump)|sh-[a-z0-9][a-z0-9-]{0,52}-[a-z]{6}-[0-9]{8}-[0-9]{6}\.backup)',str(request.get('name',''))) or
             not re.fullmatch(r'[a-f0-9]{64}',str(request.get('sha256',''))) or
             type(request.get('bytes')) is not int or request['bytes']<=0):
             raise ValueError('Choose a recorded completed backup export.')
@@ -411,8 +411,13 @@ class Engine:
             return found['Id']
         found=existing()
         if found:return found
+        image=self.request('GET','/images/'+quote(own['Image'],safe='')+'/json',expected=(200,404))
+        if not image:
+            image=self.request('GET','/images/dst-docker-manager%3Alocal/json',expected=(200,404))
+            if not image or (image.get('Config',{}).get('Labels') or {}).get('io.dst.backup-export-helper')!='2':
+                raise ValueError('The backup download helper image is unavailable. Rerun the DST Docker installer in the same folder, then retry the download.')
         try:return self.request('POST','/containers/create?name='+name,{
-            'Image':own['Image'],'User':'0:0','Entrypoint':['python3'],'Cmd':['-B','/opt/dst-manager/backup_storage.py'],
+            'Image':image['Id'],'User':'0:0','Entrypoint':['python3'],'Cmd':['-B','/opt/dst-manager/backup_storage.py'],
             'Env':['DST_BACKUP_EXPORT='+payload],
             'Labels':{'io.dst.managed':'true','io.dst.project':project,'io.dst.component':'db-export'},
             'HostConfig':{'NetworkMode':'none','CapDrop':['ALL'],'SecurityOpt':['no-new-privileges:true'],
@@ -429,7 +434,7 @@ class Engine:
         if (not re.fullmatch(r'[a-f0-9]{32}',project) or
             not re.fullmatch(r'registry\.funcom\.com/funcom/self-hosting/seabass-server-db-utils:[A-Za-z0-9_.-]+',image) or
             not isinstance(request,dict) or not re.fullmatch(r'[a-f0-9]{32}',str(request.get('uploadId',''))) or
-            not re.fullmatch(r'backup-[0-9]+-[a-f0-9]{8}\.dump',str(request.get('name',''))) or
+            not re.fullmatch(r'(?:backup-[0-9]+-[a-f0-9]{8}\.(?:backup|dump)|sh-[a-z0-9][a-z0-9-]{0,52}-[a-z]{6}-[0-9]{8}-[0-9]{6}\.backup)',str(request.get('name',''))) or
             not re.fullmatch(r'[a-f0-9]{64}',str(request.get('sha256',''))) or type(request.get('bytes')) is not int or not 5<=request['bytes']<=25*1024**3):
             raise ValueError('Choose a bounded, owned PostgreSQL backup import.')
         own=self.inspect(os.environ['HOSTNAME']);compose=(own.get('Config',{}).get('Labels') or {}).get('com.docker.compose.project','')

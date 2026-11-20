@@ -86,6 +86,20 @@ start_https() {
 set_port() {
   compose run --rm --no-deps --entrypoint pwsh dst -NoLogo -NoProfile -File /opt/dst/packaging/docker/set-console-port.ps1 -Port "$task_port"
 }
+wait_manager() {
+  task_attempt=0
+  while [ "$task_attempt" -lt 30 ]; do
+    if compose exec -T manager python3 -c 'import socket
+with socket.socket(socket.AF_UNIX) as connection:
+    connection.settimeout(1)
+    connection.connect("/control/manager.sock")' >/dev/null 2>&1; then
+      return 0
+    fi
+    task_attempt=$((task_attempt + 1)); sleep 1
+  done
+  echo 'The Docker manager did not become ready. Inspect: sh bin/dst-docker logs' >&2
+  return 1
+}
 wait_portal() {
   task_attempt=0
   while [ "$task_attempt" -lt 30 ]; do
@@ -129,6 +143,9 @@ case "${1:-up}" in
       fi
       set_port
     fi
+    # Complete the manager startup before publishing the portal address.
+    compose up --no-build -d --no-deps manager
+    wait_manager
     compose up --no-build -d
     if [ "${DST_PORTAL_REDEPLOY:-0}" = 1 ]; then
       compose up --no-build -d --no-deps --force-recreate dst

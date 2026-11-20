@@ -23,7 +23,7 @@ def create(engine,project,request):
         not re.fullmatch(r'[a-f0-9]{32}',str(request.get('id',''))) or type(request.get('attempt')) is not int or not 0<=request['attempt']<=100 or
         not isinstance(request.get('files'),list) or not 1<=len(request['files'])<=100):raise ValueError('Choose a bounded backup mirror batch.')
     for row in request['files']:
-        if (not isinstance(row,dict) or not re.fullmatch(r'backup-[0-9]+-[a-f0-9]{8}\.dump',str(row.get('name',''))) or
+        if (not isinstance(row,dict) or not re.fullmatch(r'(?:backup-[0-9]+-[a-f0-9]{8}\.(?:backup|dump)|sh-[a-z0-9][a-z0-9-]{0,52}-[a-z]{6}-[0-9]{8}-[0-9]{6}\.backup)',str(row.get('name',''))) or
             not re.fullmatch(r'[a-f0-9]{64}',str(row.get('sha256',''))) or type(row.get('bytes')) is not int or row['bytes']<=0):
             raise ValueError('Mirror entries must be recorded native backups.')
     target=destination(engine)
@@ -51,7 +51,9 @@ def create(engine,project,request):
     image=engine.request('GET','/images/'+quote(target['image'],safe='')+'/json',expected=(200,404))
     if not image:
         image=engine.request('GET','/images/dst-docker-manager%3Alocal/json',expected=(200,404))
-        if not image or (image.get('Config',{}).get('Labels') or {}).get('io.dst.backup-mirror-helper')!='1':
+        labels=(image or {}).get('Config',{}).get('Labels') or {}
+        needs_new_names=any(row['name'].endswith('.backup') for row in request['files'])
+        if labels.get('io.dst.backup-mirror-helper')!='1' or (needs_new_names and labels.get('io.dst.backup-mirror-filenames')!='2'):
             raise ValueError('The mirror helper image is unavailable. Rerun the DST Docker installer in the same folder to rebuild it, then retry this batch.')
     try:return engine.request('POST','/containers/create?name='+name,{
         'Image':image['Id'],'User':'0:0','Entrypoint':['python3'],'Cmd':['-B','/opt/dst-manager/backup_mirror.py'],

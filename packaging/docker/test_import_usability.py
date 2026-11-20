@@ -48,7 +48,7 @@ class ImportUsabilityTests(unittest.TestCase):
             manager.start_backup_import(state,worker,request)
             with self.assertRaisesRegex(ValueError,'does not match'):manager.start_backup_import(state,worker,{**request,'originalFilename':'other.backup'})
         entry=state['backups'][request['uploadId']];self.assertEqual(entry['originalFilename'],request['originalFilename'])
-        self.assertRegex(entry['name'],r'^backup-[0-9]+-[a-f0-9]{8}\.dump$')
+        self.assertRegex(entry['name'],r'^backup-[0-9]+-[a-f0-9]{8}\.backup$')
         entry['phase']='completed';row=backup_schedule.history(state)['recent'][0]
         self.assertEqual(row['originalFilename'],request['originalFilename']);self.assertEqual(row['path'],'/backups/'+entry['name'])
         entry.pop('originalFilename');self.assertEqual(backup_schedule.history(state)['recent'][0]['originalFilename'],'')
