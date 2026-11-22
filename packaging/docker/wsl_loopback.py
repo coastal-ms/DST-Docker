@@ -30,7 +30,8 @@ def snapshot(windows_script,public_ip):
     address=public_address(public_ip)
     result=json.loads(windows_script("$ErrorActionPreference='Stop';[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);"+
         "$routes=@(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '"+address+"/32' -ErrorAction SilentlyContinue | Sort-Object RouteMetric);"+
-        "@{publicIp='"+address+"';target=$(if($routes.Count){$routes[0].NextHop}else{$null});multiple=($routes.Count -gt 1)}|ConvertTo-Json -Compress"))
+        "$local=@(Get-NetIPAddress -AddressFamily IPv4 | Select-Object -ExpandProperty IPAddress);"+
+        "@{publicIp='"+address+"';target=$(if($routes.Count){$routes[0].NextHop}else{$null});multiple=($routes.Count -gt 1);windowsAddresses=$local}|ConvertTo-Json -Compress"))
     return {'available':True,'platform':'wsl',**result}
 
 
@@ -47,6 +48,7 @@ function Set-DstDockerLoopbackRoute {
  if(@($persistent | Where-Object {$_.NextHop -cne $oldTarget -or -not $old.Count -or $_.InterfaceIndex -ne $old[0].InterfaceIndex}).Count){throw 'A different persistent route exists. Review it before applying.'}
  $iface=0
  if($Target){
+   if(@(Get-NetIPAddress -AddressFamily IPv4 | Where-Object {$_.IPAddress -eq $Target}).Count){throw 'The loopback target is an address on this Windows PC. Use router NAT loopback or a separate server address.'}
    $best=@(Find-NetRoute -RemoteIPAddress $Target -ErrorAction Stop)
    $local=@($best | Where-Object {$_.IPAddress})
    $direct=@($best | Where-Object {$_.DestinationPrefix -and $_.NextHop -eq '0.0.0.0'})

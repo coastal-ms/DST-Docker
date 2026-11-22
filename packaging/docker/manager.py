@@ -15,7 +15,7 @@ import string
 import socket
 import struct
 from datetime import datetime
-from core_services import service_specs, game_spec
+from core_services import director_login_files, service_specs, game_spec
 from engine import Engine, EngineError
 from world_template import read_template, validate_profile, fresh_partition_sql
 from game_plan import plan_world, public_plan
@@ -846,6 +846,22 @@ def stop_database_only(state,engine):
     engine.lifecycle(database['id'],state['id'],'stop')
 
 
+def prepare_director_login(state,engine):
+    director=state['services']['director']['id']
+    observed=engine.assert_owned(director,state['id'],'director')
+    if observed['State']['Status'] not in {'created','exited'}:return
+    world_key=hashlib.sha256(state['worldId'].encode('utf-8')).hexdigest()
+    path=STATE/'director-auth'/f'{world_key}.secret'
+    if not path.exists():
+        atomic(path,base64.b64encode(secrets.token_bytes(64)).decode('ascii'))
+    try:
+        secret=path.read_text(encoding='ascii')
+        if len(base64.b64decode(secret,validate=True))!=64:raise ValueError()
+    except ValueError:
+        raise ValueError('The saved Director signing secret is invalid. Existing world settings were preserved.') from None
+    engine.upload_component_files(director,state['id'],'director',director_login_files(secret))
+
+
 def start_services(state,engine,publish_gateway=True):
     if state.get('pendingSwapChange'):raise ValueError('Retry or restore the pending Memory Swap change before starting maps.')
     regis_compatibility.assert_prepared_images(state,engine)
@@ -881,6 +897,7 @@ def start_services(state,engine,publish_gateway=True):
     # A host reboot stops the infrastructure too. Start the existing migrated
     # database only after admission checks, and wait before launching any maps.
     # This never recreates storage, initializes roles, or reruns migrations.
+    prepare_director_login(state,engine)
     ensure_database_ready(state,engine)
     state['desiredState']='running';save(state)
     prepare_connections(state,engine)

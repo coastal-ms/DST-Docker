@@ -10,6 +10,10 @@ BeforeAll {
         param($AddressFamily,$DestinationPrefix,$PolicyStore='ActiveStore')
         @($script:routes | Where-Object {$_.DestinationPrefix -eq $DestinationPrefix -and $_.Store -eq $PolicyStore})
     }
+    function Get-NetIPAddress {
+        param($AddressFamily)
+        @($script:localAddresses | ForEach-Object { @{IPAddress=$_} })
+    }
     function Find-NetRoute {param($RemoteIPAddress) @(@{IPAddress='192.168.23.23';InterfaceIndex=7},@{DestinationPrefix='192.168.23.0/24';NextHop='0.0.0.0';InterfaceIndex=7})}
     function Remove-NetRoute {
         [CmdletBinding(SupportsShouldProcess)]param([Parameter(ValueFromPipeline)]$InputObject)
@@ -31,6 +35,7 @@ BeforeAll {
 Describe 'Explicit Docker same-PC loopback route changes' {
     BeforeEach {
         $script:writes=0;$script:failTarget=''
+        $script:localAddresses=@('192.168.23.23')
         $script:routes=@(
             @{DestinationPrefix='8.8.4.4/32';InterfaceIndex=7;NextHop='192.168.23.219';RouteMetric=1;Store='ActiveStore'},
             @{DestinationPrefix='8.8.4.4/32';InterfaceIndex=7;NextHop='192.168.23.219';RouteMetric=1;Store='PersistentStore'},
@@ -43,6 +48,11 @@ Describe 'Explicit Docker same-PC loopback route changes' {
     }
     It 'refuses a stale current target before changing any route' {
         {Set-DstDockerLoopbackRoute -PublicIp '8.8.4.4' -Target '192.168.23.106' -ExpectedTarget '192.168.23.218'} | Should -Throw '*changed*'
+        $script:writes | Should -Be 0
+    }
+    It 'rejects a Windows-owned secondary address before changing any route' {
+        $script:localAddresses+='192.168.23.106'
+        {Set-DstDockerLoopbackRoute -PublicIp '8.8.4.4' -Target '192.168.23.106' -ExpectedTarget '192.168.23.219'} | Should -Throw '*address on this Windows PC*'
         $script:writes | Should -Be 0
     }
     It 'changes only the selected public-IP host route in both stores' {

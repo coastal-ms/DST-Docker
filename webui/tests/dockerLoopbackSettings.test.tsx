@@ -48,3 +48,21 @@ it('keeps the card and draft through an unavailable refresh without applying any
   expect(screen.getByLabelText('Server IPv4 address')).toHaveValue('192.168.23.220')
   expect(vi.mocked(api).mock.calls.every(([, options]) => options?.method !== 'POST')).toBe(true)
 })
+
+it('blocks a shared Docker address as either a preset or a custom next hop', async () => {
+  vi.mocked(api).mockResolvedValue({ ...current, windowsAddresses: ['192.168.23.106'] })
+  render(<DockerLoopbackSettings publicIp="8.8.4.4" dockerIp="192.168.23.106" />)
+  await screen.findByText(/Docker shares this PC/)
+  expect(screen.getByRole('option', { name: 'Docker (192.168.23.106)' })).toBeDisabled()
+  fireEvent.change(screen.getByLabelText('Loopback target'), { target: { value: 'custom' } })
+  fireEvent.change(screen.getByLabelText('Server IPv4 address'), { target: { value: '192.168.23.106' } })
+  expect(screen.getByRole('button', { name: 'Apply loopback target' })).toBeDisabled()
+  fireEvent.change(screen.getByLabelText('Loopback target'), { target: { value: 'router' } })
+  expect(screen.getByRole('button', { name: 'Apply loopback target' })).toBeEnabled()
+})
+
+it('disables the Docker option in mirrored mode with an older host response', async () => {
+  vi.mocked(api).mockResolvedValue(current)
+  render(<DockerLoopbackSettings publicIp="8.8.4.4" dockerIp="192.168.23.106" sharedLan />)
+  expect(await screen.findByRole('option', { name: 'Docker (192.168.23.106)' })).toBeDisabled()
+})

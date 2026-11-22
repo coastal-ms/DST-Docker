@@ -324,7 +324,11 @@ Register-DuneRoute -Method POST -Path '/api/docker/host' -Handler {
     try {
         if($body -isnot [hashtable] -or $body.action -cnotin @('shortcut','shutdown','memory.set','network.settings.set','loopback.set')){throw 'Choose a supported host action.'}
         if($body.action -ceq 'memory.set' -and (-not $body.ContainsKey('memoryGiB') -or ($null -ne $body.memoryGiB -and $body.memoryGiB -isnot [int] -and $body.memoryGiB -isnot [long]))){throw 'Choose a whole RAM limit in GiB or the WSL default.'}
-        $reply=Invoke-DuneDockerManager -HostSession -Request @{action=$body.action;confirmation=$body.confirmation;memoryGiB=$body.memoryGiB;settings=$body.settings;publicIp=$body.publicIp;target=$body.target;expectedTarget=$body.expectedTarget}
+        # Use a distinct action so an older host process cannot save a bridged
+        # configuration without the external-switch check.
+        $hostAction=$body.action
+        if($hostAction -ceq 'network.settings.set' -and $body.settings.mode -ceq 'bridged'){$hostAction='network.settings.set-bridged'}
+        $reply=Invoke-DuneDockerManager -HostSession -Request @{action=$hostAction;confirmation=$body.confirmation;memoryGiB=$body.memoryGiB;settings=$body.settings;publicIp=$body.publicIp;target=$body.target;expectedTarget=$body.expectedTarget}
         if(-not $reply.ok){throw $reply.error}
         Write-DuneJson -Response $res -Body $reply.data
     }catch{Write-DuneError -Response $res -Status 409 -Message $_.Exception.Message}

@@ -7,9 +7,52 @@ import re
 import select
 import socket
 import struct
+import subprocess
 import time
 from pathlib import Path
 import wsl_memory
+
+
+EXTERNAL_SWITCHES_SCRIPT = r"""
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+if (Get-Command Get-VMSwitch -ErrorAction SilentlyContinue) {
+    try {
+        $names = @(Get-VMSwitch -SwitchType External | Select-Object -ExpandProperty Name)
+        ConvertTo-Json -InputObject $names -Compress
+        return
+    } catch {
+        # The unelevated hosting window can read the network adapter stack even
+        # when Windows denies access to its switch management provider.
+    }
+}
+$switchList = 'HKLM:\SYSTEM\CurrentControlSet\Services\VMSMP\Parameters\SwitchList'
+$names = @()
+if (Test-Path -LiteralPath $switchList) {
+    $adapters = @(Get-NetAdapter -IncludeHidden | Where-Object {
+        $_.ComponentID -eq 'vms_vsmp' -and $_.LowerLayerInterfaceIndices
+    })
+    $names = @(Get-ChildItem -LiteralPath $switchList | ForEach-Object {
+        $name = $_.GetValue('FriendlyName')
+        if ($name -and $adapters.Name -contains "vSwitch ($name)") { $name }
+    })
+}
+ConvertTo-Json -InputObject $names -Compress
+"""
+
+
+def valid_switch_name(name):
+    return bool(name and len(name) <= 100 and not any(c in '\r\n[];#*?' or ord(c) < 32 for c in name))
+
+
+def external_switches(windows_script):
+    try:
+        names = json.loads(windows_script(EXTERNAL_SWITCHES_SCRIPT))
+        if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
+            raise ValueError('Invalid external switch list.')
+    except (ValueError, OSError, subprocess.SubprocessError):
+        return [], 'Windows could not verify available external switches.'
+    return sorted({name for name in names if name == name.strip() and valid_switch_name(name)}, key=str.casefold), None
 
 
 def validate(value):
@@ -18,8 +61,8 @@ def validate(value):
     if mode not in {'nat','mirrored','bridged'}:raise ValueError('Choose an available Docker network mode.')
     if not isinstance(value.get('switch',''),str) or not isinstance(value.get('address',''),str):raise ValueError('Supply text for the switch and LAN address.')
     switch=value.get('switch','').strip()
-    if mode=='bridged' and (not switch or len(switch)>100 or any(c in switch for c in '\r\n[];#*?') or any(ord(c)<32 for c in switch)):
-        raise ValueError('Enter the existing external Hyper-V switch name.')
+    if mode=='bridged' and not valid_switch_name(switch):
+        raise ValueError('Select an available external switch.')
     address=value.get('address','').strip()
     prefix=value.get('prefix',24)
     if type(prefix) is not int or not 8<=prefix<=30:raise ValueError('Choose an IPv4 subnet prefix from 8 to 30.')
@@ -89,8 +132,11 @@ def settings(windows_script,directory,network,value=None):
     path=directory/'lan-settings.json'
     saved=json.loads(path.read_text()) if path.exists() else {'mode':network['networkingMode'],'switch':'','address':'','prefix':24}
     boot=Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+    switches, discovery_error = external_switches(windows_script)
     if value is not None:
         desired=validate(value)
+        if desired['mode']=='bridged' and desired['switch'] not in switches:
+            raise ValueError(discovery_error or 'The selected external switch is unavailable. Refresh and select an available switch.')
         if desired['address']:
             # A dedicated WSL address must not take the Windows host's address.
             if desired['address']==network.get('windowsIp',network.get('dockerIp')):
@@ -107,7 +153,7 @@ def settings(windows_script,directory,network,value=None):
     status_path=directory/'lan-settings-status.json'
     status=json.loads(status_path.read_text()) if status_path.exists() else {}
     pending=saved.get('savedBoot')==boot or saved.get('mode')!=network.get('networkingMode') or (bool(saved.get('address')) and saved['address']!=network.get('dockerIp'))
-    return {'available':True,'platform':'wsl',**network,'settings':{k:saved[k] for k in ['mode','switch','address','prefix']},'restartRequired':pending,'error':status.get('error'),'recoveryShortcut':saved.get('recoveryShortcut')}
+    return {'available':True,'platform':'wsl',**network,'settings':{k:saved[k] for k in ['mode','switch','address','prefix']},'externalSwitches':switches,'switchDiscoveryError':discovery_error,'restartRequired':pending,'error':status.get('error'),'recoveryShortcut':saved.get('recoveryShortcut')}
 
 
 def address_in_use(interface,address,mac,seconds=1.5):

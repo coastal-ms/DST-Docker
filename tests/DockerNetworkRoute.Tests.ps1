@@ -8,6 +8,21 @@ BeforeAll {
     function global:Write-DuneJson {param($Response,$Body)}
     function global:Write-DuneError {param($Response,$Status,$Message)}
 }
+
+Describe 'Saving WSL host networking across portal and host versions' {
+    BeforeEach {
+        Mock Invoke-DuneDockerManager {@{ok=$false;error='Unsupported host action'}}
+        Mock Write-DuneError {}
+    }
+
+    It 'never sends a bridged save through the legacy host action' {
+        $request=@{action='network.settings.set';settings=@{mode='bridged';switch='Ethernet'}}
+        & $script:handlers['POST /api/docker/host'] $null $null @{} $request
+        Should -Invoke Invoke-DuneDockerManager -Exactly 1 -ParameterFilter {$HostSession -and $Request.action -ceq 'network.settings.set-bridged'}
+        Should -Invoke Invoke-DuneDockerManager -Exactly 0 -ParameterFilter {$Request.action -ceq 'network.settings.set'}
+        Should -Invoke Write-DuneError -Exactly 1 -ParameterFilter {$Status -eq 409}
+    }
+}
 Describe 'Private address discovery before the desktop host session starts' {
     BeforeEach {
         $script:oldBackend=$env:DST_HOSTING_BACKEND;$env:DST_HOSTING_BACKEND='docker'

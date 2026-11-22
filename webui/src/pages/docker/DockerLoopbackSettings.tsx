@@ -2,9 +2,9 @@ import { useEffect, useRef, useState } from 'react'
 import { api } from '../../api/client'
 import { ConfirmationModal } from '../../components/ConfirmationModal'
 
-type Snapshot = { available: boolean; platform: string; publicIp?: string; target?: string | null; multiple?: boolean; message?: string; operation?: { id: string; phase: string; error?: string } }
+type Snapshot = { available: boolean; platform: string; publicIp?: string; target?: string | null; multiple?: boolean; windowsAddresses?: string[]; message?: string; operation?: { id: string; phase: string; error?: string } }
 
-export default function DockerLoopbackSettings({ publicIp, dockerIp }: { publicIp: string; dockerIp: string }) {
+export default function DockerLoopbackSettings({ publicIp, dockerIp, sharedLan = false }: { publicIp: string; dockerIp: string; sharedLan?: boolean }) {
   const [state, setState] = useState<Snapshot | null>(null)
   const [choice, setChoice] = useState('existing')
   const [custom, setCustom] = useState('')
@@ -56,10 +56,13 @@ export default function DockerLoopbackSettings({ publicIp, dockerIp }: { publicI
     return () => { active = false; window.clearInterval(timer) }
   }, [pending, endpoint])
   const target = choice === 'router' ? null : choice === 'docker' ? dockerIp : choice === 'custom' ? custom.trim() : state?.target ?? null
+  const dockerSharesWindowsAddress = sharedLan || (!!dockerIp && !!state?.windowsAddresses?.includes(dockerIp))
+  const targetIsWindows = !!target && (!!state?.windowsAddresses?.includes(target) || (dockerSharesWindowsAddress && target === dockerIp))
   const busy = posting || !!pending
   const changed = !!state?.available && target !== (state.target ?? null)
+  const canApply = changed && !busy && !refreshing && !state?.multiple && (target === null || (!!target && !targetIsWindows))
   async function apply() {
-    if (!state?.available || !changed || busy) return
+    if (!state?.available || !canApply) return
     setConfirming(false); setPosting(true); setError(''); setMessage('')
     try {
       const value = await api<Snapshot>('/api/docker/host', { method: 'POST', body: JSON.stringify({ action: 'loopback.set', publicIp, target, expectedTarget: state.target ?? null, confirmation: 'CHANGE LOOPBACK TARGET' }) })
@@ -76,14 +79,16 @@ export default function DockerLoopbackSettings({ publicIp, dockerIp }: { publicI
       <p className="text-sm">Current target: <strong>{state.target || 'Router NAT loopback (no same-PC route)'}</strong></p>
       <label className="block text-sm">Loopback target<select className="block mt-1 rounded border border-border bg-surface p-2" value={choice} disabled={busy} onChange={e => { setChoice(e.target.value); setMessage('') }}>
         <option value="existing">Keep current target</option>
-        <option value="docker" disabled={!dockerIp}>Docker ({dockerIp || 'detecting…'})</option>
+        <option value="docker" disabled={!dockerIp || dockerSharesWindowsAddress}>Docker ({dockerIp || 'detecting…'})</option>
         <option value="custom">Another server IP</option>
         <option value="router">Use router NAT loopback</option>
       </select></label>
       {choice === 'custom' && <label className="block text-sm">Server IPv4 address<input className="block mt-1 rounded border border-border bg-surface p-2" value={custom} disabled={busy} onChange={e => setCustom(e.target.value)} /></label>}
+      {dockerSharesWindowsAddress && <p className="text-sm text-text-muted">Docker shares this PC’s LAN address. Use router NAT loopback to join through the public IP from this PC.</p>}
+      {targetIsWindows && changed && <p role="alert" className="text-danger">Choose a separate server address or use router NAT loopback.</p>}
       <p className="text-sm text-text-muted">The current route stays unchanged until you apply this control. Applying player access does not change this target.</p>
       {state.multiple && <p className="text-warning text-sm">Multiple routes exist for this public IP. Review those Windows routes before changing the target.</p>}
-      <button type="button" className="btn-secondary" disabled={busy || refreshing || !changed || state.multiple || (target !== null && !target)} onClick={() => setConfirming(true)}>{busy ? 'Applying loopback…' : 'Apply loopback target'}</button>
+      <button type="button" className="btn-secondary" disabled={!canApply} onClick={() => setConfirming(true)}>{busy ? 'Applying loopback…' : 'Apply loopback target'}</button>
     </> : <p className="text-sm text-text-muted">{state?.message || 'Reading the Windows loopback route…'}</p>}
     {busy && <p role="status" className="text-sm">Approve the Windows permission prompt to apply the loopback target. The game server keeps running.</p>}
     {error && <p role="alert" className="text-danger">{error}</p>}
