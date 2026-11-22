@@ -65,6 +65,38 @@ describe('PortalAuthGate', () => {
     expect(screen.queryByText('Server administration')).not.toBeInTheDocument()
   })
 
+  it('opens the Docker management portal for an Admin on sign-in and reload without reading Owner setup', async () => {
+    vi.stubEnv('VITE_DST_EDITION', 'docker')
+    const adminSession = {
+      accountLoginEnabled: true, authenticated: true, mustChangePassword: false,
+      account: { id: 'a', username: 'FixtureAdmin', role: 'admin', enabled: true },
+    }
+    let signedIn = false
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const path = new URL(String(input), window.location.href).pathname
+      if (path === '/api/portal-auth/status') return jsonResponse(signedIn ? adminSession : {
+        accountLoginEnabled: true, authenticated: false, mustChangePassword: false, account: null,
+      })
+      if (path === '/api/portal-auth/login') {
+        signedIn = true
+        return jsonResponse(adminSession)
+      }
+      return jsonResponse({ error: 'Owner access required.' }, 403)
+    })
+    const portal = <PortalAuthGate><nav>Management navigation</nav></PortalAuthGate>
+    const first = render(portal)
+    const user = userEvent.setup()
+    await user.type(await screen.findByLabelText('Username'), 'FixtureAdmin')
+    await user.type(screen.getByLabelText('Password'), 'synthetic-password')
+    await user.click(screen.getByRole('button', { name: 'Sign in', exact: true }))
+    expect(await screen.findByRole('navigation')).toBeInTheDocument()
+    first.unmount()
+    render(portal)
+    expect(await screen.findByRole('navigation')).toBeInTheDocument()
+    expect(fetchMock.mock.calls.map(([input]) => new URL(String(input), window.location.href).pathname))
+      .toEqual(['/api/portal-auth/status', '/api/portal-auth/login', '/api/portal-auth/status'])
+  })
+
   it('shows incumbent-themed login and returns to the requested portal content', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch')
       .mockImplementationOnce(() => jsonResponse({

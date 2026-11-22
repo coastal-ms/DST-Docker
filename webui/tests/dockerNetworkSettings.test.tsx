@@ -86,6 +86,19 @@ it('keeps the loopback card mounted when the delayed network response says nativ
   expect(screen.getByLabelText('Server IPv4 address')).toHaveValue('192.168.23.220')
   expect(vi.mocked(api).mock.calls.every(([, options]) => options?.method !== 'POST')).toBe(true)
 })
+it('shows the existing Windows route while player access stays private', async () => {
+  const route = '/api/docker/host?detail=loopback&publicIp=8.8.4.4'
+  vi.mocked(api).mockImplementation(async path => {
+    if (path === '/api/docker/network/public-ip') return { publicIp: '8.8.4.4' }
+    if (path === route) return { available: true, platform: 'wsl', target: '192.168.23.219' }
+    return { ok: true, data: initial }
+  })
+  render(<DockerNetworkCard />)
+  expect(await screen.findByText('192.168.23.219')).toBeInTheDocument()
+  expect(screen.getByLabelText('Player access')).toHaveValue('private')
+  expect(screen.getByLabelText('LAN IPv4 address')).toHaveValue('192.168.1.5')
+  expect(vi.mocked(api).mock.calls.every(([, options]) => options?.method !== 'POST')).toBe(true)
+})
 it('never overwrites a manual address when an earlier detection request returns', async () => {
   let finish!: (value: { publicIp: string }) => void
   vi.mocked(api).mockImplementation(async path => path === '/api/docker/network/public-ip' ? new Promise(resolve => { finish = resolve }) : { ok: true, data: initial })

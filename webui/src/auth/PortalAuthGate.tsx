@@ -254,6 +254,8 @@ export function PortalAuthGate({ children }: { children: ReactNode }) {
   return <PortalAuthContext.Provider value={{ status, logout, requireSignIn }}>
     {status.account?.role === 'player'
       ? <Suspense fallback={<p role="status">Loading Player Portal…</p>}><PlayerPortal /></Suspense>
-      : <ServerSetupGate canSetup={status.account?.role === 'owner'}>{children}</ServerSetupGate>}
+      : status.account?.role === 'admin'
+        ? children
+        : <ServerSetupGate canSetup={status.account?.role === 'owner'}>{children}</ServerSetupGate>}
   </PortalAuthContext.Provider>
 }

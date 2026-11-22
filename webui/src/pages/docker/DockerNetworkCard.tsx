@@ -38,17 +38,32 @@ export default function DockerNetworkCard() {
   const [forwardIp, setForwardIp] = useState('')
   const [networkMode, setNetworkMode] = useState('')
   const detectionVersion = useRef(0)
-  const loopbackIp = mode === 'public' && /^\d{1,3}(\.\d{1,3}){3}$/.test(address) ? address : ''
+  const [detectedLoopbackIp, setDetectedLoopbackIp] = useState('')
+  const [loopbackLookupAddress, setLoopbackLookupAddress] = useState<string | null>(null)
+  const savedAddress = state?.profile?.address
+  const savedPublicIp = savedAddress && modeFor(savedAddress) === 'public' ? savedAddress : ''
+  const lookupAddress = loopbackLookupAddress ?? (savedPublicIp || detectedLoopbackIp)
+  const candidate = lookupAddress.trim()
+  const loopbackIp = /^\d{1,3}(\.\d{1,3}){3}$/.test(candidate) &&
+    candidate.split('.').every(octet => Number(octet) <= 255) && modeFor(candidate) === 'public' ? candidate : ''
   useEffect(() => () => { detectionVersion.current++ }, [])
+  useEffect(() => {
+    if (!savedAddress || savedPublicIp || detectedLoopbackIp || loopbackLookupAddress !== null) return
+    let active = true
+    api<{ publicIp: string }>('/api/docker/network/public-ip').then(value => {
+      if (active && value.publicIp) setDetectedLoopbackIp(value.publicIp)
+    }).catch(() => {})
+    return () => { active = false }
+  }, [savedAddress, savedPublicIp, detectedLoopbackIp, loopbackLookupAddress])
   useEffect(() => {
     let active = true
     const timer = window.setTimeout(() => {
-      api<{ dockerIp: string; routerForwardIp?: string; networkingMode?: string; loopbackTarget?: string }>('/api/docker/network' + (loopbackIp ? '?publicIp=' + encodeURIComponent(loopbackIp) : '')).then(value => {
+      api<{ dockerIp: string; routerForwardIp?: string; networkingMode?: string }>('/api/docker/network').then(value => {
         if (active && value.dockerIp) { setDockerIp(value.dockerIp); setForwardIp(value.routerForwardIp || value.dockerIp); setNetworkMode(value.networkingMode || '') }
       }).catch(() => {})
     }, 200)
     return () => { active = false; window.clearTimeout(timer) }
-  }, [loopbackIp])
+  }, [mode])
   async function detectPublicIp() {
     const version = ++detectionVersion.current
     setDetecting(true); setError(''); setMessage('')
@@ -164,7 +179,13 @@ export default function DockerNetworkCard() {
       <button className="btn-primary" disabled={busy || detecting || !state?.services.length || !changed} type="submit">{busy ? 'Applying…' : 'Apply player connections'}</button>
       {message && <p role="status" className="text-success">{message}</p>}
     </form>
-    {loopbackIp && <DockerLoopbackSettings key={loopbackIp} publicIp={loopbackIp} dockerIp={dockerIp} sharedLan={networkMode === 'mirrored'} />}
+    <div className="mt-4 space-y-3">
+      {loopbackIp ? <DockerLoopbackSettings key={loopbackIp} publicIp={loopbackIp} dockerIp={dockerIp} sharedLan={networkMode === 'mirrored'} /> : <h3 className="font-semibold">Same-PC public-IP loopback</h3>}
+      <label className="block text-sm">Public IPv4 address for loopback
+        <input className="block mt-1 rounded border border-border bg-surface p-2" value={lookupAddress} onChange={event => setLoopbackLookupAddress(event.target.value)} />
+      </label>
+      {!loopbackIp && <p className="text-sm text-text-muted">Enter the public IPv4 address used by the route to see its current target.</p>}
+    </div>
     {confirmation && <ConfirmationModal
       title="Apply player access changes?"
       description={`${confirmation.mode === 'public' ? 'Public / External' : 'Private / LAN'} will use ${confirmation.address}. ${confirmation.restart ? 'This will stop the maps, update their connection settings, and restart the game server. Connected players will be disconnected.' : 'The game server is stopped and will remain stopped after these settings are applied.'}`}
