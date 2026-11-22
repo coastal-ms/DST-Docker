@@ -4,6 +4,26 @@ import re
 import memory_swap
 
 
+def component_wrapper(command, setup=''):
+    # Funcom's small .NET images include the trust bundle but omit
+    # update-ca-certificates. Extend the bundle for this process only.
+    return {'data':'#!/bin/sh\nset -eu\n'
+            'cat /etc/ssl/certs/ca-certificates.crt /usr/local/share/ca-certificates/dst-connection.crt > /tmp/dst-ca-bundle.pem\n'
+            'export SSL_CERT_FILE=/tmp/dst-ca-bundle.pem\n'
+            'export REQUESTS_CA_BUNDLE=/tmp/dst-ca-bundle.pem\n'
+            'export CURL_CA_BUNDLE=/tmp/dst-ca-bundle.pem\n'
+            +setup+'exec '+command+' "$@"\n','mode':0o555}
+
+
+def director_login_files(secret):
+    setup=('if [ -z "${SERVER_LOGIN_PASSWORD_SECRET:-}" ]; then\n'
+           '  SERVER_LOGIN_PASSWORD_SECRET=$(cat /dst-director-login.secret)\n'
+           '  export SERVER_LOGIN_PASSWORD_SECRET\n'
+           'fi\n')
+    return {'dst-director-login.secret':{'data':secret,'mode':0o400},
+            'dst-component.sh':component_wrapper('./Director',setup)}
+
+
 def service_specs(plan,template,credentials):
     identity=credentials['worldId']
     if not re.fullmatch(r'sh-[a-z0-9-]+',identity): raise ValueError('Invalid self-host world identity.')
@@ -29,26 +49,16 @@ def service_specs(plan,template,credentials):
         'run/secrets/kubernetes.io/serviceaccount/ca.crt':{'data':scaler['ca'] if scaler else credentials['tls']['ca.pem']},
         'run/secrets/kubernetes.io/serviceaccount/token':{'data':scaler['token'] if scaler else 'dst-native-no-kubernetes-api','mode':0o400},
         'run/secrets/kubernetes.io/serviceaccount/namespace':{'data':identity}}
-    def wrapper(command):
-        # Funcom's small .NET images include the trust bundle but omit the
-        # distribution's update-ca-certificates utility. Build a public bundle
-        # for this process without adding a package manager or changing stock CA.
-        return {'data':'#!/bin/sh\nset -eu\n'
-                'cat /etc/ssl/certs/ca-certificates.crt /usr/local/share/ca-certificates/dst-connection.crt > /tmp/dst-ca-bundle.pem\n'
-                'export SSL_CERT_FILE=/tmp/dst-ca-bundle.pem\n'
-                'export REQUESTS_CA_BUNDLE=/tmp/dst-ca-bundle.pem\n'
-                'export CURL_CA_BUNDLE=/tmp/dst-ca-bundle.pem\n'
-                'exec '+command+' "$@"\n','mode':0o555}
     director_ini=template['world']['spec']['utilities']['director']['spec']['configFiles']['files']['director.ini']
     result={
         'director':{'environment':{**common,**database,'ASPNETCORE_URLS':'http://0.0.0.0:11717'},
                     'command':rmq_args,'entrypoint':['/dst-component.sh'],
                     'ports':[{'container':11717,'host':plan['ports']['director'],'ip':'127.0.0.1'}],
-                    'files':{**ca,'dst-component.sh':wrapper('./Director'),
+                    'files':{**ca,'dst-component.sh':component_wrapper('./Director'),
                              'Tools/Battlegroups/Director/BattlegroupDirector/director_config.ini':{'data':director_ini}}},
         'text-router':{'environment':{**common,**database,'BATTLEGROUP_LANGUAGE':'en-US','ASPNETCORE_URLS':'http://0.0.0.0:5059'},
                        'command':rmq_args,'ports':[{'container':5059,'host':plan['ports']['text-router'],'ip':'127.0.0.1'}],
-                       'entrypoint':['/dst-component.sh'],'files':{**ca,'dst-component.sh':wrapper('./TextRouter')}},
+                       'entrypoint':['/dst-component.sh'],'files':{**ca,'dst-component.sh':component_wrapper('./TextRouter')}},
         'gateway':{'environment':{**common,'FuncomLiveServices__BattlegroupAuthorizationPreset':'BattlegroupInternal',
                     'DuneDatabaseInterfacePSQL_DatabaseHost':plan['databaseName']+':5432',
                     'DuneDatabaseInterfacePSQL_DatabaseName':'dune','DuneDatabaseInterfacePSQL_DatabaseUser':'dune',
@@ -59,7 +69,7 @@ def service_specs(plan,template,credentials):
                               '--RMQGameHostname='+plan['profile']['address'],'--RMQGamePort='+str(plan['ports']['rmq-game']),
                               '--RMQGameHttpPort='+str(plan['ports']['rmq-game-http'])],
                    'entrypoint':['/dst-component.sh'],
-                   'files':{**ca,'dst-component.sh':wrapper('env')}}
+                   'files':{**ca,'dst-component.sh':component_wrapper('env')}}
     }
     return result
 

@@ -2,6 +2,7 @@ import base64
 import json
 import hashlib
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import Mock
@@ -95,12 +96,32 @@ class WslLanTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder)
             def windows(script):
+                if script==wsl_lan.EXTERNAL_SWITCHES_SCRIPT:return '["LAN"]'
                 if 'physicalBytes' in script:return json.dumps({'content':base64.b64encode(b'[wsl2]\nmemory=40GB\n').decode(),'physicalBytes':64*1024**3})
                 if 'Recover Docker network' in script:return 'C:\\Desktop\\Recover Docker network.cmd'
                 return 'saved'
             result=wsl_lan.settings(Mock(side_effect=windows),root,{'networkingMode':'nat','dockerIp':'172.25.1.2','windowsIp':'192.168.23.23'}, {'mode':'bridged','switch':'LAN','address':'192.168.23.220','prefix':24})
             self.assertTrue(result['restartRequired']);self.assertIn('Recover Docker network',result['recoveryShortcut'])
             self.assertFalse((root/'lan-address-owned.json').exists())
+
+    def test_lists_only_usable_switch_names_and_keeps_the_saved_selection(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);self.fixture(root)
+            windows=Mock(return_value='["Office LAN","LAN","LAN","bad#name"]')
+            result=wsl_lan.settings(windows,root,{'networkingMode':'bridged','dockerIp':'192.168.23.220'})
+            self.assertEqual(result['externalSwitches'],['LAN','Office LAN'])
+            self.assertEqual(result['settings']['switch'],'LAN')
+            windows.assert_called_once_with(wsl_lan.EXTERNAL_SWITCHES_SCRIPT)
+
+    def test_rejects_unverifiable_switches_before_writing_windows_or_linux_settings(self):
+        for discovered in ('[]','["Office LAN"]','"invalid"',subprocess.CalledProcessError(1,'powershell')):
+            with self.subTest(discovered=discovered),tempfile.TemporaryDirectory() as folder:
+                root=Path(folder)
+                windows=Mock(side_effect=[discovered])
+                with self.assertRaisesRegex(ValueError,'unavailable|could not verify'):
+                    wsl_lan.settings(windows,root,{'networkingMode':'nat','dockerIp':'172.25.1.2'}, {'mode':'bridged','switch':'Ethernet'})
+                windows.assert_called_once_with(wsl_lan.EXTERNAL_SWITCHES_SCRIPT)
+                self.assertEqual(list(root.iterdir()),[])
 
 
 if __name__=='__main__':unittest.main()

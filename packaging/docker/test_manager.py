@@ -1,3 +1,4 @@
+import base64
 import json
 from pathlib import Path
 import sys
@@ -219,6 +220,38 @@ class ManagerTests(unittest.TestCase):
         engine.assert_owned.return_value={'State':{'Status':'running'}}
         with self.assertRaisesRegex(ValueError,'Stop the gateway'):manager.start_services(state,engine,publish_gateway=False)
         engine.lifecycle.assert_not_called()
+
+    def test_existing_director_gets_a_stable_private_signing_secret_before_start(self):
+        engine=Mock(spec=manager.Engine)
+        engine.assert_owned.return_value={'State':{'Status':'exited'}}
+        state={'id':'a'*32,'worldId':'sh-test-first','services':{'director':{'id':'existing'}}}
+        with tempfile.TemporaryDirectory() as folder,patch.object(manager,'STATE',Path(folder)):
+            manager.prepare_director_login(state,engine)
+            installed=engine.upload_component_files.call_args.args[3]
+            path=next((Path(folder)/'director-auth').glob('*.secret'))
+            original=path.read_text()
+            self.assertEqual(len(base64.b64decode(original,validate=True)),64)
+            self.assertEqual(path.stat().st_mode & 0o777,0o600)
+            self.assertEqual(installed['dst-director-login.secret'],{'data':original,'mode':0o400})
+            self.assertIn('export SERVER_LOGIN_PASSWORD_SECRET',installed['dst-component.sh']['data'])
+            self.assertNotIn(original,installed['dst-component.sh']['data'])
+            state['services']['director']['id']='replacement'
+            manager.prepare_director_login(state,engine)
+            engine.upload_component_files.assert_called_with('replacement',state['id'],'director',installed)
+            state['worldId']='sh-test-second'
+            manager.prepare_director_login(state,engine)
+            self.assertNotEqual(engine.upload_component_files.call_args.args[3]['dst-director-login.secret']['data'],original)
+        engine.create_component.assert_not_called()
+        engine.lifecycle.assert_not_called()
+
+    def test_login_secret_migration_leaves_a_running_director_alone(self):
+        engine=Mock(spec=manager.Engine)
+        engine.assert_owned.return_value={'State':{'Status':'running'}}
+        state={'id':'a'*32,'worldId':'sh-test-first','services':{'director':{'id':'running'}}}
+        with tempfile.TemporaryDirectory() as folder,patch.object(manager,'STATE',Path(folder)):
+            manager.prepare_director_login(state,engine)
+            self.assertEqual(list(Path(folder).iterdir()),[])
+        engine.upload_component_files.assert_not_called()
 
     def test_gateway_publication_flag_is_only_accepted_as_a_boolean_for_start(self):
         for action,value in [('services.start','false'),('services.stop',False)]:

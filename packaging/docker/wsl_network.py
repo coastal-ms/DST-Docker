@@ -22,7 +22,7 @@ def snapshot(windows_script,run,public_ip=None):
             "Where-Object {$_.AddressState -eq 'Preferred' -and -not $_.SkipAsSource -and $_.IPAddress -notlike '169.254.*' -and $_.IPAddress -notlike '127.*'} | Select-Object -First 1;"
             "if($candidate){break}};"
             "if(-not $candidate){throw 'No Windows LAN address found.'};"
-            "@{dockerIp=$candidate.IPAddress;switchHint=($candidate.InterfaceAlias -replace '^vEthernet \\((.+)\\)$','$1');LOOPBACK}|ConvertTo-Json -Compress")
+            "@{dockerIp=$candidate.IPAddress;LOOPBACK}|ConvertTo-Json -Compress")
     loopback="loopbackTarget=$null"
     if public_ip:
         loopback="loopbackTarget=(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '"+str(parsed)+"/32' -ErrorAction SilentlyContinue | Sort-Object RouteMetric | Select-Object -First 1 -ExpandProperty NextHop)"
@@ -36,4 +36,4 @@ def snapshot(windows_script,run,public_ip=None):
     except (OSError,subprocess.SubprocessError):mode='unknown'
     if mode not in {'nat','mirrored','bridged','virtioproxy','none'}:mode='unknown'
     linux_ip=local_address()
-    return {'dockerIp':linux_ip if mode in {'nat','bridged'} else str(address),'windowsIp':str(address),'wslIp':linux_ip,'networkingMode':mode,'routerForwardIp':linux_ip if mode=='bridged' else str(address),'switchHint':value.get('switchHint',''),'loopbackTarget':value.get('loopbackTarget')}
+    return {'dockerIp':linux_ip if mode in {'nat','bridged'} else str(address),'windowsIp':str(address),'wslIp':linux_ip,'networkingMode':mode,'routerForwardIp':linux_ip if mode=='bridged' else str(address),'loopbackTarget':value.get('loopbackTarget')}

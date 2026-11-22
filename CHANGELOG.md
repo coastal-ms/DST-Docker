@@ -1,5 +1,11 @@
 # DST Docker changelog
 
+## [1.1.2]
+
+- List available external switches for Own LAN address and block saving when the selected switch is unavailable.
+- Fix joining password-protected worlds after character creation.
+- Disable the Docker loopback target when Docker shares the Windows LAN address.
+
 ## [1.1.1]
 
 - Restore database backup downloads after Docker image-cache cleanup.

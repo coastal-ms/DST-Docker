@@ -164,7 +164,7 @@ export default function DockerNetworkCard() {
       <button className="btn-primary" disabled={busy || detecting || !state?.services.length || !changed} type="submit">{busy ? 'Applying…' : 'Apply player connections'}</button>
       {message && <p role="status" className="text-success">{message}</p>}
     </form>
-    {loopbackIp && <DockerLoopbackSettings key={loopbackIp} publicIp={loopbackIp} dockerIp={dockerIp} />}
+    {loopbackIp && <DockerLoopbackSettings key={loopbackIp} publicIp={loopbackIp} dockerIp={dockerIp} sharedLan={networkMode === 'mirrored'} />}
     {confirmation && <ConfirmationModal
       title="Apply player access changes?"
       description={`${confirmation.mode === 'public' ? 'Public / External' : 'Private / LAN'} will use ${confirmation.address}. ${confirmation.restart ? 'This will stop the maps, update their connection settings, and restart the game server. Connected players will be disconnected.' : 'The game server is stopped and will remain stopped after these settings are applied.'}`}

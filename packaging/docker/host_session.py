@@ -298,17 +298,19 @@ Write-Output $path
                 current=wsl_loopback.snapshot(windows_script,change['publicIp'])
                 if current.get('multiple') or current.get('target')!=change['expectedTarget']:raise ValueError('The loopback route changed. Refresh and review it before applying.')
                 if current.get('target')==change['target']:return current
+                if change['target'] in current.get('windowsAddresses',[]):
+                    raise ValueError('The loopback target is an address on this Windows PC. Use router NAT loopback or a separate server address.')
                 operation={'id':uuid.uuid4().hex,'phase':'running',**change}
                 write_json(self.directory/'loopback-operation.json',operation)
                 self.busy=True
                 self.phase='applying-loopback';self.message='Approve the Windows permission prompt to change the same-PC loopback target.'
             threading.Thread(target=self.change_loopback,args=(change,operation),daemon=True).start()
             return {**current,'operation':operation}
-        if action in {'network.settings.get','network.settings.set'}:
+        if action in {'network.settings.get','network.settings.set','network.settings.set-bridged'}:
             import wsl_lan
             with self.lock:
                 if self.busy:raise ValueError('Wait for the current host operation to finish.')
-                return wsl_lan.settings(windows_script,self.directory,self.network_info(),request.get('settings') if action.endswith('.set') else None)
+                return wsl_lan.settings(windows_script,self.directory,self.network_info(),request.get('settings') if action!='network.settings.get' else None)
         if action in {'memory.get','memory.set'}:
             import wsl_memory
             if action=='memory.set' and 'memoryGiB' not in request:raise ValueError('Choose a RAM limit or the WSL default.')

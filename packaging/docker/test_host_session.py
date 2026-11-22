@@ -177,6 +177,13 @@ class HostSessionTests(unittest.TestCase):
     def test_unknown_request_cannot_execute_a_command(self):
         with self.assertRaises(ValueError):self.session.request({'action':'exec','command':'arbitrary'})
 
+    def test_bridged_save_action_checks_the_current_switch_list_before_writing(self):
+        request={'action':'network.settings.set-bridged','settings':{'mode':'bridged','switch':'Ethernet'}}
+        with patch.object(host,'windows_script',return_value='["LAN switch"]') as windows:
+            with self.assertRaisesRegex(ValueError,'unavailable'):self.session.request(request)
+        windows.assert_called_once()
+        self.assertFalse((self.session.directory/'lan-settings.json').exists())
+
     def test_loopback_read_never_starts_a_route_change(self):
         with patch.object(host,'windows_script',return_value='{"publicIp":"8.8.4.4","target":"192.168.23.219","multiple":false}'),patch.object(host.threading,'Thread') as thread:
             value=self.session.request({'action':'loopback.get','publicIp':'8.8.4.4'})
@@ -193,6 +200,14 @@ class HostSessionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'changed'):self.session.request(request)
             self.session.request({**request,'expectedTarget':'192.168.23.218','target':'192.168.23.218'})
         thread.assert_not_called()
+
+    def test_loopback_rejects_any_address_owned_by_windows_before_elevation(self):
+        request={'action':'loopback.set','publicIp':'8.8.4.4','target':'192.168.23.106','expectedTarget':None,'confirmation':'CHANGE LOOPBACK TARGET'}
+        result={'publicIp':'8.8.4.4','target':None,'multiple':False,'windowsAddresses':['192.168.23.23','192.168.23.106']}
+        with patch.object(host,'windows_script',return_value=json.dumps(result)),patch.object(host.threading,'Thread') as thread:
+            with self.assertRaisesRegex(ValueError,'address on this Windows PC'):self.session.request(request)
+        thread.assert_not_called()
+        self.assertFalse((self.session.directory/'loopback-operation.json').exists())
 
     def test_failed_loopback_elevation_records_error_without_restarting_games(self):
         operation={'id':'route','phase':'running'}
