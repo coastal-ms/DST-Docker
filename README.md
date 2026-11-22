@@ -1,14 +1,16 @@
-# DST for Docker
+# DST Docker
 
-Run Dune Server Tool from a browser, with the server and management services inside Linux or Windows WSL.
+Host and manage a Dune: Awakening dedicated server from your browser on Linux or Windows WSL. Check battlegroup health, manage map resources, and back up your world through the portal.
 
-DST Docker is a standalone browser application for hosting and managing Dune Awakening servers on Linux and Windows WSL. It has its own releases and installer, separate from the Windows Dune Server Tool application.
+[Install](#install-dst-docker) · [Open the portal](#open-the-portal) · [Network ports](#network-ports) · [Maps & memory](#control-server-resources) · [Deep Desert Atlas](#deep-desert-atlas) · [Upgrade](#upgrade)
 
-## Install DST Docker 1.1.0
+![DST Docker Server Overview showing a running battlegroup and four ready game maps](docs/img/docker/server-overview.webp)
+
+## Install DST Docker
 
 Windows users prepare Ubuntu below, then run the Linux installation command. Native Linux users can go directly to **Linux or WSL: install**.
 
-## Windows: prepare WSL
+### Windows: prepare WSL
 
 Open PowerShell as administrator and run:
 
@@ -20,7 +22,7 @@ Restart Windows if prompted. Open Ubuntu and finish creating your Linux user acc
 
 If Ubuntu is already installed, open it and continue. See Microsoft's [WSL installation guide](https://learn.microsoft.com/windows/wsl/install) for other configurations.
 
-## Linux or WSL: install
+### Linux or WSL: install
 
 You need an x86_64 Linux environment and a Funcom self-host service token. The installer prepares missing prerequisites on supported Ubuntu/Debian systems, including Docker Engine and Compose. Docker runs inside Linux or WSL; Docker Desktop is not required.
 
@@ -28,7 +30,7 @@ Run the commands below in **Ubuntu or your Linux terminal**, where the prompt lo
 
 These Ubuntu/Debian commands require an account with `sudo` access. If your prompt shows you are logged in as `root`, omit `sudo` from the package commands.
 
-### Install
+#### Install
 
 This repository is public. No GitHub account or sign-in is required. On fresh Ubuntu/Debian, prepare the download tools first:
 
@@ -50,11 +52,11 @@ For unattended setup, add `--restart-wsl` to permit the restart explicitly. With
 
 ## Open the portal
 
-On a fresh installation, creating your Owner account opens the setup wizard. Use **Next** and **Back** to move through Welcome, Installation check, Server identity, Funcom token, Ports and Review. After reviewing your settings and the official game files finish downloading, select **Prepare server**. Setup prepares the database, connections and initial maps automatically, then opens Finish. The dashboard and management navigation stay hidden until setup is complete. Select **Open management portal** when your world is ready; start the battlegroup from the portal when you choose. If preparation stops, the wizard keeps your saved progress and shows the error so you can continue.
+On a fresh installation, creating your Owner account opens the setup wizard. Choose **Private / LAN** or **Public / External** under **Server identity**. DST fills in the detected connection address and leaves it editable. Enter your Funcom token and review the settings. When the game files finish downloading, select **Prepare server**. DST prepares the database, connections and initial maps. Select **Open management portal** when setup finishes, then start the battlegroup from the portal. If preparation stops, the wizard keeps your progress and shows the error so you can continue.
 
-Windows WSL installations create a **DST Docker** desktop icon. Open it to start the console, resume a battlegroup stopped by the host shutdown action, and open your browser. Its visible hosting window keeps WSL running; keep that window open while hosting. Use **Commands â†’ Shut down host** to stop the battlegroup first, wait for game processes to exit, stop DST containers cleanly, then shut down WSL. The action requires an Owner account and confirmation, and refuses to shut down while another WSL distribution, unrelated Docker workload or maintenance operation is running. A failed stop leaves WSL running and reports the failure in the hosting window.
+Windows WSL installations create a **DST Docker** desktop icon. Open it to start the console, resume a battlegroup stopped by the host shutdown action, and open your browser. Its visible hosting window keeps WSL running; keep that window open while hosting. Use **Commands → Shut down host** to stop the battlegroup first, wait for game processes to exit, stop DST containers cleanly, then shut down WSL. The action requires an Owner account and confirmation, and refuses to shut down while another WSL distribution, unrelated Docker workload or maintenance operation is running. A failed stop leaves WSL running and reports the failure in the hosting window.
 
-Use **Commands â†’ Create desktop shortcut** to recreate the icon, or run `sh bin/dst-docker shortcut` in the installation folder (`~/.local/share/dst-docker/current` by default). `sh bin/dst-docker desktop` starts the same foreground hosting session from Ubuntu. Opening the icon again reopens the console through its existing hosting window, including after a partial shutdown; an active shutdown must finish first. A saved world restart is cleared after startup completes, and a later deliberate stop takes precedence. The installer uses your current Windows Desktop location, including a relocated Desktop. It preserves an existing shortcut belonging to a different installation. Native Linux installations continue to use `sh bin/dst-docker up`; WSL-specific host controls require the installed Windows hosting session.
+Use **Commands → Create desktop shortcut** to recreate the icon, or run `sh bin/dst-docker shortcut` in the installation folder (`~/.local/share/dst-docker/current` by default). `sh bin/dst-docker desktop` starts the same foreground hosting session from Ubuntu. Opening the icon again reopens the console through its existing hosting window, including after a partial shutdown; an active shutdown must finish first. A saved world restart is cleared after startup completes, and a later deliberate stop takes precedence. The installer uses your current Windows Desktop location, including a relocated Desktop. It preserves an existing shortcut belonging to a different installation. Native Linux installations continue to use `sh bin/dst-docker up`; WSL-specific host controls require the installed Windows hosting session.
 
 The console and management services restart when Docker starts, including when you reopen a systemd-enabled WSL distribution. A battlegroup saved as running resumes through the normal startup checks; a deliberately stopped battlegroup or map stays stopped. An interrupted maintenance operation still requires recovery before startup. Intentionally stopping the management containers keeps them stopped until you start DST again.
 
@@ -72,13 +74,13 @@ sh bin/dst-docker url
 
 For remote browser access without forwarding a router port, open **Settings > Remote access with Tailscale**. Choose **Private** for devices on your Tailscale network or **Public HTTPS** for Tailscale Funnel, then select **Connect** and follow the Tailscale sign-in link. If Tailscale asks you to enable HTTPS or Funnel, complete that setup and select Connect again. DST shows the resulting address and QR code; users sign in with their DST portal accounts. The Live Map QR uses this address too. Tailscale runs in a separate userspace container, retains its identity across restarts, and can be turned off without restarting game maps. Private access requires Tailscale on the connecting device; public Funnel access does not.
 
-The console uses **HTTP by default**; HTTPS is optional. Open **Settings > Browser HTTPS** to prepare HTTPS while keeping HTTP available, download this installationâ€™s public certificate, and follow the device trust instructions before selecting **Enable HTTPS**. Then use **Open HTTPS portal**. Only Owners can change this setup or download its public certificate. The certificateâ€™s private key stays on the host. **Return to HTTP** preserves certificate data for later reuse. Installing Linux `ca-certificates` enables trusted downloads; it does not enable portal HTTPS or install trust on browser devices.
+The console uses **HTTP by default**; HTTPS is optional. Open **Settings > Browser HTTPS** to prepare HTTPS while keeping HTTP available, download this installation’s public certificate, and follow the device trust instructions before selecting **Enable HTTPS**. Then use **Open HTTPS portal**. Only Owners can change this setup or download its public certificate. The certificate’s private key stays on the host. **Return to HTTP** preserves certificate data for later reuse. Installing Linux `ca-certificates` enables trusted downloads; it does not enable portal HTTPS or install trust on browser devices.
 
 For command-line setup, enable HTTPS for your host address, run `sh bin/dst-docker https HOST_IPV4 [PORT]` and follow the printed certificate instructions. To return to HTTP, run `sh bin/dst-docker http [PORT]`. Omitting the port preserves your current console port. Switching transport restarts only the console and its optional proxy; saved accounts, world data and map processes are preserved. The HTTPS certificate data is retained so you can enable it again later.
 
-Owners can manage browser accounts in **Settings â†’ Browser Portal accounts**. Docker account roles are Owner, Admin and character-linked Player. New accounts must replace their initial password at first sign-in. Owners can reset passwords, revoke sessions, change roles, disable accounts and delete accounts. The last enabled Owner is protected, and account sign-in stays enabled.
+Owners can manage browser accounts in **Settings → Browser Portal accounts**. Docker account roles are Owner, Admin and character-linked Player. New accounts must replace their initial password at first sign-in. Owners can reset passwords, revoke sessions, change roles, disable accounts and delete accounts. The last enabled Owner is protected, and account sign-in stays enabled.
 
-If no Owner can sign in on Windows, open the **DST Docker** desktop icon and choose **2 Â· Create Owner account / recover password** in the hosting window. If no Owner exists yet, this option displays the current Owner-creation link, so the original installer window is not needed. Otherwise, the menu lists Owner accounts, asks for confirmation and shows a one-time password. **3 Â· Open management terminal** opens a command prompt in the correct installation folder.
+If no Owner can sign in on Windows, open the **DST Docker** desktop icon and choose **2 · Create Owner account / recover password** in the hosting window. If no Owner exists yet, this option displays the current Owner-creation link, so the original installer window is not needed. Otherwise, the menu lists Owner accounts, asks for confirmation and shows a one-time password. **3 · Open management terminal** opens a command prompt in the correct installation folder.
 
 On native Linux, open a terminal and run:
 
@@ -104,7 +106,9 @@ If YouTube or another video freezes while the portal is visible in Chrome despit
 
 ## Network ports
 
-Game connections and browser access use separate ports. Check **Setup Wizard > Your world > Game-port base** for your configured base, called `B` below; the default is **7777**. Changing the console port does not change the game ports. In **Settings > Player connections**, choose **Private / LAN** or **Public / External** and apply the corresponding IPv4 address. Public access detects your public IPv4 automatically. The separate Docker IP is the router forwarding target; it stays visible when the advertised public address changes. Applying uses TCP **31982** and UDP **7777-7810**, updates the advertised addresses and restarts a running world. Existing custom-port installations keep their current ports until this change is applied.
+Game connections and browser access use separate ports. The game-port base, called `B` below, defaults to **7777**. In **Settings → IP configurations**, choose **Private / LAN** or **Public / External** under **Player access**. DST shows the router forwarding target separately from the public address. **Apply player connections** uses TCP **31982** and UDP **7777–7810**, updates the advertised address and restarts a running world. Existing custom-port installations keep their current ports until you apply this change.
+
+On a Windows host, **Same-PC public-IP loopback** shows where Windows sends connections to the selected public IPv4. It is available in either player access mode. If Docker shares the Windows LAN address, public-IP connections from that PC rely on the router supporting NAT loopback. Router port forwarding controls connections from outside the LAN.
 
 | Purpose | Protocol | Default / configured port | Who needs access |
 | --- | --- | --- | --- |
@@ -135,7 +139,9 @@ Configuration, databases, game saves, and official packages persist in Docker vo
 
 ## Control server resources
 
-Open **Settings â†’ Docker resources** to review the RAM and CPUs available to the Linux host, choose a server RAM budget and game CPU budget, and set RAM/CPU limits for each map instance. The familiar map names are searchable.
+![Maps & memory showing host RAM, map budgets, and per-map status and resource limits](docs/img/docker/maps-memory.webp)
+
+Open **Settings → Docker resources** to review the RAM and CPUs available to the Linux host, choose a server RAM budget and game CPU budget, and set RAM/CPU limits for each map instance. The familiar map names are searchable.
 
 RAM and CPU allocation changes apply while maps are running. DST verifies each container limit, persists the allocations and checks the combined map budgets before startup or demand scaling. The RAM budget reserves 2 GiB for supporting services, with another 2 GiB left for the host. These controls manage this installation's game allocations within the Linux host's limits; they do not resize WSL itself.
 
@@ -143,30 +149,38 @@ The **Maps & memory** view shows map status, RAM usage and limits, swap allowanc
 
 Optional maps offer **Dynamic**, **Always on**, **Overmap active** and **Disabled** modes. Overmap active keeps a map warm while players are on Overmap, then waits five minutes after Overmap empties before releasing its warm floor, provided the map is empty. Unknown occupancy prevents automatic release. Disabled blocks new starts; it does not forcibly disconnect players on an already running map. Core maps retain their normal startup policy. Existing detailed map tools remain available under **Additional map tools**.
 
-**Server Settings â†’ Map settings** also opens the targeted editor. Choose Global defaults, Hagga Basin or Deep Desert, then select Custom Settings, Game or Engine and search or filter the fields. Overmap and story maps retain resource controls. **Save map settings** saves directly and leaves a pending-restart notice. It does not stop a running map. Each settings file inherits the global file until you save a map-specific copy; that copy is independent of later global edits. **Use global settings** removes the override with a backup and restores inheritance at the next map start. Custom settings saves retain Custom difficulty. Complex arrays and startup console variables retain their specialized global editors. Matching player-file requirements still apply.
+**Server Settings → Map settings** also opens the targeted editor. Choose Global defaults, Hagga Basin or Deep Desert, then select Custom Settings, Game or Engine and search or filter the fields. Overmap and story maps retain resource controls. **Save map settings** saves directly and leaves a pending-restart notice. It does not stop a running map. Each settings file inherits the global file until you save a map-specific copy; that copy is independent of later global edits. **Use global settings** removes the override with a backup and restores inheritance at the next map start. Custom settings saves retain Custom difficulty. Complex arrays and startup console variables retain their specialized global editors. Matching player-file requirements still apply.
 
 Per-map settings require the updated native game adapter. Existing adapters must be updated with the world stopped before they can accept scoped saves; older adapters reject these saves rather than applying them globally. Saved overrides live under the owned shared UserSettings directory and remain available across map recreation and updates.
 
+## Deep Desert Atlas
+
+Open **DD Atlas** and choose a world seed to browse reference locations for caves, wrecks, testing stations, and spice fields.
+
+![Deep Desert Atlas showing a selected world seed, its map locations, and the point-of-interest legend](docs/img/docker/deep-desert-atlas.webp)
+
 ## Gameplay and compatibility
 
-Optional in-game commands are configured on **Players â†’ Community tools**. They are off by default, with separate command and channel selections. Messages are consumed once; DST does not save a chat history. Cooldown timestamps prevent repeated use, and switching the listener off removes its queue.
+Optional in-game commands are configured on **Players → Community tools**. They are off by default, with separate command and channel selections. Messages are consumed once; DST does not save a chat history. Cooldown timestamps prevent repeated use, and switching the listener off removes its queue.
 
-Player, base, vehicle and server tools use native Linux database and messaging connections. Server operations use container lifecycle and resource controls. Player compatibility settings provide complete manual INI instructions. Tank support is selected separately under Server Settings â†’ Management & recovery for compatible game builds.
+Player, base, vehicle and server tools use native Linux database and messaging connections. Server operations use container lifecycle and resource controls. Player compatibility settings provide complete manual INI instructions. Tank support is selected separately under Server Settings → Management & recovery for compatible game builds.
 
 See [Hosting and maintenance](packaging/docker/README.md) for storage, updates, backups and optional HTTPS.
 
 ## Upgrade
 
-Open **Settings â†’ DST Docker updates** to compare your installed version with the latest stable Docker release. Select **Check now** to force a fresh check. Stop the battlegroup in **Commands**, then select **Update DST Docker**. Keep the browser tab open while DST downloads and builds the release; it reconnects after the portal restarts and confirms the installed version. Select **Reload portal** to load the updated interface. Game-server updates remain separate under **Server updates**.
+Open **Settings → DST Docker updates** to compare your installed version with the latest stable Docker release. Select **Check now** to force a fresh check. Stop the battlegroup in **Commands**, then select **Update DST Docker**. Keep the browser tab open while DST downloads and builds the release; it reconnects after the portal restarts and confirms the installed version. Select **Reload portal** to load the updated interface. Game-server updates remain separate under **Server updates**.
 
 For an installation made before browser updates were added, run the installation command again once with the same installation path. This enables the registered `dst-docker-update-<installation-id>.service` on systemd hosts, including WSL prepared by the installer. Checks are cached for six hours; **Check now** bypasses that cache. If an update fails, the card reports failure; inspect `portal-update/update.log` under the installation path and retry. An interrupted update retains the maintenance lock until the update service restarts and releases it.
 
 You can also run the installation command again to upgrade. Keep the same installation path; accounts, server data, console port, resource settings and optional HTTPS certificates are retained. Use `--prefix` again if you originally chose a custom path. Hosts without systemd use this terminal method.
 
-[Release notes](CHANGELOG.md) Â· [Downloads](https://github.com/coastal-ms/DST-Docker/releases)
-
-Created by Coastal. Licensed under [Apache 2.0](LICENSE).
-
 ## Storage capacity
 
 WSL storage grows within its virtual disk limit and the free space on the Windows drive. See [WSL disk capacity and expansion](docs/wsl-storage.md) if additional capacity is needed.
+
+---
+
+[Release notes](CHANGELOG.md) · [Downloads](https://github.com/coastal-ms/DST-Docker/releases)
+
+Created by Coastal. Licensed under [Apache 2.0](LICENSE).
