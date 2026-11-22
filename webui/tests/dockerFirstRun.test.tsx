@@ -208,6 +208,46 @@ it('shows and fills the detected Docker IP for a fresh Private / LAN world', asy
   const configured = vi.mocked(api).mock.calls.find(([, init]) => init?.method === 'POST' && JSON.parse(init.body as string).action === 'world.configure')
   expect(JSON.parse(configured![1]!.body as string).profile.address).toBe('172.25.199.100')
 })
+it('fills the detected public IPv4 and lets the owner use a hostname instead', async () => {
+  const actions = mockWorld(fresh(), undefined, '172.25.199.100')
+  const setupApi = vi.mocked(api).getMockImplementation()!
+  vi.mocked(api).mockImplementation(async (path, init) => path === '/api/docker/network/public-ip'
+    ? { publicIp: '8.8.4.4' } : setupApi(path, init))
+  renderGate()
+  const user = userEvent.setup()
+  await worldForm(user)
+  const address = screen.getByLabelText('Server address')
+  const access = screen.getByLabelText('Player access')
+  await user.clear(address)
+  await user.type(address, '192.168.1.50')
+  await user.selectOptions(access, 'public')
+  await waitFor(() => expect(address).toHaveValue('8.8.4.4'))
+  await user.clear(address)
+  await user.type(address, 'world.example.test')
+  expect(address).toHaveValue('world.example.test')
+  await user.selectOptions(access, 'private')
+  expect(address).toHaveValue('192.168.1.50')
+  await user.selectOptions(access, 'public')
+  expect(address).toHaveValue('world.example.test')
+  await user.click(screen.getByRole('button', { name: 'Next', exact: true }))
+  expect(screen.getByRole('heading', { name: 'Connect to Funcom' })).toBeInTheDocument()
+  expect(actions).toEqual([])
+})
+it('keeps a manually entered public address when detection finishes later', async () => {
+  mockWorld()
+  const setupApi = vi.mocked(api).getMockImplementation()!
+  let finish!: (value: { publicIp: string }) => void
+  vi.mocked(api).mockImplementation((path, init) => path === '/api/docker/network/public-ip'
+    ? new Promise(resolve => { finish = resolve }) : setupApi(path, init))
+  renderGate()
+  const user = userEvent.setup()
+  await worldForm(user)
+  await user.selectOptions(screen.getByLabelText('Player access'), 'public')
+  const address = screen.getByLabelText('Server address')
+  await user.type(address, 'world.example.test')
+  await act(async () => { finish({ publicIp: '8.8.4.4' }) })
+  expect(address).toHaveValue('world.example.test')
+})
 it('preserves an address typed before detection finishes', async () => {
   mockWorld()
   const setupApi = vi.mocked(api).getMockImplementation()!

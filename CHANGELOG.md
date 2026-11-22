@@ -1,5 +1,11 @@
 # DST Docker changelog
 
+## [1.1.3]
+
+- Let Admin accounts sign in to the management portal and reach the tools their role allows.
+- Show the existing Windows public-IP loopback route even when player access is set to Private / LAN.
+- Fill in the detected public IPv4 address during first-time setup and let the user edit it.
+
 ## [1.1.2]
 
 - List available external switches for Own LAN address and block saving when the selected switch is unavailable.
